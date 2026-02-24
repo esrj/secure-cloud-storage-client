@@ -1,0 +1,4 @@
+keys:
+  path: user3.keys
+blockchain:
+  walletKeyFilename: wallet3.key

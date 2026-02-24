@@ -1,0 +1,4 @@
+keys:
+  path: user2.keys
+blockchain:
+  walletKeyFilename: wallet2.key

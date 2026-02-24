@@ -1,0 +1,10 @@
+node_modules
+dist
+out
+.DS_Store
+*.log*
+*.key*
+downloads
+.scannerwork
+sonar-project.properties
+config/local.yaml
