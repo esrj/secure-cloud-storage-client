@@ -1,0 +1,5794 @@
+"use strict";
+var __create = Object.create;
+var __defProp = Object.defineProperty;
+var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
+var __getOwnPropNames = Object.getOwnPropertyNames;
+var __getProtoOf = Object.getPrototypeOf;
+var __hasOwnProp = Object.prototype.hasOwnProperty;
+var __copyProps = (to, from, except, desc) => {
+  if (from && typeof from === "object" || typeof from === "function") {
+    for (let key of __getOwnPropNames(from))
+      if (!__hasOwnProp.call(to, key) && key !== except)
+        __defProp(to, key, { get: () => from[key], enumerable: !(desc = __getOwnPropDesc(from, key)) || desc.enumerable });
+  }
+  return to;
+};
+var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__getProtoOf(mod)) : {}, __copyProps(
+  // If the importer is in node compatibility mode or this is not an ESM
+  // file that has been converted to a CommonJS file using a Babel-
+  // compatible transform (i.e. "__esModule" has not been set), then set
+  // "default" to the CommonJS "module.exports" for node compatibility.
+  isNodeMode || !mod || !mod.__esModule ? __defProp(target, "default", { value: mod, enumerable: true }) : target,
+  mod
+));
+const electron = require("electron");
+const path$1 = require("node:path");
+const utils = require("@electron-toolkit/utils");
+const path = require("path");
+const io = require("socket.io-client");
+const winston = require("winston");
+const fs = require("node:fs");
+const yaml = require("js-yaml");
+const promises = require("node:fs/promises");
+const FormData = require("form-data");
+const ethers = require("ethers");
+const basicFtp = require("basic-ftp");
+const node_stream = require("node:stream");
+const cq = require("concurrent-queue");
+const crypto = require("crypto");
+const stream = require("stream");
+const crypto$1 = require("node:crypto");
+const ssh2 = require("ssh2");
+const mcl = require("mcl-wasm");
+const assert = require("node:assert");
+const Database = require("better-sqlite3");
+const sss = require("shamirs-secret-sharing");
+const fs$1 = require("fs");
+function _interopNamespaceDefault(e) {
+  const n = Object.create(null, { [Symbol.toStringTag]: { value: "Module" } });
+  if (e) {
+    for (const k in e) {
+      if (k !== "default") {
+        const d = Object.getOwnPropertyDescriptor(e, k);
+        Object.defineProperty(n, k, d.get ? d : {
+          enumerable: true,
+          get: () => e[k]
+        });
+      }
+    }
+  }
+  n.default = e;
+  return Object.freeze(n);
+}
+const mcl__namespace = /* @__PURE__ */ _interopNamespaceDefault(mcl);
+const icon = path.join(__dirname, "../../resources/icon.png");
+const Transport = require("winston-transport");
+const { BrowserWindow } = require("electron");
+class ScreenTransport extends Transport {
+  constructor(opts) {
+    super(opts);
+  }
+  log(info, callback) {
+    BrowserWindow.getAllWindows()[0]?.webContents.send("log", info);
+    callback();
+  }
+}
+const logger = winston.createLogger({
+  level: "info",
+  format: winston.format.combine(winston.format.errors({ stack: true }), winston.format.timestamp(), winston.format.json()),
+  // defaultMeta: { service: 'user-service' },
+  transports: process.env.NODE_ENV === "test" ? [] : [
+    //
+    // - Write all logs with importance level of `error` or less to `error.log`
+    // - Write all logs with importance level of `info` or less to `combined.log`
+    //
+    new winston.transports.File({
+      filename: path$1.join(electron.app.getPath("logs"), "error.log"),
+      level: "error"
+    }),
+    new winston.transports.File({
+      filename: path$1.join(electron.app.getPath("logs"), "combined.log"),
+      options: { flags: "w" }
+    }),
+    new ScreenTransport()
+  ]
+});
+if (process.env.NODE_ENV !== "production") {
+  logger.add(
+    new winston.transports.Console({
+      format: winston.format.simple(),
+      level: "debug"
+    })
+  );
+}
+logger.debug(`app path: ${electron.app.getAppPath()}`);
+logger.debug(`exe path: ${electron.app.getPath("exe")}`);
+logger.debug(`userData path: ${electron.app.getPath("userData")}`);
+logger.debug(`temp path: ${electron.app.getPath("temp")}`);
+logger.debug(`execute path: ${process.execPath}`);
+logger.debug(`resource path: ${process.resourcesPath}`);
+logger.debug(`cwd path: ${process.cwd()}`);
+logger.debug(`dirname: ${__dirname}`);
+logger.debug(`log path: ${electron.app.getPath("logs")}`);
+process.env["NODE_CONFIG_DIR"] = `${electron.app.getAppPath()}/config${path$1.delimiter}${path$1.join(electron.app.getPath("userData"), "config")}`;
+const config = require("config");
+class GlobalValueManager {
+  /**
+   * Initialize global values from config file
+   */
+  constructor() {
+    try {
+      this.serverConfig = config.get("server");
+      this.keysConfig = config.get("keys");
+      this.userConfig = config.get("user");
+      this.requestConfig = config.get("request");
+      this.userListConfig = config.get("userList");
+      this.tempPath = electron.app.getPath("temp");
+      this.keyPath = path$1.resolve(electron.app.getPath("userData"), config.get("keys.path"));
+      this.blockchain = new Object();
+      this.blockchain.abi = config.get("blockchain.abi");
+      this.blockchain.jsonRpcUrl = config.get("blockchain.jsonRpcUrl");
+      this.blockchain.contractAddr = config.get("blockchain.contractAddr");
+      this.blockchain.walletKeyPath = path$1.resolve(
+        electron.app.getPath("userData"),
+        config.get("blockchain.walletKeyFilename")
+      );
+      this.blockchain.blockRangeLimit = config.get("blockchain.blockRangeLimit");
+      this.blockchain.enabled = config.get("blockchain.enabled");
+      this.trustedAuthority = {};
+      this.trustedAuthority.url = `https://${config.get("trustedAuthority.url")}`;
+      this.configFilePath = path$1.join(electron.app.getPath("userData"), "config", "local.yaml");
+      if (!fs.existsSync(this.configFilePath)) {
+        this.updateConfigFile("blockchain", {
+          jsonRpcUrl: this.blockchain.jsonRpcUrl,
+          contractAddr: this.blockchain.contractAddr
+        });
+        this.updateConfigFile("server", {
+          protocol: this.serverConfig.protocol,
+          host: this.serverConfig.host
+        });
+      }
+    } catch (error) {
+      logger.error(`Failed to load config: ${error}`);
+    }
+    this.mainWindow = null;
+    this.curFolderId = null;
+    this._userInfo = {};
+    this._loggedIn = false;
+    logger.info("Global value manager initialized");
+    logger.debug(`userData path: ${electron.app.getPath("userData")}`);
+  }
+  get httpsUrl() {
+    return `https://${this.serverConfig.host}:${this.serverConfig.port.https}`;
+  }
+  get userDataPath() {
+    return electron.app.getPath("userData");
+  }
+  get userId() {
+    if (this.userInfo) {
+      return this.userInfo.userId;
+    }
+    return null;
+  }
+  get dbPath() {
+    return path$1.resolve(this.userDataPath, "database.db");
+  }
+  set loggedIn(loggedIn) {
+    this._loggedIn = loggedIn;
+    this.mainWindow?.webContents.send("login-status", { loggedIn });
+  }
+  get loggedIn() {
+    return this._loggedIn;
+  }
+  set userInfo(userInfo) {
+    this._userInfo = userInfo;
+    this.mainWindow?.webContents.send("user-info", userInfo);
+  }
+  get userInfo() {
+    return this._userInfo;
+  }
+  // get keyPath() {
+  //   return resolve(app.getPath('userData'), 'user.keys')
+  // }
+  reLogin() {
+    this.loginManager?.login();
+  }
+  /**
+   * Update the config file with value for a certain field
+   * @param {string} field
+   * @param {*} value
+   */
+  updateConfigFile(field, value) {
+    try {
+      let currentStr = "{}";
+      try {
+        currentStr = fs.readFileSync(this.configFilePath, "utf-8");
+      } catch (error) {
+        if (error.code === "ENOENT") {
+          logger.info("Creating config file at " + this.configFilePath);
+          fs.mkdirSync(path$1.dirname(this.configFilePath), { recursive: true });
+        } else {
+          throw error;
+        }
+      }
+      const current = yaml.load(currentStr);
+      current[field] = value;
+      fs.writeFileSync(this.configFilePath, yaml.dump(current));
+    } catch (error) {
+      logger.error(`Failed to update config: ${error}`);
+    }
+  }
+  /**
+   * Update user info to config. Actually not called anymore.
+   * @param {*} user
+   */
+  updateUser(user) {
+    try {
+      this.updateConfigFile("user", user);
+      this.userConfig = config.get("user");
+      this.mainWindow?.webContents.send("notice", "Success to update user info", "success");
+    } catch (error) {
+      logger.error(`Failed to update user: ${error}`);
+      this.mainWindow?.webContents.send("notice", "Failed to update user info", "error");
+    }
+  }
+  /**
+   * Update white list and black list to config
+   * @param {*} users
+   */
+  updateUserList(users) {
+    try {
+      this.updateConfigFile("userList", users);
+      this.userListConfig = users;
+      console.log(this.userListConfig);
+    } catch (error) {
+      logger.error(`Failed to update user list: ${error}`);
+    }
+  }
+  /**
+   * Update the number of seen request/response
+   * @param {*} req
+   */
+  updateRequest(req) {
+    try {
+      this.updateConfigFile("request", req);
+      this.requestConfig = req;
+    } catch (error) {
+      logger.error(`Failed to update request: ${error}`);
+    }
+  }
+  /**
+   * Show a toast on user interface
+   * @param {string} message
+   * @param {'success'|'error'|'normal'} level
+   * @example GlobalValueManager.sendNotice(`Failed to upload file when requesting to upload: ${response.errorMsg}`, 'error')
+   */
+  sendNotice(message, level) {
+    this.mainWindow?.webContents.send("notice", message, level);
+  }
+}
+const GlobalValueManager$1 = new GlobalValueManager();
+logger.info(`Connecting to server...: ${GlobalValueManager$1.httpsUrl}`);
+const socket = io(GlobalValueManager$1.httpsUrl, {
+  transports: ["polling"],
+  // ✅ 先固定 polling
+  upgrade: false,
+  // ✅ 不要升級 websocket
+  rejectUnauthorized: false
+  // 你用 self-signed 就留著
+});
+socket.on("connect", () => {
+  logger.info(`socket.id=${socket.id}`);
+});
+socket.on("connect_error", (e) => {
+  logger.error(`connect_error=${e.message}`);
+});
+socket.on("message", (message) => {
+  GlobalValueManager$1.sendNotice(message, "normal");
+});
+socket.on("connect", () => {
+  logger.info("connected to server");
+});
+socket.on("connect_error", (error) => {
+  if (socket.active) {
+    logger.debug(error.message);
+    logger.info("Can't connect to server. Trying to reconnect...");
+  } else {
+    logger.error(`connection failed with following error: ${error.message}`);
+  }
+});
+socket.io.on("reconnect_failed", () => {
+  logger.error("reconnection failed. The server might be down.");
+});
+socket.io.on("reconnect", () => {
+  logger.info("server reconnected");
+  GlobalValueManager$1.sendNotice("Server reconnected", "success");
+  GlobalValueManager$1.reLogin();
+});
+socket.io.on("close", () => {
+  logger.info("connection closed");
+  GlobalValueManager$1.loggedIn = false;
+  GlobalValueManager$1.sendNotice("Server connection closed", "error");
+});
+function sendMessage(message) {
+  socket.emit("message", message);
+}
+var libecc_module = async function(libecc_module2 = {}) {
+  var Module = libecc_module2;
+  var readyPromiseResolve;
+  Module["ready"] = new Promise((resolve, reject) => {
+    readyPromiseResolve = resolve;
+  });
+  var ENVIRONMENT_IS_NODE = typeof process == "object";
+  function ready() {
+    readyPromiseResolve(Module);
+  }
+  function randomValueSetup() {
+    if (Module.getRandomValue === void 0) {
+      try {
+        var window_ = "object" === typeof window ? window : self;
+        var crypto_ = typeof window_.crypto !== "undefined" ? window_.crypto : window_.msCrypto;
+        var randomValuesStandard = function() {
+          var buf = new Uint32Array(1);
+          crypto_.getRandomValues(buf);
+          return buf[0] >>> 0;
+        };
+        randomValuesStandard();
+        Module.getRandomValue = randomValuesStandard;
+      } catch (e) {
+        try {
+          import("crypto").then((crypto2) => {
+            var randomValueNodeJS = function() {
+              var buf = crypto2["randomBytes"](4);
+              return (buf[0] << 24 | buf[1] << 16 | buf[2] << 8 | buf[3]) >>> 0;
+            };
+            randomValueNodeJS();
+            Module.getRandomValue = randomValueNodeJS;
+          });
+        } catch (e2) {
+          throw "No secure random number generator found";
+        }
+      }
+    }
+  }
+  randomValueSetup();
+  function abort(what) {
+    throw what;
+  }
+  for (var base64ReverseLookup = new Uint8Array(123), i = 25; i >= 0; --i) {
+    base64ReverseLookup[48 + i] = 52 + i;
+    base64ReverseLookup[65 + i] = i;
+    base64ReverseLookup[97 + i] = 26 + i;
+  }
+  base64ReverseLookup[43] = 62;
+  base64ReverseLookup[47] = 63;
+  function base64Decode(b64) {
+    if (typeof ENVIRONMENT_IS_NODE != "undefined" && ENVIRONMENT_IS_NODE) {
+      var buf = Buffer.from(b64, "base64");
+      return new Uint8Array(buf.buffer, buf.byteOffset, buf.byteLength);
+    }
+    var b1, b2, i2 = 0, j = 0, bLength = b64.length, output = new Uint8Array((bLength * 3 >> 2) - (b64[bLength - 2] == "=") - (b64[bLength - 1] == "="));
+    for (; i2 < bLength; i2 += 4, j += 3) {
+      b1 = base64ReverseLookup[b64.charCodeAt(i2 + 1)];
+      b2 = base64ReverseLookup[b64.charCodeAt(i2 + 2)];
+      output[j] = base64ReverseLookup[b64.charCodeAt(i2)] << 2 | b1 >> 4;
+      output[j + 1] = b1 << 4 | b2 >> 2;
+      output[j + 2] = b2 << 6 | base64ReverseLookup[b64.charCodeAt(i2 + 3)];
+    }
+    return output;
+  }
+  Module["wasm"] = base64Decode("AGFzbQEAAAABggMmYAJ/fwBgA39/fwBgAn9/AX9gBX9/f39/AGAEf39/fwBgAX8Bf2ADf39/AX9gAX8AYAd/f39/f39/AGAEf39/fwF/YAZ/f39/f38AYAN/f34AYAV/f39/fwF/YAZ/f39/f38Bf2AHf39/f39/fwF/YAAAYAN/f34Bf2AIf39/f39/f38AYAl/f39/f39/f38AYAl/f39/f39/f38Bf2AEf35/fwF/YAh/f39/f39/fwF/YA9/f39/f39/f39/f39/f38AYAx/f39/f39/f39/f38Bf2AFf39+f38AYAZ/f35/f38Bf2AEf39+fwF/YA1/f39/f39/f39/f39/AGAOf39/f39/f39/f39/f38Bf2AEf39/fgBgC39/f39/f39/f39/AGAGf39/fn9/AGAFf39+f38Bf2AOf39/f39/f39/f39/f38AYAZ/f35/fn8Bf2ASf39/f39/f39/f39/f39/f39/AGAKf39/f39/f39/fwBgCn9/f39/f39/f38BfwIZBAFhAWEABAFhAWIADwFhAWMABQFhAWQABgP1A/MDAAEGAQEBAQsDAAEAAgYAAQMAAQEAAQEGAAAHAAsBAQYQAQEACwACBgYBAwcBAQsCAQEACwQAAAUBBwIABwABAQACBAECBwEAAQAHAQQAAQAADwUCAwECCQcKAQEABgAAAAEAAgcAAAAAAQEECQQBAAEBAwEBAAoBAQEBAAEAAAAABQoSAQcFCQABAwAAAQEDBAQABQAAAQAAAAcBBB0GBAQABQABAAEDCAMDCQEEAwEMDQ4DDQ0AAAcAAQYFAQEAAAkMBQEAAgABAQEBBQUAAQUAAQIAAQABBAELCwYCAAYFDgETAAAEBAABAwEEBRYICBcRHgEPDAMIEREACB8DAwICBgAEAAcEBgQDAAAJAwAMBgIAAQAAAAABAQADAAABAAcBAQABAgEABwUBAAoAAAcFAAEBAAIABQACAAICBQcKBQABAAAGAhgBGCABAAAACwAaAAABBgYQAgAAAQAABQUBAQEAAAoAAAECAQQBDQMBAQEEAwEbFwEDCBwIBCEAEwIOFQACAAEBBwcBEgcHAAEBBQcAAAoKBwcFAQEGBQYBBwAZIhQCFAcBBQIQAhoGBgUADggJCQ4DAwMABwMGAwYRCQQBAQMTCBIBAwEADAwGCQQACAAA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NgIkIAAgESASajYCICAAIA8gEGo2AhwgACANIA5qNgIYIAAgCyAMajYCFCAAIAkgCmo2AhAgACAHIAhqNgIMIAAgBSAGajYCCCAAIAMgBGo2AgQLCgAgACABIAIQdwsJACAAIAEQkAIL7AEBEn8gAigCBCEDIAEoAgQhBCACKAIIIQUgASgCCCEGIAIoAgwhByABKAIMIQggAigCECEJIAEoAhAhCiACKAIUIQsgASgCFCEMIAIoAhghDSABKAIYIQ4gAigCHCEPIAEoAhwhECACKAIgIREgASgCICESIAIoAiQhEyABKAIkIRQgACABKAIAIAIoAgBrNgIAIAAgFCATazYCJCAAIBIgEWs2AiAgACAQIA9rNgIcIAAgDiANazYCGCAAIAwgC2s2AhQgACAKIAlrNgIQIAAgCCAHazYCDCAAIAYgBWs2AgggACAEIANrNgIECwoAIAAgASACEF4LfwECfyMAQcACayIEJABBfyEDIAQgAhBnRQRAQQAhAwNAIANBIEcEQCAAIANqIAEgA2otAAA6AAAgA0EBaiEDDAELCyAAIAAtAB9B/wBxOgAfIARBoAFqIgEgACAEEOcCIAAgARCEAUF/QQAgAEEgEEgbIQMLIARBwAJqJAAgAwsxAQF/IAFBAnYhAkEAIQEDQCABIAJGRQRAIAAgAUECdGpBADYCACABQQFqIQEMAQsLCz4BAX8gACABQShqIgIgARAWIABBKGogAiABEBkgAEHQAGogAUHQAGpBKBAGGiAAQfgAaiABQfgAakHwDxAHCxwAIABCADcDQCAAQgA3A0ggAEHwkAJBwAAQBhoL7QEBBH8jAEHABWsiAyQAAkACQCAAKAJIQQN2Qf8AcSIEQfAATwRAQYABIARrIQUDQCACIAVGDQIgACACIARqaiACQbCWAmotAAA6AFAgAkEBaiECDAALAAtB8AAgBGshBQNAIAIgBUYNAiAAIAIgBGpqIAJBsJYCai0AADoAUCACQQFqIQIMAAsACyAAIABB0ABqIgIgAyADQYAFahCjASACQQBB8AAQERoLIABBwAFqIABBQGtBEBDZAiAAIABB0ABqIAMgA0GABWoQowEgASAAQcAAENkCIANBwAUQEiAAQdABEBIgA0HABWokAAuXAgIDfgJ/IwBBoAJrIgYkAAJAIAJQDQAgACAAKQMgIgQgAkIDhnw3AyAgAkLAACAEQgOIQj+DIgV9IgRUBEADQCACIANRDQIgACADIAV8p2ogASADp2otAAA6ACggA0IBfCEDDAALAAsDQCADIARSBEAgACADIAV8p2ogASADp2otAAA6ACggA0IBfCEDDAELCyAAIABBKGogBiAGQYACaiIHEKQBIAIgBH0hAyABIASnaiEBA0AgA0LAAFQEQEIAIQIDQCACIANUBEAgACACpyIHaiABIAdqLQAAOgAoIAJCAXwhAgwBCwsgBkGgAhASBSAAIAEgBiAHEKQBIANCQHwhAyABQUBrIQEMAQsLCyAGQaACaiQAC5UBAQR/IwBBMGsiBSQAIAAgAUEoaiIDIAEQFiAAQShqIgQgAyABEBkgAEHQAGoiAyAAIAIQByAEIAQgAkEoahAHIABB+ABqIgYgAkH4AGogAUH4AGoQByAAIAFB0ABqIAJB0ABqEAcgBSAAIAAQFiAAIAMgBBAZIAQgAyAEEBYgAyAFIAYQFiAGIAUgBhAZIAVBMGokAAuJHQI2fgF/IAAgAjMAACACQQJqIjkxAABCEIZCgID8AIOEIgQgATUAF0IFiEL///8AgyIDfiA5NQAAQgWIQv///wCDIgUgATMAFSABMQAXQhCGQoCA/ACDhCIGfnwgAjUAB0IHiEL///8AgyIJIAE1AA9CBohC////AIMiB358IAI1AApCBIhC////AIMiCiABMwANIAExAA9CEIaEQgGIQv///wCDIg1+fCACMwAFIAIxAAdCEIaEQgKIQv///wCDIg4gATMAEiABMQAUQhCGhEIDiCILfnwgAjUAD0IGiEL///8AgyIIIAE1AAdCB4hC////AIMiD358IAIzAA0gAjEAD0IQhoRCAYhC////AIMiDCABNQAKQgSIQv///wCDIhB+fCACMwASIAIxABRCEIaEQgOIIhEgATMABSABMQAHQhCGhEICiEL///8AgyISfnwgAjUAF0IFiEL///8AgyIVIAEzAAAgATEAAkIQhkKAgPwAg4QiFn58IAIzABUgAjEAF0IQhkKAgPwAg4QiFyABNQACQgWIQv///wCDIhh+fCAEIAZ+IAUgC358IAkgDX58IAogEH58IAcgDn58IAggEn58IAwgD358IBEgGH58IBYgF358Ih1CgIBAfSIeQhWIfCITIBNCgIBAfSIgQoCAgH+DfSAC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IAMgDHMgAnFzNgIEC6QBAQV/IwBB4AZrIgMkACADQcAEaiIEIAEgAhBSIANBoAJqIgUgAUGgAmoiBiACQaACaiIHEFIgAyABIAYQfCAAQaACaiIBIAIgBxB8IAEgASADEFIgASABIAQQeyABIAEgBRB7IANB4ANqIgEgARAnIAAgBCABEAggAEHgAGogA0GgBWogBRAIIABBwAFqIANBgAZqIANBgANqEAggA0HgBmokAAs0AQJ/IwBBMGsiAiQAIAIgASABQTBqIgMQXiAAIAEgAxB3IABBMGogAkEwEBMgAkEwaiQACwoAIAAgASACEAsLCAAgACABEGYLCQAgACABEMACC48BAQF/IwBBEGsiAyAANgIMIAMgATYCCCADQQA6AAcgA0EBOgAGA0AgAgRAIAJBAWsiAiADKAIMai0AACEAIAMgAy0AByADLQAGIAMoAgggAmotAAAiASAAa0EIdnFyOgAHIAMgAy0ABiAAIAFzQQFrQQh2cToABgwBCwsgAy0ABiADLQAHIAMtAAdqakEBawtqAQJ/IwBBoAZrIgMkAEF/IQQCQCADQYAFaiABEGcNACADQeADaiACEGcNACADIANB4ANqEB0gA0GgAWoiASADQYAFaiADECEgA0HAAmoiAiABEBUgACACEIQBQQAhBAsgA0GgBmokACAECzMBAX8gAUEAIAFBAEobIQEDQCABIANGRQRAIAAgABBpIANBAWohAwwBCwsgACAAIAIQIgunAgIDfwF+IAAhBiABIQcjAEHwA2siBSQAIAVBAToADwJAIARBwP8ATQRAIAOtIQhBACEAA0AgBCAAQUBrIgFPBEAgBUHQAGogB0HAABCqASAABEAgBUHQAGogACAGakFAakLAABAoCyAFQdAAaiIDIAIgCBAoIAMgBUEPakIBECggAyAAIAZqEKkBIAUgBS0AD0EBajoADyABIQAMAQsLIARBP3EiAQRAIAVB0ABqIAdBwAAQqgEgAARAIAVB0ABqIAAgBmpBQGpCwAAQKAsgBUHQAGoiAyACIAgQKCADIAVBD2pCARAoIAMgBUEQaiICEKkBIAAgBmogAiABEAYaIAJBwAAQEgsgBUHQAGpBoAMQEgwBC0HAzQJBHDYCAAsgBUHwA2okAAtvAQN/IwBB4ABrIgIkACACQTBqIgNBMBApIwBBMGsiASQAIAEgA0EwEDUgAiABQcCgAhAJIAFBMGokACMAQTBrIgEkACABIAIQmwEgACABQTAQgAEgAUEwaiQAIANBMBAEIAJBMBAEIAJB4ABqJAALCgAgACABIAIQIgu9AQEDfyAAIAApAyAgAq18NwMgAkAgAkUNACAAKAJoIgNFDQAgAEEoaiIEIANqIQUgAkHAACADayIDSQRAIAUgASACEGUgACAAKAJoIAJqNgJoDwsgBSABIAMQZSAAIARBARBHIARBwAAQHCAAQQA2AmggAiADayECIAEgA2ohAQsgAkHAAEkEfyACBSAAIAEgAkEGdhBHIAEgAkFAcWohASACQT9xCyIDBEAgACADNgJoIABBKGogASADEGULCxMAIAAgASACQYy/AigCABEQABoLggIBA38jAEGQAWsiAiQAAn9BASABLQAAIgTAIgNBAE4NABogBEHAAHEEQEEBIAFBAWpBLxDXASADQT9xQQFrQR92cUUNARogAEHgABAcQQAMAQsgAkEwaiIDIAFBMBA1IAIgAigCXEH/////AXE2AlwgAiADQbCcAhAaQQEgAiADQTAQI0UNABogAkEwaiIDIANBwKACEAkgAkHgAGoiASADEBggASABIAMQCSABIAFBsKMCEBpBAiABIAEQugJFDQAaIAAgAkEwakHgABATIABBMGoiASABIARBBXZBAXEgARC8AkEBdnMQNEEDQQAgAEEwEBAbCyEAIAJBkAFqJAAgAAsLACAAIAEgAhDNAQsyAQF/A0AgAgRAIAAgAkEBayICQXxxaiABLQAAIANBCHRyIgM2AgAgAUEBaiEBDAELCwtvAQV/IwBBMGsiAyQAIAAgARANIABB0ABqIgIgAUEoaiIGEA0gAEH4AGoiBSABQdAAahDoAiAAQShqIgQgASAGEBYgAyAEEA0gBCACIAAQFiACIAIgABAZIAAgAyAEEBkgBSAFIAIQGSADQTBqJAALCgAgACABIAIQIAuhAwEKfyMAQeAGayIEJAAgBEHAAWogASABEAggBEHgAGoiCCABEA8gCCAIEJYBIAQgAUHgAGoiBSAFEAggAkHAAWoiB0HgABAQIQwgBEHABGogBxAPIARBgAZqIgsgAUHAAWoiCSAHEAUgCUHgABAQIQ0gBEGgAmogCRAPIAMEQCAEQaAFaiIKIARBoAJqEA8gCiAKIAMQBSAIIAgg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H00NABpBPyAAQR4gAWt2QQJzIAFBAXRrQccAaiIAIABBP08bCyICQQR0IgBBsMUCajYCBCADIABBuMUCaiIAKAIANgIIIAAgAzYCACADKAIIIAM2AgRBuM0CQbjNAikDAEIBIAKthoQ3AwALCxQAIAAgASACQdCbAkH9/3NBDBBdC5oDAQZ/IwAiBCEJIAQgA0GgAmxrIgQkACAEIANB4ABsayIHJAACQAJAIANBAUcNACABQcABEBAgAkHgABAQckUNACAAQYCcAkHABBATDAELA0AgAyAFRwRAIAcgBUHgAGwiCGoiBiACIAhqIgggCBAaIAYgBkEBEDQgBkEwaiAIQTBqIgYgBhAaIAQgBUGgAmxqIgYgASAFQcABbGpBwAEQEyAGQcABakGAnAJB4AAQEyAFQQFqIQUMAQsLIwBBoAJrIgIkACACIAQgBBDMASACIAcQkAEgAEHABBAcIAAgAkHAARATIABBgANqIAJBwAFqQeAAEBNBASADIANBAU0bIQZBASEFA0AgBSAGRwRAIAIgBCAFQaACbGoiCCAIEMwBIAIgByAFQeAAbGoQkAEgACAAIAIQzgEgBUEBaiEFDAELCyACQaACaiQAIAAgBCABIAcgA0ECEHogACAEIAEgByADQQMQeiAAIAQgASAHIANBCRB6IAAgBCABIAcgA0EgEHogACAEIAEgByADQRAQeiAAED0LIAkkAAuhAgEIfyMAQcAEayICJAAgAkGAA2oiBCABIAFBgANqIgYQzwEgAkHAAWoiBSABQaACaiIHIAFBwAFqIgMQzwEgAiABQeAAaiIIIAFB4ANqIgkQzwEgACAEIAEQCiAAIAAgABAIIAAgACAEEAggAEHgAGoiASAFIAgQCiABIAEgARAIIAEgASAFEAggAEHAAWoiASACIAMQCiABIAEgARAIIAEgASACEAggAkHgAGoiAyADECcgAEGgAmoiASADIAcQCCABIAEgARAIIAEgASADEAggAEGAA2oiASACQeADaiIDIAYQCCABIAEgARAIIAEgASADEAggAEHgA2oiACACQaACaiIBIAkQCCAAIAAgABAIIAAgACABEAggAkHABGokAAuMAgEKfyMAQcAEayIDJAAgA0HgA2oiByABIAIQBSADQYADaiIIIAFB4ABqIgQgAkHgAGoiChAFIANBoAJqIgkgAUHA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IAQQuQIgACAEEBggACAAIAIQFyAAIAAgAhAXIABB4ABqIgUgAUHgAGoiASABEBogBSAFIAYQCSADIAMQxAEgAEEwaiIBIAIgABAXIAEgASAEEAkgASABIAMQFyADQZABaiQAC44BAQJ/IwBBkAFrIgMkACAAAn8gAUHgAGoiAkEwEBAEQCAAQTAQvQJBwAEMAQsgAkGAnAJBMBAjRQRAIAMgARDYASADIQELIwBBMGsiAiQAIAIgARCbASAAIAJBMBCAASABQTBqELwCIQEgAkEwaiQAIAAtAAAgAUEEdEEgcXJBgH9yCzoAACADQZABaiQACyIAIAAgAUHgABATIABB4ABqIAFBgJwCQTAgAUHgABAQEBQLKQEBfwNAIAIgA0ZFBEAgACADaiABIANqLQAAOgAAIANBAWohAwwBCwsLSAEDfwNAIAEgAkcEQCMAQRBrIgMkACADQQA6AA9BqL8CIANBD2pBABADIQQgA0EQaiQAIAAgAmogBDoAACACQQFqIQIMAQsLC64DAQZ/IwBB4ANrIgMkACABLQAfIgVBf3NB/wBxIQRBHiECA0AgAgRAIAQgASACai0AAEF/c3IhBCACQQFrIQIMAQsLQX8hAiAEQf8BcUEBa0HsASABLQAAIgRrcUEIdiAEIAVBB3ZyckEBcUUEQCADQdACaiIHIAEQayADQaACaiICIAcQDSADQQE2AvABIANB8AFqIgVBBHJBAEEkEBEaIAUgBSACEBkgA0GQAWoiBiAFEA0gA0EBNgLAASADQcABaiIBQQRyQQBBJBARGiABIAEgAhAWIANB4ABqIgIgARANIANBMGoiBEGQDyAGEAcgBCAEEDogBCAEIAIQGSADIAQgAhAHIANBATYCgAMgA0GAA2oiAkEEckEAQSQQERogA0GwA2oiBiACIAMQ4wEhAiAAIAYgARAHIABBKGoiASAGIAAQByABIAEgBBAHIAAgACAHEAcgACAAIAAQFiAAIAAQpQEgASAFIAEQByAAQQE2AlAgAEHUAGpBAEEkEBEaIABB+ABqIgQgACABEAdBACAEEFZBASACa3IgARA7cmshAgsgA0HgA2okACACC/4RARV+IAAgADUAMUIHiEL///8AgyICQtOMQ34gADMAGiAAMQAcQhCGhEICiEL///8Ag3wgADUANEIEiEL///8AgyIBQuf2J358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PAAHIAAgAkLRqwh+IApC////AIN8IAFCFYd8IgNCDIg8AAwgACADQgSIPAALIAAgA0IEhiABQoCA+ACDQhGIhDwACiAAIAJCg6FWfiAIQv///wCDfCADQhWHfCIBQgeIPAAOIAAgAUIBhiADQoCAwACDQhSIhDwADSAAIAlC////AIMgAUIVh3wiAkIKiDwAESAAIAJCAog8ABAgACACQgaGIAFCgID+AINCD4iEPAAPIAAgC0L///8AgyACQhWHfCIBQg2IPAAUIAAgAUIFiDwAEyAAIBFC////AIMgAUIVh3wiAzwAFSAAIAFCA4YgAkKAgPAAg0ISiIQ8ABIgACADQgiIPAAWIAAgDEL///8AgyADQhWHfCICQguIPAAZIAAgAkIDiDwAGCAAIANCEIhCH4MgAkIFhoQ8ABcgACANQv///wCDIAJCFYd8IgFCBog8ABsgACABQgKGIAJCgIDgAINCE4iEPAAaIAAgBkL///8AgyABQhWHfCICQhGIPAAfIAAgAkIJiDwAHiAAIAJCAYg8AB0gACACQgeGIAFCgID/AINCDoiEPAAcCwoAIAAgASABECIL+gUBCn8jAEEwayICJAAgAiABKAIgIgMgASgCHCIEIAEoAhgiBSABKAIUIgYgASgCECIHIAEoAgwiCCABKAIIIgkgASgCBCIKIAEoAgAiCyABKAIkIgFBE2xBgICACGpBGXZqQRp1akEZdWpBGnVqQRl1akEadWpBGXVqQRp1akEZdWpBGnUgAWpBGXVBE2wgC2oiC0H///8fcTYCACACIAogC0EadWoiCkH///8PcTYCBCACIAkgCkEZdWoiCUH///8fcTYCCCACIAggCUEadWoiCEH///8PcTYCDCACIAcgCEEZdWoiB0H///8fcTYCECACIAYgB0EadWoiBkH///8PcTYCFCACIAUgBkEZdWoiBUH///8fcTYCGCACIAQgBUEadWoiBEH///8PcTYCHCACIAMgBEEZdWoiA0H///8fcTYCICACIAEgA0EadWpB////D3E2AiQgACACKAIAIgE6AAAgACABQRB2OgACIAAgAUEIdjoAASAAIAIoAgQiA0EOdjoABSAAIANBBnY6AAQgACADQQJ0IAFBGHZyOgADIAAgAigCCCIBQQ12OgAIIAAgAUEFdjoAByAAIAFBA3QgA0EWdnI6AAYgACACKAIMIgNBC3Y6AAsgACADQQN2OgAKIAAgA0EFdCABQRV2cjoACSAAIAIoAhAiAUESdjoADyAAIAFBCnY6AA4gACABQQJ2OgANIAAgAUEGdCADQRN2cjoADCAAIAIoAhQiAToAECAAIAFBEHY6ABIgACABQQh2OgARIAAgAigCGCIDQQ92OgAVIAAgA0EHdjoAFCAAIANBAXQgAUEYdnI6ABMgACACKAIcIgFBDXY6ABggACABQQV2OgAXIAAgAUEDdCADQRd2cjoAFiAAIAIoAiAiA0EMdjoAGyAAIANBBHY6ABogACADQQR0IAFBFXZyOgAZIAAgAigCJCIBQRJ2OgAfIAAgAUEKdjoAHiAAIAFBAnY6AB0gACABQQZ0IANBFHZyOgAcIAJBMGokAAv0BAEZfiABNQAAIQUgATEABiEEIAExAAUhBiABMQAEIQIgATEACSEDIAExAAghDCABMQAHIQ0gATEADCEHIAExAAshCCABMQAKIQkgATEADyEKIAExAA4hDiABMQANIQ8gATEAHyEQIAExAB4hESABMQAdIRIgATEAHCETIAExABshFCABMQAaIRUgATEAGSEWIAExABghFyABMQAXIRggACABMQAVQg+GIAExABRCB4aEIAExABZCF4aEIAE1ABAiGUKAgIAIfCIaQhmIfCILIAtCgICAEHwiC0KAgIDgD4N9PgIYIAAgGSAaQoCAgPAPg30gDkIKhiAPQgKGhCAKQhKGhCAIQguGIAlCA4aEIAdCE4aEIgdCgICACHwiCEIZiHwiCUKAgIAQfCIKQhqIfD4CFCAAIAkgCkKAgIDgD4N9PgIQIAAgDEINhiANQgWGhCADQhWGhCAGQg6GIAJCBoaEIARCFoaEIgRCgICACHwiBkIZiHwiAiACQoCAgBB8IgJCgICA4A+DfT4CCCAAIBdCDYYgGEIFhoQgFkIVhoQiAyALQhqIfCADQoCAgAh8IgNCgICA8AODfT4CHCAAIAJCGoggB3wgCEKAgIDwAIN9PgIMIAAgFEIMhiAVQgSGhCATQhSGhCADQhmIfCICIAJCgICAEHwiAkKAgIDgD4N9PgIgIAAgEEIShkKAgPAPgyARQgqGIBJCAoaEhCIDIAJCGoh8IANCgICACHwiAkKAgIAQg30+AiQgACAEIAZCgICA8AeDfSAFIAJCGYhCE358IgVCgICAEHwiBEIaiHw+AgQgACAFIARCgICA4A+DfT4CAAs0AQF/IwBBIGsiAiQAIAAgAhBBIABB6ABqIgAgAkIgECAgACABEEEgAkEgEBIgAkEgaiQAC+sBAQN/IwBB4ABrIgQkACACQcEATwRAIAAQSSAAIAEgAq0QICAAIAQQQUEgIQIgBCEBCyAAEEkgBEEgakE2QcAAEBEaA0AgAiADRwRAIARBIGogA2oiBSAFLQAAIAEgA2otAABzOgAAIANBAWohAwwBCwsgACAEQSBqIgNCwAAQICAAQegAaiIAEEkgA0HcAEHAABARGkEAIQMDQCACIANHBEAgBEEgaiADaiIFIAUtAAAgASADai0AAHM6AAAgA0EBaiEDDAELCyAAIARBIGoiAELAABAgIABBwAAQEiAEQSAQEiAEQeAAaiQACwwAIAAgASACrBDfAQtGAQF/IwBBgAFrIgQkACAEQcoKKAAANgIIIARBwgopAAA3AwAgACABIAIgBEEQaiIAIAAgAyAEQQwQcBD7ASAEQYABaiQAC6cBAQJ/IwBBMGsiBCQAIARB3wovAAA7ASwgBEHbCigAADYCKCAEQf8KKAAANgAfIARB+AopAwA3AxggBEHwCikDADcDECAEQS06AA8gACEFIAIEQCAAIAIgA0EAQQAQDCAAIANqIQULIAUgBEEoakEGIARBD2oiAkEBEAwgBUEHaiABQQEQDiAFQQhqIAJBASAEQRBqQRMQDCAEQTBqJAAgBSAAa0Ecags9AQF/IANBACADQQBKGyEDA0AgAyAERwRAIAAgBGogAiAEai0AACABIARqLQAAczoAACAEQQFqIQQMAQsLC2wBAn8jAEGgC2siAyQAIANBwApqIgQgARAzGiADQYAJaiIBIAIQPhogA0HABGoiAiABIAQQkQEgAyACEJcCIAAgA0HABBAGGiAEQeAAEAQgAUHAARAEIAJBwAQQBCADQcAEEAQgA0GgC2okAAsuAQF/IwBBoAJrIgIkACACQbCZAiABEKYCIAAgAhA/IAJBoAIQBCACQaACaiQACyMAIAAgACABQQAQOANAIAIEQCAAIAAQVCACQQFrIQIMAQsLCyIAIAAgACABEJoBA0AgAgRAIAAgABBiIAJBAWshAgwBCwsLtAICBn8CfiAEQQJ0IgYjACAGQQ9qQXBxayIGakEEayEKA0AgBCAIRgRAAkBBACEFA0AgBCAFRg0BIAAgBUECdCIBaiABIAZqNQIAIAEgAmo1AgAgB618fSILPgIAIAtCIIinQQFxIQcgBUEBaiEFDAALAAsFIAEoAgAiBSADbK0iDCACNQIAfiAFrXwhC0EBIQUDQCALQiCIIQsgBCAFRkUEQCAFQQJ0IgkgBmpBBGsgASAJajUCACACIAlqNQIAIAx+IAt8fCILPgIAIAVBAWohBQwBCwsgCiALPgIAIAhBAWohCCAGIQEMAQsLQQAhBUEAIAdrIgFBf3MhAgNAIAQgBUZFBEAgACAFQQJ0IgNqIgcgAyAGaigCACABcSAHKAIAIAJxcjYCACAFQQFqIQUMAQsLCwsAIAAgASACEI0BCyEAIAAgACABECYDQCACBEAgACAAEFEgAkEBayECDAELCws0ACAAIAEQUSAAIAFBAhB4IAAgAUEDEHggACABQQkQeCAAIAFBIBB4IAAgAUEPEHggABA9C+4DAQ5/IwBBoAJrIgskAANAIAQgCkYEQANAIAUEQCAFQQFrIQUgACAAEJ8CQQAhCgNAIAQgCkYNAiALIAEgCkGgAmxqIgIgAhDMASALIAMgCkHgAGxqEJABIAAgACALEM4BIApBAWohCgwACwALCyALQaACaiQABSMAQYAGayIHJAAgB0GgBWoiDiABIApBoAJsaiIGQcABaiIPEA8gB0HABGoiCCACIApBwAFsaiISIA4QBSAHQeADaiIJIBJB4ABqIhMgDxAFIAkgCSAOEAUgB0GAA2oiECAIIAYQCiAHQaACaiIRIBAQDyAHQcABaiIIIBEgERAIIAggCCAIEAggB0HgAGoiDCAQIAgQBSALQeAAaiINIAkgBkHgAGoiCRAKIA0gDSANEAggByAGIAgQBSAGIA0QDyAGIAYgDBAKIAYgBiAHEAogBiAGIAcQCiAMIAwgCRAFIAkgByAGEAogCSAJIA0QBSAJIAkgDBAKIAkgCSAMEAogDyIGIA8gEBAIIAYgBhAPIAYgBiAOEAogBiAGIBEQCiAIIA0gEhAFIAwgEyAGEAUgCCAIIAwQCiALIAggCBAIIAtBwAFqIAZB4AAQEyAHQYAGaiQAIAsgAyAKQeAAbGoQkAEgACAAIAsQzgEgCkEBaiEKDAELCwsyACAAIAEgAhAKIABB4ABqIAFB4ABqIAJB4ABqEAogAEHAAWogAUHAAWogAkHAAWoQCgsyACAAIAEgAhAIIABB4ABqIAFB4ABqIAJB4ABqEAggAEHAAWogAUHAAWogAkHAAWoQCAsRACAAIAEgAkEFQRFBHxCaAwsRACAAIAEgAkEFQRFBHxCbAwsyAQJ/QSAhAgNAIAIEQCAAIAJBAWsiAkF8cWogASACai0AACADQQh0ciIDNgIADAELCwsuAANAIAIEQCAAIAEgAkEBayICQXxxaigCACACQQN0djoAACAAQQFqIQAMAQsLC14BA38CQCAAIAFGDQADQCAEQQhHBEAgASAEQQJ0aigCACECQQAhAwNAIANBBEcEQCAAIAI6AAAgAkEIdiECIANBAWohAyAAQQFqIQAMAQsLIARBAWohBAwBCwsMAAsLsAECAX4CfyABKQMgIQIgAUEoaiIDIAEoAmgiBGpBgAE6AAAgBEE4a0FGTQRAIAEgA0EBEEcgA0HAABAcCyABIAJCK4ZCgICAgICAwP8AgyACQjuGhCACQhuGQoCAgICA4D+DIAJCC4ZCgICAgPAfg4SEIAJCBYhCgICA+A+DIAJCFYhCgID8B4OEIAJCJYhCgP4DgyACQgOGQjiIhISENwBgIAEgA0EBEEcgACABEJ0BCzcBA38DQCACQYABRkUEQCAAIAJBA3QiA2oiBCAEKQMAIAEgA2opAwCFNwMAIAJBAWohAgwBCwsLhAMBDH8jAEHgBmsiAiQAIAJB0AJqIgMgAUHQAGoiCSABQShqIgYQFiACIAkgBhAZIAMgAyACEAcgAkGgAmoiBCABIAYQByACQfABaiIFIAQQDSAFIAMgBRAHIAJBATYC4AMgAkHgA2oiCEEEckEAQSQQERogAkHwBGoiByAIIAUQ4wEaIAJBsAZqIgggByADEAcgAkGABmoiCiAHIAQQByACQTBqIgUgCCAKEAcgBSAFIAFB+ABqIgMQByACQcAEaiILIAFBwA8QByACQZAEaiIMIAZBwA8QByACQaAFaiINIAhB4BkQByACQYADaiIEIAMgBRAHIAQQViEDIAJBwAFqIgcgAUEoEAYaIAJBkAFqIgQgBkEoEAYaIAJB0AVqIgYgCkEoEAYaIAcgDCADECUgBCALIAMQJSAGIA0gAxAlIAJB4ABqIgEgByAFEAcgBCAEIAEQVhDgAiACQbADaiIBIAkgBBAZIAEgBiABEAcgASABEKUBIAAgARBqIAJB4AZqJAALiwEBBH8jAEGgAmsiASQAIAFB8AFqIgIgABANIAFBwAFqIgMgAEEoahANIAFBkAFqIgQgAEHQAGoQDSABQTBqIgAgAyACEBkgACAAIAQQByABIAIgAxAHIAEgAUGQDxAHIAFB4ABqIgIgBBANIAEgASACEBYgACAAIAEQGSAAEDshACABQaACaiQAIAALFAAgACABIAIgAyAEIAVBwAAQ/gILswMBA38jAEHwA2siCSQAIAlB0ANqIgogCUGwA2oiCyABIAMgBCAFIAYgBxD+ASAJQZADaiIEIAggAhAbGiAJQfACaiIFIAggChAbGiAJQaYKLQAAOgDoAiAJQZ4KKQAANwPgAiAJQeAAaiICQSBBAhAOIAJBAnIgA0EgQQBBABAMIAlBggFqQSBBAhAOIAlBhAFqIApBIEEAQQAQDCAJQaQBakEgQQIQDiAJQaYBaiALQSBBAEEAEAwgCUHGAWpBIEECEA4gCUHIAWogBEEgQQBBABAMIAlB6AFqQSBBAhAOIAlB6gFqIAVBIEEAQQAQDCAJQYoCaiAJQeACakEJQQBBABAMIAlBQGsiAyACQbMBIAcQRiAJQSBqIgYgAyABEDAgCSAIIAYQvgEgACAJKQNYNwAYIAAgCSkDUDcAECAAIAkpA0g3AAggACAJKQNANwAAIAAgCSkDADcAICAAIAkpAwg3ACggACAJKQMQNwAwIAAgCSkDGDcAOCAKQSAQBCALQSAQBCAEQSAQBCAFQSAQBCACQYACEAQgA0EgEAQgBkEgEAQgCUEgEAQgCUHwA2okAAt8AQN/IwBB4AlrIgMkACADQaAIaiIEIAEQPhogA0GABmoiASAEEJgBIANBwARqIgUgAhA+GiADQaACaiICIAUQmAEgAyABIAIQ0wEgACADED8gBEHAARAEIAFBoAIQBCAFQcABEAQgAkGgAhAEIANBoAIQBCADQeAJaiQAC5cBAQJ/IwBBgAlrIgEkACABQcAEaiICEC8gAUHwBGoQLyABQaAFahAvIAFB0AVqEC8gAUGABmoQLyABQbAGahAvIAFB4AZqEC8gAUGQB2oQLyABQcAHahAvIAFB8AdqEC8gAUGgCGoQLyABQdAIahAvIAEgAhCbAiAAIAFBwAQQBhogAkHABBAEIAFBwAQQBCABQYAJaiQACwkAQQggABCFAgtMAgJ/An4gAq0hBkEAIQIDQCACIANGRQRAIAAgAkECdCIFaiAErSABIAVqNQIAIAZ+fCIHPgIAIAJBAWohAiAHQiCIpyEEDAELCyAECy4BAn8DQCACQQhGRQRAIAAgAkECdCIDaiABIANqKAIANgIAIAJBAWohAgwBCwsLmwECA38BfgNAIANBDEcEQCAAIANBAnQiBGogASAEajUCACACIARqNQIAIAWtfH0iBj4CACAGQiCIp0EBcSEFIANBAWohAwwBCwtBACEDQQAgBWshAUIAIQYDQCADQQxHBEAgACADQQJ0IgJqIgQgAkHQmwJqKAIAIAFxrSAGIAQ1AgB8fCIGPgIAIAZCIIghBiADQQFqIQMMAQsLC+cBAgV/AX4jACAEQQJ0QQ9qQXBxayEHA0AgBCAFRgRAQQAhBQNAIAQgBUZFBEAgACAFQQJ0IgFqIAEgB2o1AgAgASADajUCACAGrXx9Igo+AgAgCkIgiKdBAXEhBiAFQQFqIQUMAQsLIAggBmsiAUF/cyECQQAhBQNAIAQgBUZFBEAgACAFQQJ0IgNqIgYgAyAHaigCACABcSAGKAIAIAJxcjYCACAFQQFqIQUMAQsLBSAHIAVBAnQiCWogAiAJajUCACABIAlqNQIAIAitfHwiCj4CACAKQiCIpyEIIAVBAWohBQwBCwsLyAECBX8BfkEBIQMDQCADBEAgA0EBayEDQQAhBEEAIAEoAgBBAXFrIQZBACECA0AgAkEMRwRAIAAgAkECdCIFaiAFQdCbAmooAgAgBnGtIAEgBWo1AgAgBK18fCIHPgIAIAdCIIinIQQgAkEBaiECDAELCyAAKAIAIQFBACECA0AgAkELRwRAIAAgAkECdGogAUEBdiAAIAJBAWoiAkECdGooAgAiAUEfdHI2AgAMAQsLIAAgBEEfdCABQQF2cjYCLCAAIQEMAQsLC0EBAX8gAEHgAGoiAiACIAEQCSAAQZABaiICIAIgARAJIABBwAFqIgIgAiABQTBqIgEQCSAAQfABaiIAIAAgARAJCxoAIAAgAUGwmQIgARsgAkGAmAIgAhtBARBQC08BAX8gACABIAIQmAIgAEGgAmoiAyABQaACaiACEJgCIAMgAyACQeAAbEGguAJqIgEQBSAAQYADaiICIAIgARAFIABB4ANqIgAgACABEAULDwAgACABIAIgAyAEEKACCygAA0AgAwRAIAAgACABEAUgACAAIAIgA0EBayIDQeAAbGoQCAwBCwsLKgEBfwNAIAMEQCAAIANBAWsiA0HgAGwiBGogASAEaiACIARqEAUMAQsLCxYAIAAgARDJASAAQTBqIAFBMGoQyQELhAEBBH8jAEHgAGsiASQAIAEgAEHQmwJB/f9zQQwQdiABQTBqIgIgAEEwakHQmwJB/f9zQQwQdiABEMcBIQAgAhDHASEDIAJBMBAQIQIgACABQTAQECIEQQFqcSADIARxckEBcSADIAJBAWtxIABBACACa3FyQQJxciEAIAFB4ABqJAAgAAsjACAAIAFBwAEQEyAAQcABaiABQYCcAkHgACABQcABEBAQFAtrAQR/IwBBwAFrIgIkACABQcABaiIDQeAAEBAhBSACQeAAaiIEIAMQrAIgAiAEEA8gACABIAIQBSACIAIgBBAFIABB4ABqIAFB4ABqIAIQBSAAQcABaiADQfCaAkHgACAFEBQgAkHAAWokAAvzAgELfyMAQbADayIEJAAgBEHgAGogASABEBogBEEwaiIIIAEQGCAIIAgQuQIgBCABQTBqIgcgBxAaIAJB4ABqIgNBMBAQIQwgBEGgAmoiCSADEBggBEGAA2oiCyABQeAAaiIFIAMQCSAFQTAQECENIARBkAFqIgogBRAYIARB0AJqIgYgByADEAkgBiAGIAkiAxAJIARBwAFqIgcgAkEwaiAFEAkgByAHIAoiBRAJIAcgByAGEBcgAyADIAEQCSAFIAUgAhAJIARB8AFqIgkgBSADEBogBSAFIAMQFyADIAEgA0GQASAFQeAAEBAiChAUIAUgBCAFQZABIAoQFCALIAsgBRAJIAQgBRAYIAggBCAFEAkgCCAIIAYQCSAGIAQgAxAJIAQgBCAJEAkgAyAHEBggAyADIAQQFyAGIAYgAxAXIAYgBiAHEAkgBiAGIAgQFyADIAEgA0GQASAMEBQgACACIANBkAEgDRAUIARBsANqJAALEgAgACABQdCbAkH9/3NBDBB2Cw8AIABBMGoiACAAIAEQNAtRAQJ/A0AgAkEIRkUEQCAAIAEgAkECdGooAgAiA0EYdCADQYD+A3FBCHRyIANBCHZBgP4DcSADQRh2cnI2AAAgAEEEaiEAIAJBAWohAgwBCwsLHwAgABCKAiAAQgA3AyAgAEEoakHAABAcIABBADYCaAtBAQN/IAJBBHQhA0EAIQIDQCACIANGRQRAIAAgAkECdCIEaiIFIAUoAgAgASAEaigCAHM2AgAgAkEBaiECDAELCwuQAQEDfyACIANBB3QgAGpBQGpBwAAQBiECIANBBHQhBCADQQF0IQVBACEDA0AgAyAFT0UEQCACIAAgA0EGdCIGakEBEJ8BIAIQwwIgASADQQV0aiACQcAAEAYaIAIgACAGQcAAcmpBARCfASACEMMCIAEgA0EDdCAEakECdGogAkHAABAGGiADQQJqIQMMAQsLC4EJATF/IwBBQGoiICQAIAAoAjwhISAAKAI4ISIgACgCNCEQIAAoAjAhESAAKAIsISMgACgCKCEkIAAoAiQhJSAAKAIgISYgACgCHCEnIAAoAhghKCAAKAIUISkgACgCECEqIAAoAgwhKyAAKAIIISwgACgCBCEtIAAoAgAhLgNAAkAgA0I/VgRAIAIhBAwBC0EAIQYgIEEAQcAAEBEhBAN/IAatIANaBH8gAiEvIAQFIAQgBmogASAGai0AADoAACAGQQFqIQYMAQsLIQELQRQhBiAjIRIgESEMIBAhFCAiIRUgISEJICQhCiAlIRYgJiENICchDyAoIQIgKSEIICohCyArIRMgLCEOIC0hByAuIQUDQCAGBEAgCyAFIAtqIgsgDHNBEHciDCANaiINc0EMdyIFIAtqIhcgDHNBCHciGCANaiIZIAVzQQd3IgsgDyATaiIFIAlzQRB3IhogEmoiGyAPc0EMdyIcIAVqIg9qIhMgAiACIA5qIgUgFXNBEHciAiAKaiIdc0EMdyISIAVqIg0gAnNBCHciDHNBEHciDiAHIAhqIgcgFHNBEHciBSAWaiICIAhzQQx3Ih4gB2oiCSAFc0EIdyIHIAJqIh9qIgUgC3NBDHciAiATaiITIA5zQQh3IhUgBWoiFiACc0EHdyELIA8gGnNBCHciCCAbaiIKIBxzQQd3IgIgDWoiDiAHc0EQdyIHIBlqIgUgAnNBDHciAiAOaiIOIAdzQQh3IhQgBWoiDSACc0EHdyEPIAogCSAMIB1qIgkgEnNBB3ciAmoiByAYc0EQdyIKaiIFIAJzQQx3IgIgB2oiByAKc0EIdyIMIAVqIhIgAnNBB3chAiAJIAggHiAfc0EHdyIIIBdqIgVzQRB3IglqIgogCHNBDHciCCAFaiIFIAlzQQh3IgkgCmoiCiAIc0EHdyEIIAZBAmshBgwBCwsgASgABCEwIAEoAAghMSABKAAMITIgASgAECEzIAEoABQhNCABKAAYIQYgASgAHCEXIAEoACAhGCABKAAkIRkgASgAKCEaIAEoACwhGyABKAAwIRwgASgANCEdIAEoADghHiABKAA8IR8gBCABKAAAIAUgLmpzNgAAIAQgHyAJICFqczYAPCAEIB4gFSAianM2ADggBCAdIBAgFGpzNgA0IAQgHCAMIBFqczYAMCAEIBsgEiAjanM2ACwgBCAaIAogJGpzNgAoIAQgGSAWICVqczYAJCAEIBggDSAmanM2ACAgBCAXIA8gJ2pzNgAcIAQgBiACIChqczYAGCAEIDQgCCApanM2ABQgBCAzIAsgKmpzNgAQIAQgMiATICtqczYADCAEIDEgDiAsanM2AAggBCAwIAcgLWpzNgAEIBAgEUEBaiIRRWohECADQsAAWARAAkAgA0I/Vg0AIAOnIQFBACEGA0AgASAGTQ0BIAYgL2ogBCAGai0AADoAACAGQQFqIQYMAAsACyAAIBA2AjQgACARNgIwICBBQGskAAUgAUFAayEBIARBQGshAiADQkB8IQMMAQsLCywBAX8jAEFAaiIDJAAgACADEB8gASADQsAAIAJBARDPAiEAIANBQGskACAAC+8WAhB+EX8DQCAVQRBGRQRAIAIgFUEDdCIWaiABIBZqKQAAIgRCOIYgBEKA/gODQiiGhCAEQoCA/AeDQhiGIARCgICA+A+DQgiGhIQgBEIIiEKAgID4D4MgBEIYiEKAgPwHg4QgBEIoiEKA/gODIARCOIiEhIQ3AwAgFUEBaiEVDAELCyADIABBwAAQBiEBQQAhFgNAIAEgASkDOCACIBdBA3QiA2oiFSkDACABKQMgIgdCMokgB0IuiYUgB0IXiYV8IANBsJECaikDAHwgByABKQMwIgsgASkDKCIJhYMgC4V8fCIEIAEpAxh8Igo3AxggASABKQMAIgVCJIkgBUIeiYUgBUIZiYUgBHwgASkDECIIIAEpAwgiBoQgBYMgBiAIg4R8IgQ3AzggASAIIAIgA0EIciIUaiIbKQMAIAsgCSAKIAcgCYWDhXwgCkIyiSAKQi6JhSAKQheJhXx8IBRBsJECaikDAHwiC3wiCDcDECABIAQgBSAGhIMgBSAGg4QgC3wgBEIkiSAEQh6JhSAEQhmJhXwiCzcDMCABIAkgAiADQRByIhRqIhwpAwB8IBRBsJECaikDAHwgByAIIAcgCoWDhXwgCEIyiSAIQi6JhSAIQheJhXwiDCALIAQgBYSDIAQgBYOEIAtCJIkgC0IeiYUgC0IZiYV8fCIJNwMoIAEgBiAMfCIGNwMIIAEgByACIANBGHIiFGoiHSkDAHwgFEGwkQJqKQMAfCAGIAggCoWDIAqFfCAGQjKJIAZCLomFIAZCF4mFfCIMIAkgBCALhIMgBCALg4QgCUIkiSAJQh6JhSAJQhmJhXx8Igc3AyAgASAFIAx8IgU3AwAgASACIANBIHIiFGoiHikDACAKfCAUQbCRAmopAwB8IAUgBiAIhYMgCIV8IAVCMokgBUIuiYUgBUIXiYV8IgwgByAJIAuEgyAJIAuDhCAHQiSJIAdCHomFIAdCGYmFfHwiCjcDGCABIAQgDHwiDDcDOCABIAIgA0EociIUaiIfKQMAIAh8IBRBsJECaikDAHwgDCAFIAaFgyAGhXwgDEIyiSAMQi6JhSAMQheJhXwiCCAKIAcgCYSDIAcgCYOEIApCJIkgCkIeiYUgCkIZiYV8fCIENwMQIAEgCCALfCIINwMwIAEgAiADQTByIhRqIiApAwAgBnwgFEGwkQJqKQMAfCAIIAUgDIWDIAWFfCAIQjKJIAhCLomFIAhCF4mFfCIGIAQgByAKhIMgByAKg4QgBEIkiSAEQh6JhSAEQhmJhXx8Igs3AwggASAGIAl8IgY3AyggASACIANBOHIiFGoiISkDACAFfCAUQbCRAmopAwB8IAYgCCAMhYMgDIV8IAZCMokgBkIuiYUgBkIXiYV8IgUgCyAEIAqEgyAEIAqDhCALQiSJIAtCHomFIAtCGYmFfHwiCTcDACABIAUgB3wiBTcDICABIAIgA0HAAHIiFGoiIikDACAMfCAUQbCRAmopAwB8IAUgBiAIhYMgCIV8IAVCMokgBUIuiYUgBUIXiYV8IgwgCSAEIAuEgyAEIAuDhCAJQiSJIAlCHomFIAlCGYmFfHwiBzcDOCABIAogDHwiDDcDGCABIAIgA0HIAHIiFGoiIykDACAIfCAUQbCRAmopAwB8IAwgBSAGhYMgBoV8IAxCMokgDEIuiYUgDEIXiYV8IgggByAJIAuEgyAJIAuDhCAHQiSJIAdCHomFIAdCGYmFfHwiCjcDMCABIAQgCHwiCDcDECABIAYgAiADQdAAciIUaiIkKQMAfCAUQbCRAmopAwB8IAggBSAMhYMgBYV8IAhCMokgCEIuiYUgCEIXiYV8IgYgCiAHIAmEgyAHIAmDhCAKQiSJIApCHomFIApCGYmFfHwiBDcDKCABIAYgC3wiBjcDCCABIANB2AByIhRBsJECaikDACACIBRqIhQpAwB8IAV8IAYgCCAMhYMgDIV8IAZCMokgBkIuiYUgBkIXiYV8IgUgBCAHIAqEgyAHIAqDhCAEQiSJIARCHomFIARCGYmFfHwiCzcDICABIAUgCXwiCTcDACABIANB4AByIhhBsJECaikDACACIBhqIhgpAwB8IAx8IAkgBiAIhYMgCIV8IAlCMokgCUIuiYUgCUIXiYV8IgwgCyAEIAqEgyAEIAqDhCALQiSJIAtCHomFIAtCGYmFfHwiBTcDGCABIAcgDHwiBzcDOCABIANB6AByIhlBsJECaikDACACIBlqIhkpAwB8IAh8IAcgBiAJhYMgBoV8IAdCMokgB0IuiYUgB0IXiYV8IgwgBSAEIAuEgyAEIAuDhCAFQiSJIAVCHomFIAVCGYmFfHwiCDcDECABIAogDHwiCjcDMCABIANB8AByIhpBsJECaikDACACIBpqIhopAwB8IAZ8IAogByAJhYMgCYV8IApCMokgCkIuiYUgCkIXiYV8IgwgCCAFIAuEgyAFIAuDhCAIQiSJIAhCHomFIAhCGYmFfHwiBjcDCCABIAQgDHwiBDcDKCABIANB+AByIgNBsJECaikDACACIANqIgMpAwB8IAl8IAQgByAKhYMgB4V8IARCMokgBEIuiYUgBEIXiYV8IgQgBiAFIAiEgyAFIAiDhCAGQiSJIAZCHomFIAZCGYmFfHw3AwAgASAEIAt8NwMgIBdBwABGBEADQCAWQQhGRQRAIAAgFkEDdCICaiIDIAMpAwAgASACaikDAHw3AwAgFkEBaiEWDAELCwUgAiAXQRBqIhdBA3RqIBUpAwAgIykDACIHIBopAwAiBEItiSAEQgOJhSAEQgaIhXx8IBspAwAiCUI/iSAJQjiJhSAJQgeIhXwiCzcDACAVIAkgJCkDACIKfCADKQMAIglCLYkgCUIDiYUgCUIGiIV8IBwpAwAiBkI/iSAGQjiJhSAGQgeIhXwiBTcDiAEgFSAGIBQpAwAiCHwgC0ItiSALQgOJhSALQgaIhXwgHSkDACINQj+JIA1COImFIA1CB4iFfCIGNwOQASAVIA0gGCkDACIMfCAFQi2JIAVCA4mFIAVCBoiFfCAeKQMAIg5CP4kgDkI4iYUgDkIHiIV8Ig03A5gBIBUgDiAZKQMAIhJ8IAZCLYkgBkIDiYUgBkIGiIV8IB8pAwAiD0I/iSAPQjiJhSAPQgeIhXwiDjcDoAEgFSAEIA98IA1CLYkgDUIDiYUgDUIGiIV8ICApAwAiEEI/iSAQQjiJhSAQQgeIhXwiDzcDqAEgFSAJIBB8ICEpAwAiEUI/iSARQjiJhSARQgeIhXwgDkItiSAOQgOJhSAOQgaIhXwiEDcDsAEgFSAiKQMAIhMgBSAHQj+JIAdCOImFIAdCB4iFfHwgEEItiSAQQgOJhSAQQgaIhXwiBTcDwAEgFSALIBF8IBNCP4kgE0I4iYUgE0IHiIV8IA9CLYkgD0IDiYUgD0IGiIV8IhE3A7gBIBUgCiAIQj+JIAhCOImFIAhCB4iFfCANfCAFQi2JIAVCA4mFIAVCBoiFfCINNwPQASAVIAcgCkI/iSAKQjiJhSAKQgeIhXwgBnwgEUItiSARQgOJhSARQgaIhXwiBzcDyAEgFSAMIBJCP4kgEkI4iYUgEkIHiIV8IA98IA1CLYkgDUIDiYUgDUIGiIV8Igo3A+ABIBUgCCAMQj+JIAxCOImFIAxCB4iFfCAOfCAHQi2JIAdCA4mFIAdCBoiFfCIHNwPYASAVIAQgCUI/iSAJQjiJhSAJQgeIhXwgEXwgCkItiSAKQgOJhSAKQgaIhXw3A/ABIBUgEiAEQj+JIARCOImFIARCB4iFfCAQfCAHQi2JIAdCA4mFIAdCBoiFfCIENwPoASAVIAkgC0I/iSALQjiJhSALQgeIhXwgBXwgBEItiSAEQgOJhSAEQgaIhXw3A/gBDAELCwu8FgEafwNAIA1BEEZFBEAgAiANQQJ0IgRqIAEgBGooAAAiBEEYdCAEQYD+A3FBCHRyIARBCHZBgP4DcSAEQRh2cnI2AgAgDUEBaiENDAELCyADIAApAgA3AgAgAyAAKQIYNwIYIAMgACkCEDcCECADIAApAgg3AggDQCADIAMoAhwgAiAVQQJ0IgFqIg0oAgAgAygCECILQRp3IAtBFXdzIAtBB3dzaiABQbCOAmooAgBqIAsgAygCGCIGIAMoAhQiCXNxIAZzamoiBCADKAIMaiIINgIMIAMgAygCACIMQR53IAxBE3dzIAxBCndzIARqIAMoAggiBSADKAIEIgpyIAxxIAUgCnFyaiIENgIcIAMgBSACIAFBBHIiB2oiEigCACAGIAkgCCAJIAtzcXNqIAhBGncgCEEVd3MgCEEHd3NqaiAHQbCOAmooAgBqIgZqIgU2AgggAyAEIAogDHJxIAogDHFyIAZqIARBHncgBEETd3MgBEEKd3NqIgY2AhggAyAJIAIgAUEIciIHaiIOKAIAaiAHQbCOAmooAgBqIAsgBSAIIAtzcXNqIAVBGncgBUEVd3MgBUEHd3NqIgcgBiAEIAxycSAEIAxxciAGQR53IAZBE3dzIAZBCndzamoiCTYCFCADIAcgCmoiCjYCBCADIAsgAiABQQxyIgdqIg8oAgBqIAdBsI4CaigCAGogCiAFIAhzcSAIc2ogCkEadyAKQRV3cyAKQQd3c2oiByAJIAQgBnJxIAQgBnFyIAlBHncgCUETd3MgCUEKd3NqaiILNgIQIAMgByAMaiIMNgIAIAMgCCACIAFBEHIiCGoiECgCAGogCEGwjgJqKAIAaiAMIAUgCnNxIAVzaiAMQRp3IAxBFXdzIAxBB3dzaiIHIAsgBiAJcnEgBiAJcXIgC0EedyALQRN3cyALQQp3c2pqIgg2AgwgAyAEIAdqIgc2AhwgAyACIAFBFHIiBGoiESgCACAFaiAEQbCOAmooAgBqIAcgCiAMc3EgCnNqIAdBGncgB0EVd3MgB0EHd3NqIgUgCCAJIAtycSAJIAtxciAIQR53IAhBE3dzIAhBCndzamoiBDYCCCADIAUgBmoiBTYCGCADIAIgAUEYciIGaiITKAIAIApqIAZBsI4CaigCAGogBSAHIAxzcSAMc2ogBUEadyAFQRV3cyAFQQd3c2oiCiAEIAggC3JxIAggC3FyIARBHncgBEETd3MgBEEKd3NqaiIGNgIEIAMgCSAKaiIKNgIUIAMgAiABQRxyIglqIhcoAgAgDGogCUGwjgJqKAIAaiAKIAUgB3NxIAdzaiAKQRp3IApBFXdzIApBB3dzaiIMIAYgBCAIcnEgBCAIcXIgBkEedyAGQRN3cyAGQQp3c2pqIgk2AgAgAyALIAxqIgw2AhAgAyACIAFBIHIiC2oiGCgCACAHaiALQbCOAmooAgBqIAwgBSAKc3EgBXNqIAxBGncgDEEVd3MgDEEHd3NqIgcgCSAEIAZycSAEIAZxciAJQR53IAlBE3dzIAlBCndzamoiCzYCHCADIAcgCGoiBzYCDCADIAIgAUEkciIIaiIZKAIAIAVqIAhBsI4CaigCAGogByAKIAxzcSAKc2ogB0EadyAHQRV3cyAHQQd3c2oiBSALIAYgCXJxIAYgCXFyIAtBHncgC0ETd3MgC0EKd3NqaiIINgIYIAMgBCAFaiIFNgIIIAMgCiACIAFBKHIiBGoiGigCAGogBEGwjgJqKAIAaiAFIAcgDHNxIAxzaiAFQRp3IAVBFXdzIAVBB3dzaiIKIAggCSALcnEgCSALcXIgCEEedyAIQRN3cyAIQQp3c2pqIgQ2AhQgAyAGIApqIgo2AgQgAyABQSxyIgZBsI4CaigCACACIAZqIhsoAgBqIAxqIAogBSAHc3EgB3NqIApBGncgCkEVd3MgCkEHd3NqIgwgBCAIIAtycSAIIAtxciAEQR53IARBE3dzIARBCndzamoiBjYCECADIAkgDGoiCTYCACADIAFBMHIiDEGwjgJqKAIAIAIgDGoiHCgCAGogB2ogCSAFIApzcSAFc2ogCUEadyAJQRV3cyAJQQd3c2oiByAGIAQgCHJxIAQgCHFyIAZBHncgBkETd3MgBkEKd3NqaiIMNgIMIAMgByALaiILNgIcIAMgBSABQTRyIgVBsI4CaigCACACIAVqIh0oAgBqaiALIAkgCnNxIApzaiALQRp3IAtBFXdzIAtBB3dzaiIHIAwgBCAGcnEgBCAGcXIgDEEedyAMQRN3cyAMQQp3c2pqIgU2AgggAyAHIAhqIgg2AhggAyAKIAFBOHIiCkGwjgJqKAIAIAIgCmoiBygCAGpqIAggCSALc3EgCXNqIAhBGncgCEEVd3MgCEEHd3NqIhYgBSAGIAxycSAGIAxxciAFQR53IAVBE3dzIAVBCndzamoiCjYCBCADIAQgFmoiBDYCFCADIAFBPHIiAUGwjgJqKAIAIAEgAmoiFigCAGogCWogBCAIIAtzcSALc2ogBEEadyAEQRV3cyAEQQd3c2oiASAKIAUgDHJxIAUgDHFyIApBHncgCkETd3MgCkEKd3NqajYCACADIAEgBmo2AhAgFUEwRgRAA0AgFEEIRkUEQCAAIBRBAnQiAWoiAiACKAIAIAEgA2ooAgBqNgIAIBRBAWohFAwBCwsFIAIgFUEQaiIVQQJ0aiANKAIAIBkoAgAiCSAHKAIAIgFBD3cgAUENd3MgAUEKdnNqaiASKAIAIgZBGXcgBkEOd3MgBkEDdnNqIgQ2AgAgDSAGIBooAgAiC2ogFigCACIGQQ93IAZBDXdzIAZBCnZzaiAOKAIAIgVBGXcgBUEOd3MgBUEDdnNqIgg2AkQgDSAFIBsoAgAiDGogBEEPdyAEQQ13cyAEQQp2c2ogDygCACIHQRl3IAdBDndzIAdBA3ZzaiIFNgJIIA0gByAcKAIAIgpqIAhBD3cgCEENd3MgCEEKdnNqIBAoAgAiDkEZdyAOQQ53cyAOQQN2c2oiBzYCTCANIA4gHSgCACISaiAFQQ93IAVBDXdzIAVBCnZzaiARKAIAIg9BGXcgD0EOd3MgD0EDdnNqIg42AlAgDSABIA9qIAdBD3cgB0ENd3MgB0EKdnNqIBMoAgAiEEEZdyAQQQ53cyAQQQN2c2oiDzYCVCANIAYgEGogFygCACIRQRl3IBFBDndzIBFBA3ZzaiAOQQ93IA5BDXdzIA5BCnZzaiIQNgJYIA0gGCgCACITIAggCUEZdyAJQQ53cyAJQQN2c2pqIBBBD3cgEEENd3MgEEEKdnNqIgg2AmAgDSAEIBFqIBNBGXcgE0EOd3MgE0EDdnNqIA9BD3cgD0ENd3MgD0EKdnNqIhE2AlwgDSALIAxBGXcgDEEOd3MgDEEDdnNqIAdqIAhBD3cgCEENd3MgCEEKdnNqIgc2AmggDSAJIAtBGXcgC0EOd3MgC0EDdnNqIAVqIBFBD3cgEUENd3MgEUEKdnNqIgk2AmQgDSAKIBJBGXcgEkEOd3MgEkEDdnNqIA9qIAdBD3cgB0ENd3MgB0EKdnNqIgs2AnAgDSAMIApBGXcgCkEOd3MgCkEDdnNqIA5qIAlBD3cgCUENd3MgCUEKdnNqIgk2AmwgDSABIAZBGXcgBkEOd3MgBkEDdnNqIBFqIAtBD3cgC0ENd3MgC0EKdnNqNgJ4IA0gEiABQRl3IAFBDndzIAFBA3ZzaiAQaiAJQQ93IAlBDXdzIAlBCnZzaiIBNgJ0IA0gBiAEQRl3IARBDndzIARBA3ZzaiAIaiABQQ93IAFBDXdzIAFBCnZzajYCfAwBCwsLDQAgACABIAEQVhDgAgvyAQEFfyMAQRBrIgNBADYACyADQQA2AggDQCACQR9GRQRAIAAgAmotAAAhBEEAIQEDQCABQQdGRQRAIANBCGogAWoiBSAFLQAAIAFBBXRB4BdqIAJqLQAAIARzcjoAACABQQFqIQEMAQsLIAJBAWohAgwBCwsgAC0AH0H/AHEhAkEAIQBBACEBA38gAUEHRgR/QQAhAQNAIAFBB0ZFBEAgA0EIaiABai0AAEEBayAAciEAIAFBAWohAQwBCwsgAEEIdkEBcQUgA0EIaiABaiIEIAQtAAAgAiABQQV0Qf8Xai0AAHNyOgAAIAFBAWohAQwBCwsLmwMBBX8jAEHQA2siAyQAA0AgAkEgRgRAQQAhAgNAIAJBP0ZFBEAgA0GQA2ogAmoiASABLQAAIARqIgEgAUEIaiIBQfABcWs6AAAgAkEBaiECIAHAQQR1IQQMAQsLIAMgAy0AzwMgBGo6AM8DIABBAEEoEBEiAEEBNgIoIABBLGpBAEEkEBEaIABBATYCUCAAQdQAakEAQcwAEBEaQQEhAgNAIAJBP0tFBEAgAyACQQF2IANBkANqIAJqLAAAEOUCIANB8AFqIgEgACADEOYBIAAgARAVIAJBAmohAgwBCwsgA0HwAWoiASAAEEQgA0H4AGoiAiABEDkgASACEDYgAiABEDkgASACEDYgAiABEDkgASACEDYgACABEBVBACECA0AgAkE/S0UEQCADIAJBAXYgA0GQA2ogAmosAAAQ5QIgA0HwAWoiASAAIAMQ5gEgACABEBUgAkECaiECDAELCyADQdADaiQABSADQZADaiACQQF0aiIFIAEgAmotAAAiBkEEdjoAASAFIAZBD3E6AAAgAkEBaiECDAELCwuVAQEEfyMAQTBrIgUkACAAIAFBKGoiAyABEBYgAEEoaiIEIAMgARAZIABB0ABqIgMgACACQShqEAcgBCAEIAIQByAAQfgAaiIGIAJB+ABqIAFB+ABqEAcgACABQdAAaiACQdAAahAHIAUgACAAEBYgACADIAQQGSAEIAMgBBAWIAMgBSAGEBkgBiAFIAYQFiAFQTBqJAALNgEBfyMAQUBqIgIkACAAIAIQHyAAQdABaiIAIAJCwAAQCyAAIAEQHyACQcAAEBIgAkFAayQAC+0BAQN/IwBBwAFrIgQkACACQYEBTwRAIAAQHiAAIAEgAq0QCyAAIAQQH0HAACECIAQhAQsgABAeIARBQGtBNkGAARARGgNAIAIgA0cEQCAEQUBrIANqIgUgBS0AACABIANqLQAAczoAACADQQFqIQMMAQsLIAAgBEFAayIDQoABEAsgAEHQAWoiABAeIANB3ABBgAEQERpBACEDA0AgAiADRwRAIARBQGsgA2oiBSAFLQAAIAEgA2otAABzOgAAIANBAWohAwwBCwsgACAEQUBrIgBCgAEQCyAAQYABEBIgBEHAABASIARBwAFqJAALNQEBfyMAQaADayIFJAAgBSABIAIQqgEgBSADIAStECggBSAAEKkBIAVBBBASIAVBoANqJAALbQECfyMAQcACayIHJAAgB0GQAmoiCEHADUEhEAYaIAcQHiAHIAhCIRALIAcgASACrBALIAcgAyAErBALIAcgBSAGrBALIAcgB0HQAWoiARAfIAAgARBNIAFBwAAQBCAHQdABEAQgB0HAAmokAAt/AQR/IwBBQGoiBSQAIABBIBAEIAJBACACQQBKGyEIA0AgBiAIRgRAIAVBIGpBIBAEIAVBQGskAAUgBSADIAQgASAGQeAAbGoiAhCvARogBUEgaiIHIAUgAkFAaxAbGiAHIAJBIGogBxAsGiAAIAAgBxAsGiAGQQFqIQYMAQsLC+MBAQJ/IwBBoANrIgUkACAFQeACaiIGIAMgBBD2AiAFQaACaiIDIAEgAkHgAGwQ9QIgBUGgAWogBkHAACADQcAAEAxBACEEIAJBACACQQBKGyEGA0AgBCAGRgRAIAVB4AJqQcAAEAQgBUGgAmpBwAAQBCAFQaABEAQgBUGgA2okAAUgBSAFQaABakGAASABIARB4ABsaiICQSAQDCAAIARBBnRqIgMgAikAGDcAGCADIAIpABA3ABAgAyACKQAINwAIIAMgAikAADcAACADQSBqIAVBoAEQ9AIgBEEBaiEEDAELCwtqAQR/IAJBACACQQBKGyEHAkADQCAGIgUgB0YNASAFQQFqIQYgAyABIAVBBnRqIgRBIBArDQALIAAgBCkAIDcAACAAIAQpADg3ABggACAEKQAwNwAQIAAgBCkAKDcACAtBf0EAIAIgBUwbCw8AIAAgAkEgIAFBIBD4AgsQACAAIAEgAiADQQAQtAEaC6gBAQN/IwBBoAJrIgUkACAFQYACaiIGIAMQWhogBUHgAWoiByAGIAQQGxogBUEQaiIDEB4gBUEOaiIEIAJBAhAOIAMgBEICEAsgAyABIAKsEAsgBEEgQQIQDiAFQRBqIAVBDmpCAhALIAMgB0IgEAsgBULG0rmLxq2aveUANwMAIAMgBUIIEAsgAyAAEB8gBkEgEAQgB0EgEAQgA0HQARAEIAVBoAJqJAALCwAgACABIAIQGxoLQQEBfyMAQSBrIgUkACAFIAEgAiAEEG9BfyEEIAVBIBBFRQRAIAAgAyAFEBsaIAVBIBAEQQAhBAsgBUEgaiQAIAQLgwIBAn8jAEGAIWsiBiQAQX8hByAEQdAPTARAIAZBgBFqIAJBIEEAQQAQDCAGQaARaiAEQQIQDiAGQaIRaiADIARBAEEAEAwgAEEgEAQgBkG6CikAADcAhRAgBkG1CikAADcDgBAgBEEjaiECIAYgBEEiaiIDaiEHIAZBkBBqIAUgBkGAEGpBDRBwIQVBACEEAn8DQCAAQSAQRQRAQX8gBEGAAkYNAhogBiAGQYARaiADQQBBABAMIAcgBEEBEA4gACAGIAIgBkGQEGogBRC3ASAEQQFqIQQMAQsLIAEgABAqGkEACyEHIAZBgBFqQYAQEAQgBkGAEBAECyAGQYAhaiQAIAcLgQMBBH8jAEHwA2siByQAIAdB0ANqIgggB0GwA2oiCSABIAIgAyAEIAUQ/AEgB0GQA2oiAyAGQSBqIgIgABAbGiAHQfACaiIAIAYgARAbGiAHQdACaiIEIAMgABAsGiADIAIgCBAbGiAAIAYgCRAbGiAHQbACaiIKIAMgABAsGiAHQaYKLQAAOgCoAiAHQZ4KKQAANwOgAiAHQSBqIgJBIEECEA4gAkECciABQSBBAEEAEAwgB0HCAGpBIEECEA4gB0HEAGogCEEgQQBBABAMIAdB5ABqQSBBAhAOIAdB5gBqIAlBIEEAQQAQDCAHQYYBakEgQQIQDiAHQYgBaiAEQSBBAEEAEAwgB0GoAWpBIEECEA4gB0GqAWogCkEgQQBBABAMIAdBygFqIAdBoAJqQQlBAEEAEAwgByACQbMBIAUQRiAIQSAQBCAJQSAQBCADQSAQBCAAQSAQBCAEQSAQBCAKQSAQBCACQYACEAQgByAGQSAQKyEAIAdB8ANqJAAgAEULMgEBfyMAQUBqIgUkACAFIAEgAiADIARBwAAQuAEaIAAgBRBNIAVBwAAQBCAFQUBrJAALvQQDBH8BfgF8IwBB4IMBayIGJAAgBEH/AUohB0F/IQggBwJ/IAW3RAAAAAAAAJA/opsiC5lEAAAAAAAA4EFjBEAgC6oMAQtBgICAgHgLIglB/wFKckUEQCAGQZCCAWoiBxAeIAZBkIEBaiIIQQBBgAEQERogByAIQoABEAsgByABIAKsEAsgBkEAOwGOgQFBAiEIIAZBjoEBaiIBIAVBAhAOIAcgAUICEAsgBkEAOgCNgQEgBkGNgQFqIgFBAEEBEA4gByABQgEQCyAHIAMgBKwiChALIAEgBEEBEA4gBkGQggFqIAZBjYEBakIBEAsgByAGQcCAAWoiAhAfIAZBkIIBahAeIAcgAkLAABALIAFBAUEBEA4gBkGQggFqIAZBjYEBakIBEAsgByADIAoQCyABIARBARAOIAZBkIIBaiAGQY2BAWpCARALIAcgBkGAgAFqIgEQHyAGQYABakEAQYD/ABARGiAGQUBrIAFBwAAQBhpBASAJIAlBAUwbQQFqIQEDfyABIAhGBH8gACAGQUBrIgAgBRAGGiAGQZCCAWpB0AEQBCAAQcD/ABAEQQAFIAZBkIIBaiIHEB4gBiAGQcCAAWogBkFAayAIQQZ0aiICQYABa0HAABBxIAcgBkLAABALIAZBjYEBaiIJIAhBARAOIAcgCUIBEAsgByADIAoQCyAJIARBARAOIAZBkIIBaiAGQY2BAWpCARALIAcgAkFAahAfIAhBAWohCAwBCwshCAsgBkHggwFqJAAgCAvYBAMEfwF+AXwjAEGAwgBrIgYkACAEQf8BSiEHQX8hCCAHAn8gBbdEAAAAAAAAoD+imyILmUQAAAAAAADgQWMEQCALqgwBC0GAgICAeAsiCUH/AUpyRQRAIAZBmMEAaiIHEEkgBkHQwABqIghBAEHAABARGiAHIAhCwAAQICAHIAEgAqwQICAGQQA7Ac5AQQIhCCAGQc7AAGoiASAFQQIQDiAHIAFCAhAgIAZBADoAzUAgBkHNwABqIgFBAEEBEA4gByABQgEQICAHIAMgBKwiChAgIAEgBEEBEA4gBkGYwQBqIAZBzcAAakIBECAgByAGQaDAAGoiAhBBIAZBmMEAahBJIAcgAkIgECAgAUEBQQEQDiAGQZjBAGogBkHNwABqQgEQICAHIAMgChAgIAEgBEEBEA4gBkGYwQBqIAZBzcAAakIBECAgByAGQYBAaxBBIAZBQGtBAEHAPxARGiAGIAZBmMAAaikDADcDOCAGIAZBkMAAaikDADcDMCAGIAYpA4hANwMoIAYgBikDgEA3AyBBASAJIAlBAUwbQQFqIQEDfyABIAhGBH8gACAGQSBqIgAgBRAGGiAGQZjBAGpB6AAQBCAAQeA/EARBAAUgBkGYwQBqIgcQSSAGIAZBoMAAaiAGQSBqIAhBBXRqIgJBQGpBIBBxIAcgBkIgECAgBkHNwABqIgkgCEEBEA4gByAJQgEQICAHIAMgChAgIAkgBEEBEA4gBkGYwQBqIAZBzcAAakIBECAgByACQSBrEEEgCEEBaiEIDAELCyEICyAGQYDCAGokACAIC0MBAn8jAEHgA2siAiQAIAJBoAJqIgMgARA+GiACIAMQmAEgAhCtAiAAIAIQPyADQcABEAQgAkGgAhAEIAJB4ANqJAALLgEBfyMAQZABayICJAAgAkGAmAIgARC3AiAAIAIQYyACQZABEAQgAkGQAWokAAsnAQF/IwBBIGsiASQAIAFBIBApIAAgARDDASABQSAQBCABQSBqJAALRQECfyMAQYAJayICJAAgAkHABGoiAyABQcAEEAYaIAIgAxCfAiAAIAJBwAQQBhogA0HABBAEIAJBwAQQBCACQYAJaiQACwsAIAAgASACEKsCC6QDAQN/IAEgAEEEaiIEakEBa0EAIAFrcSIFIAJqIAAgACgCACIBakEEa00EfyAAKAIEIgMgACgCCDYCCCAAKAIIIAM2AgQgBCAFRwRAIAAgAEEEaygCAEF+cWsiAyAFIARrIgQgAygCAGoiBTYCACAFQXxxIANqQQRrIAU2AgAgACAEaiIAIAEgBGsiATYCAAsCQCABIAJBGGpPBEAgACACakEIaiIDIAEgAmtBCGsiATYCACABQXxxIANqQQRrIAFBAXI2AgAgAwJ/IAMoAgBBCGsiAUH/AE0EQCABQQN2QQFrDAELIAFnIQQgAUEdIARrdkEEcyAEQQJ0a0HuAGogAUH/H00NABpBPyABQR4gBGt2QQJzIARBAXRrQccAaiIBIAFBP08bCyIBQQR0IgRBsMUCajYCBCADIARBuMUCaiIEKAIANgIIIAQgAzYCACADKAIIIAM2AgRBuM0CQbjNAikDAEIBIAGthoQ3AwAgACACQQhqIgE2AgAgAUF8cSAAakEEayABNgIADAELIAAgAWpBBGsgATYCAAsgAEEEagVBAAsL5wMBBX9BpL8CKAIAIgMgAEEHakF4cSIEaiECQX8hAQJAIARBACACIANNGw0AIAI/AEEQdEsEQCACEAJFDQELQaS/AiACNgIAIAMhAQsgASIDQX9HBEAgACADaiICQRBrIgFBEDYCDCABQRA2AgACQAJ/QbDNAigCACIABH8gACgCCAVBAAsgA0YEQCADIANBBGsoAgBBfnFrIgRBBGsoAgAhBSAAIAI2AghBcCAEIAVBfnFrIgAgACgCAGpBBGstAABBAXFFDQEaIAAoAgQiAiAAKAIINgIIIAAoAgggAjYCBCAAIAEgAGsiATYCAAwCCyADQRA2AgwgA0EQNgIAIAMgAjYCCCADIAA2AgRBsM0CIAM2AgBBEAsgA2oiACABIABrIgE2AgALIAFBfHEgAGpBBGsgAUEBcjYCACAAAn8gACgCAEEIayIBQf8ATQRAIAFBA3ZBAWsMAQsgAUEdIAFnIgJrdkEEcyACQQJ0a0HuAGogAUH/H00NABpBPyABQR4gAmt2QQJzIAJBAXRrQccAaiIBIAFBP08bCyIBQQR0IgJBsMUCajYCBCAAIAJBuMUCaiICKAIANgIIIAIgADYCACAAKAIIIAA2AgRBuM0CQbjNAikDAEIBIAGthoQ3AwALIANBf0cLGwAgACABQTAQEyAAQTBqIAFBMGogAkEBcRA0C44CAQF/IAFFBEAgACAAQfAAahCMASAAQsAANwMgIABBKGpBwAAQHCAAQQA2AmgPCyAAQbABaiIDQcAAEBwCQCACQcEATwRAIAAQngEgACABIAIQMSADIAAQggEMAQsgAyABIAIQZQtBACEBA0AgAUEQRkUEQCADIAFBAnRqIgIgAigCAEG27NixA3M2AgAgAUEBaiEBDAELCyAAEJ4BIAAgA0HAABAxIABB8ABqIAAQjAFBACEBA0AgAUEQRkUEQCADIAFBAnRqIgIgAigCAEHq1KnTBnM2AgAgAUEBaiEBDAELCyAAQZABaiIBEIoCIAEgA0EBEEcgA0HAABAcIABBAzsB7gEgAEGAAToA0AELKQEBfyMAQSBrIgIkACACIAFBIBA1IAAgAhCBASACQSAQHCACQSBqJAALCwAgACABQQMQyAELSQIDfwF+A0AgAyAERkUEQCAAIARBAnQiBmogAiAGajUCACABIAZqNQIAIAWtfHwiBz4CACAHQiCIpyEFIARBAWohBAwBCwsgBQuVAQEGfyMAIghB4ABrIgUkACAFQeAAayIGJAAgBSABQQAgAkEfdiIBayIHQRgQWyEJIAUgBSACIAdzIAFqIgFBGBCLASECIAYgA0EAIARBH3YiA2siB0EYEFshCiAGIAYgBCAHcyADaiIDQRgQiwEhBCAAIAUgBkEYEMUBIQAgCCQAIAAgAiAEaiABIAlxIAMgCnFqa2oLmQEBBn8jAEEwayEDIAAoAgAhBgN/IAFBDEYEf0EAIQEDQCABQQxHBEAgAyABQQJ0IgBqNQIAIABB0JsCajUCACAErXx9QiCIp0EBcSEEIAFBAWohAQwBCwsgBSAEa0ECcSAGQQFxckECcwUgAyABQQJ0IgJqIAUgACACaigCACICQQF0cjYCACABQQFqIQEgAkEfdiEFDAELCwv8AQIFfwF+IwBBMGshBwNAIAIEQCACQQFrIQJBACEEQQAhBUEAIQMDQCADQQxGBEBBACEDA0AgA0EMRwRAIAAgA0ECdCIBaiABIAdqNQIAIAFB0JsCajUCACAErXx9Igg+AgAgCEIgiKdBAXEhBCADQQFqIQMMAQsLIAUgBGsiAUF/cyEEQQAhAwNAIANBDEYEQCAAIQEMBQUgACADQQJ0IgVqIgYgBSAHaigCACABcSAGKAIAIARxcjYCACADQQFqIQMMAQsACwAFIAcgA0ECdCIGaiAFIAEgBmooAgAiBkEBdHI2AgAgA0EBaiEDIAZBH3YhBQwBCwALAAsLC7kDAgh/AX4jAEEwayIGQTBrIQcDQCACQQxGBEBBACECA0AgAkEMRwRAIAcgAkECdCIFaiAFIAZqNQIAIAVB0JsCajUCACAErXx9Igo+AgAgCkIgiKdBAXEhBCACQQFqIQIMAQsLIAMgBGsiA0F/cyEFQQAhBEEAIQIDQCACQQxGBEBBACECA0AgAkEMRgRAQQAhAUEAIQIDQCACQQxHBEAgACACQQJ0IgNqIAMgBmo1AgAgA0HQmwJqNQIAIAGtfH0iCj4CACAKQiCIp0EBcSEBIAJBAWohAgwBCwsgBCABayIBQX9zIQRBACECA0AgAkEMRwRAIAAgAkECdCIDaiIHIAMgBmooAgAgAXEgBygCACAEcXI2AgAgAkEBaiECDAELCwUgBiACQQJ0IgNqIAMgB2o1AgAgASADajUCACAErXx8Igo+AgAgCkIgiKchBCACQQFqIQIMAQsLBSAHIAJBAnQiCGoiCSAGIAhqKAIAIANxIAkoAgAgBXFyNgIAIAJBAWohAgwBCwsFIAYgAkECdCIFaiADIAEgBWooAgAiBUEBdHI2AgAgAkEBaiECIAVBH3YhAwwBCwsLRAECfyMAQeAAayICJAAgAkEwaiIDIAEQkwIgAiADIAEQCSACIAIQGCACIAFBMBAjIQEgACADQTAQEyACQeAAaiQAIAELhQIBA38jAEGAEmsiBCQAIARBgAlqIgIgAUHABBATIAIQPSAEQcAEaiIDIAEQmgIgACACIAMQJiADIABBAhCSASAAIAAgAxAmIARBwA1qIgEgABBRIAIgARB5IAIgAhBRIAMgAhB5IAQgAEHABBATIAQQPSACIAIgBBAmIAIQPSACIAIgAxAmIAMgAhB5IAMgAxBRIAQgAxB5IAQgBBBRIAIQPSAEIAQgAhAmIAIQPSACIAJBAxCSASADIANBAhCSASACIAIgAxAmIAMgBBB5IAMgAxBRIAMgAyABECYgAyADIAAQJiACIAIgAxAmIAMgBEEBEJIBIAAgAiADECYgBEGAEmokAAu/AgEJfyMAQaAFayIEJAAgBEHgA2oiCSACEA8gBEGAA2oiBSACQeAAaiIGEA8gBEHABGoiCiACQcABaiILEA8gBEGgAmoiByAFEA8gBEHAAWoiAyACIAUQCCADIAMQDyADIAMgCRAKIAMgAyAHEAogAyADIAMQCCAEQeAAaiIIIAkQlgEgBCAIEA8gACAIIAIQCCABIAQgAxAKIAEgASADEAogAUHAAWoiAiAGIAsQCCACIAIQDyACIAIgBRAKIAIgAiAKEAogByAHEKgCIAFB4ABqIgYgAyABEAogBiAGIAgQBSAGIAYgBxAKIAAgABAPIAAgACAJEAogACAAIAQQCiAFIAVBAhDIASAFQTBqIgEgAUECEMgBIAAgACAFEAogAEHgAGogCCAKEAUgAEHAAWogAiAKEAUgBEGgBWokAAuzAQIFfwF+IwAiAyEGIANBMGsiBSQAQQAhAwNAIANBDEcEQCAFIANBAnQiBGogCCAEQdCbAmo1AgB8IAEgBGo1AgB9Igg+AgAgCEIghyEIIANBAWohAwwBCwsgAUEwEBBBAXMgAnEiAkEBayEEQQAhA0EAIAJrIQcDQCADQQxHBEAgACADQQJ0IgJqIAIgBWooAgAgB3EgASACaigCACAEcXI2AgAgA0EBaiEDDAELCyAGJAAL1wEBB38jAEHgBmsiAyQAIANBwARqIgYgASACEJ0CIAMgAUHgA2ogAkHAAWoiBBAFIANB4ANqIgUgAUGAA2ogBBAFIANBgANqIgggAUGgAmoiCSAEEAUgA0GgAmoiByADECcgAyACQeAAEBMgA0HgAGogAkHgAGogBBAIIABBoAJqIgIgASAJEHwgAiACIAMQnQIgAiACIAYQeyACIAIgBxB7IAUgBRAnIAAgBiAFEAggAEHgAGogA0GgBWogBxAIIABBwAFqIANBgAZqIAgQCCADQeAGaiQAC1oBA38jAEHAAWsiBCQAIARB4ABqIgUgARAPIAQgAhAPIABB4ABqIgMgASACEAggACAEECcgACAAIAUQCCADIAMQDyADIAMgBRAKIAMgAyAEEAogBEHAAWokAAtAAQF/IwBBoAJrIgEkACABIABBwAEQEyABQcABaiAAQYCcAkHgACAAQcABEBAQFCABENEBIQAgAUGgAmokACAAC9sBAQp/IwBBwARrIgIkACACQaACaiIDIAAQUyACIAAQ0gEgAkEBEGAjAEHABGsiASQAIANBwAFqIgRB4AAQECEJIAJBwAFqIgVB4AAQECEKIAFB4ANqIgYgBBAPIAFBgANqIgcgBRAPIAFBwAFqIgAgAyAHEAUgASACIAYQBSABQaACaiIIIANB4ABqIAUQBSABQeAAaiIDIAJB4ABqIAQQBSAIIAggBxAFIAMgAyAGEAUgACABQcABECMhACABQcAEaiQAIAAgCSAKc0EBc3EhACACQcAEaiQAIAALMAAgACABEFQgACABQQIQdCAAIAFBAxB0IAAgAUEJEHQgACABQSAQdCAAIAFBEBB0C+oCAQ1/IwBBwAdrIgUkACABQcABaiIJQeAAEBAhDiAFQcAEaiIKIAkQDyAFQeAGaiIDIAogCRAFIAMgAyACQeAAahAFIAJBwAFqIgtB4AAQECEPIAVB4ANqIgwgCxAPIAVBoAJqIgcgDCALEAUgByAHIAFB4ABqEAUgAyADIAcQCiADIAMgAxAIIAVBgANqIg0gASAMEAUgBUHAAWoiCCACIAoQBSAIIAggDRAKIAVB4ABqIgQgCCAIEAggBCAEEA8gBSAIIAQQBSAHIAcgBRAFIAVBgAZqIgYgDSAEEAUgBUGgBWoiBCADEA8gBCAEIAUQCiAEIAQgBhAKIAQgBCAGEAogBiAGIAQQCiAGIAYgAxAFIAYgBiAHEAogBiAGIAcQCiADIAkgCxAIIAMgAxAPIAMgAyAKEAogAyADIAwQCiADIAMgCBAFIAQgASAEQaACIA8QFCAAIAIgBEGgAiAOEBQgBUHAB2okAAvmAQEKfyMAQaACayICJAAgAkGQAWoiASAAELICIAIgARCyAiACQQEQnAEgASAAELACIAEgARCwAiMAQaACayIAJAAgAUHgAGoiA0EwEBAhCCACQeAAaiIEQTAQECEJIABB8AFqIgUgAxAYIABBwAFqIgYgBBAYIABB4ABqIgogASAGEAkgACACIAUQCSAAQZABaiIHIAFBMGogBBAJIABBMGoiASACQTBqIAMQCSAHIAcgBhAJIAEgASAFEAkgCiAAQeAAECMhASAAQaACaiQAIAEgCCAJc0EBc3EhACACQaACaiQAIAALEAAgACABQeCjAkH9AhCIAgvlAgENfyMAQeADayIFJAAgAUHgAGoiCUEwEBAhDiAFQaACaiIKIAkQGCAFQbADaiIDIAogCRAJIAMgAyACQTBqEAkgAkHgAGoiC0EwEBAhDyAFQfABaiIMIAsQGCAFQZABaiIHIAwgCxAJIAcgByABQTBqEAkgAyADIAcQFyADIAMgAxAaIAVBwAFqIg0gASAMEAkgBUHgAGoiCCACIAoQCSAIIAggDRAXIAVBMGoiBCAIIAgQGiAEIAQQGCAFIAggBBAJIAcgByAFEAkgBUGAA2oiBiANIAQQCSAFQdACaiIEIAMQGCAEIAQgBRAXIAQgBCAGEBcgBCAEIAYQFyAGIAYgBBAXIAYgBiADEAkgBiAGIAcQFyAGIAYgBxAXIAMgCSALEBogAyADEBggAyADIAoQFyADIAMgDBAXIAMgAyAIEAkgBCABIARBkAEgDxAUIAAgAiAEQZABIA4QFCAFQeADaiQACzIBAn8DQCABIAJGRQRAIAAgAmotAAAgA3IhAyACQQFqIQIMAQsLIANB/wFxQQFrQR92C2YBBH8jAEHgAGsiAiQAIAFB4ABqIgNBMBAQIQUgAkEwaiIEIAMQvwIgAiAEEBggACABIAIQCSACIAIgBBAJIABBMGogAUEwaiACEAkgAEHgAGogA0HgmAJBMCAFEBQgAkHgAGokAAsSACAAIAEgAkGQmQJBf0EIEF0LFQAgABAeIAEEQCAAQbCXAkIiEAsLCygBAX8jAEFAaiIDJAAgACADEB8gASADQsAAIAJBARDOAiADQUBrJAAL3wIBAn8jACIEIQUgBEHABGtBQHEiBCQAIAQgATYCvAECQCABQcAATQRAIARBwAFqIAEQ4QFBAEgNASAEQcABaiAEQbwBakIEECRBAEgNASAEQcABaiACIAOtECRBAEgNASAEQcABaiAAIAEQ4AEaDAELIARBwAFqQcAAEOEBQQBIDQAgBEHAAWogBEG8AWpCBBAkQQBIDQAgBEHAAWogAiADrRAkQQBIDQAgBEHAAWogBEHwAGpBwAAQ4AFBAEgNAANAAkAgACAEKQNwNwAAIAAgBCkDeDcACCAAIAQpA4gBNwAYIAAgBCkDgAE3ABAgBEEwaiAEQfAAakHAABAGGiAAQSBqIQAgAUEgayIBQcEASQ0AIARB8ABqQcAAIARBMGoQ2gJBAE4NAQwCCwsgBEHwAGogASAEQTBqENoCQQBIDQAgACAEQfAAaiABEAYaCyAEQcABakGAAxASIAUkAAucFgITfgN/IwBBgBBrIhYkACAWQYAIaiIXIAFBgAgQBhogFyAAEIMBIBYgF0GACBAGIhcgAhCDAUEAIQFBACEAA0AgAEEIRgRAA0AgAUEIRkUEQCAXQYAIaiABQQR0aiIAIAApA4gDIgYgACkDiAEiB3wgB0IBhkL+////H4MgBkL/////D4N+fCIHIAApA4gHhUIgiSIEIAApA4gFIgV8IAVCAYZC/v///x+DIARC/////w+DfnwiBSAGhUIoiSIGIAd8IAZC/////w+DIAdCAYZC/v///x+DfnwiByAEhUIwiSIEIAApA4gCIgMgACkDCCIIfCAIQgGGQv7///8fgyADQv////8Pg358IgggACkDiAaFQiCJIgsgACkDiAQiDHwgDEIBhkL+////H4MgC0L/////D4N+fCIMIAOFQiiJIgMgCHwgA0L/////D4MgCEIBhkL+////H4N+fCIIIAuFQjCJIgsgDHwgC0L/////D4MgDEIBhkL+////H4N+fCIMIAOFQgGJIgMgACkDgAIiDyAAKQMAIgp8IApCAYZC/v///x+DIA9C/////w+DfnwiCiAAKQOABoVCIIkiECAAKQOABCITfCATQgGGQv7///8fgyAQQv////8Pg358IhMgD4VCKIkiDyAKfCAPQv////8PgyAKQgGGQv7///8fg358Igp8IANC/////w+DIApCAYZC/v///x+DfnwiCYVCIIkiFCAAKQOAAyIRIAApA4ABIg18IA1CAYZC/v///x+DIBFC/////w+DfnwiDSAAKQOAB4VCIIkiEiAAKQOABSIOfCAOQgGGQv7///8fgyASQv////8Pg358Ig4gEYVCKIkiESANfCARQv////8PgyANQgGGQv7///8fg358Ig0gEoVCMIkiEiAOfCASQv////8PgyAOQgGGQv7///8fg358Ig58IBRC/////w+DIA5CAYZC/v///x+DfnwiFSADhUIoiSIDIAl8IANC/////w+DIAlCAYZC/v///x+DfnwiCTcDACAAIAkgFIVCMIkiCTcDiAcgACAJIBV8IAlC/////w+DIBVCAYZC/v///x+DfnwiCTcDgAUgACADIAmFQgGJNwOIAiAAIAQgBXwgBEL/////D4MgBUIBhkL+////H4N+fCIEIA4gEYVCAYkiBSAIfCAFQv////8PgyAIQgGGQv7///8fg358IgMgCiAQhUIwiSIIhUIgiSIKfCAEQgGGQv7///8fgyAKQv////8Pg358IhAgBYVCKIkiBSADfCAFQv////8PgyADQgGGQv7///8fg358IgkgCoVCMIkiAzcDgAYgACAJNwMIIAAgAyAQfCADQv////8PgyAQQgGGQv7///8fg358IgM3A4gFIAAgAyAFhUIBiTcDgAMgACAEIAaFQgGJIgYgDXwgBkL/////D4MgDUIBhkL+////H4N+fCIEIAuFQiCJIgUgCCATfCAIQv////8PgyATQgGGQv7///8fg358IgN8IAVC/////w+DIANCAYZC/v///x+DfnwiCCAGhUIoiSIGIAR8IAZC/////w+DIARCAYZC/v///x+DfnwiCyAFhUIwiSIENwOIBiAAIAs3A4ABIAAgBCAIfCAEQv////8PgyAIQgGGQv7///8fg358IgQ3A4AEIAAgBCAGhUIBiTcDiAMgACAHIAMgD4VCAYkiBnwgB0IBhkL+////H4MgBkL/////D4N+fCIHIBKFQiCJIgQgDHwgBEL/////D4MgDEIBhkL+////H4N+fCIFIAaFQiiJIgYgB3wgBkL/////D4MgB0IBhkL+////H4N+fCIDIASFQjCJIgc3A4AHIAAgAzcDiAEgACAFIAd8IAdC/////w+DIAVCAYZC/v///x+DfnwiBzcDiAQgACAGIAeFQgGJNwOAAiABQQFqIQEMAQsLIAIgF0GACBAGIBdBgAhqEIMBIBdBgBBqJAAFIBdBgAhqIABBB3RqIhYgFikDOCIGIBYpAxgiB3wgB0IBhkL+////H4MgBkL/////D4N+fCIHIBYpA3iFQiCJIgQgFikDWCIFfCAFQgGGQv7///8fgyAEQv////8Pg358IgUgBoVCKIkiBiAHfCAGQv////8PgyAHQgGGQv7///8fg358IgcgBIVCMIkiBCAWKQMoIgMgFikDCCIIfCAIQgGGQv7///8fgyADQv////8Pg358IgggFikDaIVCIIkiCyAWKQNIIgx8IAxCAYZC/v///x+DIAtC/////w+DfnwiDCADhUIoiSIDIAh8IANC/////w+DIAhCAYZC/v///x+DfnwiCCALhUIwiSILIAx8IAtC/////w+DIAxCAYZC/v///x+DfnwiDCADhUIBiSIDIBYpAyAiDyAWKQMAIgp8IApCAYZC/v///x+DIA9C/////w+DfnwiCiAWKQNghUIgiSIQIBZBQGsiGCkDACITfCATQgGGQv7///8fgyAQQv////8Pg358IhMgD4VCKIkiDyAKfCAPQv////8PgyAKQgGGQv7///8fg358Igp8IANC/////w+DIApCAYZC/v///x+DfnwiCYVCIIkiFCAWKQMwIhEgFikDECINfCANQgGGQv7///8fgyARQv////8Pg358Ig0gFikDcIVCIIkiEiAWKQNQIg58IA5CAYZC/v///x+DIBJC/////w+DfnwiDiARhUIoiSIRIA18IBFC/////w+DIA1CAYZC/v///x+DfnwiDSAShUIwiSISIA58IBJC/////w+DIA5CAYZC/v///x+DfnwiDnwgFEL/////D4MgDkIBhkL+////H4N+fCIVIAOFQiiJIgMgCXwgA0L/////D4MgCUIBhkL+////H4N+fCIJNwMAIBYgCSAUhUIwiSIJNwN4IBYgCSAVfCAJQv////8PgyAVQgGGQv7///8fg358Igk3A1AgFiADIAmFQgGJNwMoIBYgBCAFfCAEQv////8PgyAFQgGGQv7///8fg358IgQgDiARhUIBiSIFIAh8IAVC/////w+DIAhCAYZC/v///x+DfnwiAyAKIBCFQjCJIgiFQiCJIgp8IARCAYZC/v///x+DIApC/////w+DfnwiECAFhUIoiSIFIAN8IAVC/////w+DIANCAYZC/v///x+DfnwiCSAKhUIwiSIDNwNgIBYgCTcDCCAWIAUgAyAQfCADQv////8PgyAQQgGGQv7///8fg358IgWFQgGJNwMwIBYgBTcDWCAWIAQgBoVCAYkiBiANfCAGQv////8PgyANQgGGQv7///8fg358IgQgC4VCIIkiBSAIIBN8IAhC/////w+DIBNCAYZC/v///x+DfnwiA3wgBUL/////D4MgA0IBhkL+////H4N+fCIIIAaFQiiJIgYgBHwgBkL/////D4MgBEIBhkL+////H4N+fCIENwMQIBYgBCAFhUIwiSIENwNoIBggBCAIfCAEQv////8PgyAIQgGGQv7///8fg358Igg3AwAgFiAHIAMgD4VCAYkiBHwgB0IBhkL+////H4MgBEL/////D4N+fCIHIBKFQiCJIgUgDHwgBUL/////D4MgDEIBhkL+////H4N+fCIDIASFQiiJIgQgB3wgBEL/////D4MgB0IBhkL+////H4N+fCILIAWFQjCJIgcgA3wgB0L/////D4MgA0IBhkL+////H4N+fCIFNwNIIBYgBzcDcCAWIAs3AxggFiAGIAiFQgGJNwM4IBYgBCAFhUIBiTcDICAAQQFqIQAMAQsLC6QEAg5+Cn8gAC0AUEVBGHQhFiAAKAIkIRIgACgCICETIAAoAhwhFCAAKAIYIRUgACgCFCERIAAoAhAiF60hDyAAKAIMIhitIQ0gACgCCCIZrSELIAAoAgQiGq0hCSAaQQVsrSEQIBlBBWytIQ4gGEEFbK0hDCAXQQVsrSEKIAA1AgAhCANAIAJCEFRFBEAgASgAA0ECdkH///8fcSAVaq0iAyANfiABKAAAQf///x9xIBFqrSIEIA9+fCABKAAG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ayEBQgAMAgsgACAfbCEAIAkgGFEEQCAAIB5qQQFrIQFCAAwCCyAAIB5FayEBQgAMAQsgHiAAQX9zakEAQX8gHhsgAGsgCSAYURsgG2ohAUIAIB9BA0YNABogACAsbK0LIQggBSgCACgCBCIAIBsgCadsQQp0aiAIIAFBAWutfCABrSALQv////8PgyIJIAl+QiCIfkIgiH0gG62Cp0EKdGohASAAIChBCnRqIRsgACAdQQp0aiEpAkAgIARAIBsgASApEN0BDAELIANBgBhqIgAgAUGACBAGGiAAIBsQgwEgA0GAEGogAEGACBAGGkEAIRtBACEBA0AgAUEIRwRAIANBgBhqIAFBB3RqIgAgACkDOCIJIAApAxgiC3wgC0IBhkL+////H4MgCUL/////D4N+fCILIAApA3iFQiCJIgggACkDWCIMfCAIQv////8PgyAMQgGGQv7///8fg358IgwgCYVCKIkiCSALfCAJQv////8PgyALQgGGQv7///8fg358IgsgCIVCMIkiCCAAKQMoIgcgACkDCCIKfCAKQgGGQv7///8fgyAHQv////8Pg358IgogACkDaIVCIIkiDyAAKQNIIhB8IA9C/////w+DIBBCAYZC/v///x+DfnwiECAHhUIoiSIHIAp8IAdC/////w+DIApCAYZC/v///x+DfnwiCiAPhUIwiSIPIBB8IA9C/////w+DIBBCAYZC/v///x+DfnwiECAHhUIBiSIHIAApAyAiEyAAKQMAIg58IA5CAYZC/v///x+DIBNC/////w+DfnwiDiAAKQNghUIgiSIUIABBQGsiLSkDACIXfCAUQv////8PgyAXQgGGQv7///8fg358IhcgE4VCKIkiEyAOfCATQv////8PgyAOQgGGQv7///8fg358Ig58IAdC/////w+DIA5CAYZC/v///x+DfnwiDYVCIIkiGSAAKQMwIhUgACkDECIRfCARQgGGQv7///8fgyAVQv////8Pg358IhEgACkDcIVCIIkiFiAAKQNQIhJ8IBZC/////w+DIBJCAYZC/v///x+DfnwiEiAVhUIoiSIVIBF8IBVC/////w+DIBFCAYZC/v///x+DfnwiESAWhUIwiSIWIBJ8IBZC/////w+DIBJCAYZC/v///x+DfnwiEnwgGUL/////D4MgEkIBhkL+////H4N+fCIaIAeFQiiJIgcgDXwgB0L/////D4MgDUIBhkL+////H4N+fCINNwMAIAAgDSAZhUIwiSINNwN4IAAgDSAafCANQv////8PgyAaQgGGQv7///8fg358Ig03A1AgACAHIA2FQgGJNwMoIAAgEiAVhUIBiSIHIAp8IAdC/////w+DIApCAYZC/v///x+DfnwiCiAOIBSFQjCJIg6FQiCJIhQgCCAMfCAIQv////8PgyAMQgGGQv7///8fg358Igh8IBRC/////w+DIAhCAYZC/v///x+DfnwiDCAHhUIoiSIHIAp8IAdC/////w+DIApCAYZC/v///x+DfnwiDSAUhUIwiSIKNwNgIAAgDTcDCCAAIAogDHwgCkL/////D4MgDEIBhkL+////H4N+fCIMIAeFQgGJNwMwIAAgDDcDWCAAIAggCYVCAYkiCSARfCAJQv////8PgyARQgGGQv7///8fg358IgggD4VCIIkiDCAOIBd8IA5C/////w+DIBdCAYZC/v///x+DfnwiB3wgDEL/////D4MgB0IBhkL+////H4N+fCIKIAmFQiiJIgkgCHwgCUL/////D4MgCEIBhkL+////H4N+fCIINwMQIAAgCCAMhUIwiSIINwNoIC0gCCAKfCAIQv////8PgyAKQgGGQv7///8fg358Igo3AwAgACALIAcgE4VCAYkiCHwgC0IBhkL+////H4MgCEL/////D4N+fCILIBaFQiCJIgwgEHwgDEL/////D4MgEEIBhkL+////H4N+fCIHIAiFQiiJIgggC3wgCEL/////D4MgC0IBhkL+////H4N+fCIPIAyFQjCJIgsgB3wgC0L/////D4MgB0IBhkL+////H4N+fCIMNwNIIAAgCzcDcCAAIA83AxggACAJIAqFQgGJNwM4IAAgCCAMhUIBiTcDICABQQFqIQEMAQsLA0AgG0EIRwRAIANBgBhqIBtBBHRqIgAgACkDiAMiCSAAKQOIASILfCALQgGGQv7///8fgyAJQv////8Pg358IgsgACkDiAeFQiCJIgggACkDiAUiDHwgCEL/////D4MgDEIBhkL+////H4N+fCIMIAmFQiiJIgkgC3wgCUL/////D4MgC0IBhkL+////H4N+fCILIAiFQjCJIgggACkDiAIiByAAKQMIIgp8IApCAYZC/v///x+DIAdC/////w+DfnwiCiAAKQOIBoVCIIkiDyAAKQOIBCIQfCAPQv////8PgyAQQgGGQv7///8fg358IhAgB4VCKIkiByAKfCAHQv////8PgyAKQgGGQv7///8fg358IgogD4VCMIkiDyAQfCAPQv////8PgyAQQgGGQv7///8fg358IhAgB4VCAYkiByAAKQOAAiITIAApAwAiDnwgDkIBhkL+////H4MgE0L/////D4N+fCIOIAApA4AGhUIgiSIUIAApA4AEIhd8IBRC/////w+DIBdCAYZC/v///x+DfnwiFyAThUIoiSITIA58IBNC/////w+DIA5CAYZC/v///x+DfnwiDnwgB0L/////D4MgDkIBhkL+////H4N+fCINhUIgiSIZIAApA4ADIhUgACkDgAEiEXwgEUIBhkL+////H4MgFUL/////D4N+fCIRIAApA4AHhUIgiSIWIAApA4AFIhJ8IBZC/////w+DIBJCAYZC/v///x+DfnwiEiAVhUIoiSIVIBF8IBVC/////w+DIBFCAYZC/v///x+DfnwiESAWhUIwiSIWIBJ8IBZC/////w+DIBJCAYZC/v///x+DfnwiEnwgGUL/////D4MgEkIBhkL+////H4N+fCIaIAeFQiiJIgcgDXwgB0L/////D4MgDUIBhkL+////H4N+fCINNwMAIAAgDSAZhUIwiSINNwOIByAAIA0gGnwgDUL/////D4MgGkIBhkL+////H4N+fCINNwOABSAAIAcgDYVCAYk3A4gCIAAgEiAVhUIBiSIHIAp8IAdC/////w+DIApCAYZC/v///x+DfnwiCiAOIBSFQjCJIg6FQiCJIhQgCCAMfCAIQv////8PgyAMQgGGQv7///8fg358Igh8IBRC/////w+DIAhCAYZC/v///x+DfnwiDCAHhUIoiSIHIAp8IAdC/////w+DIApCAYZC/v///x+DfnwiDSAUhUIwiSIKNwOABiAAIA03AwggACAKIAx8IApC/////w+DIAxCAYZC/v///x+DfnwiDDcDiAUgACAHIAyFQgGJNwOAAyAAIAggCYVCAYkiCSARfCAJQv////8PgyARQgGGQv7///8fg358IgggD4VCIIkiDCAOIBd8IA5C/////w+DIBdCAYZC/v///x+DfnwiB3wgDEL/////D4MgB0IBhkL+////H4N+fCIKIAmFQiiJIgkgCHwgCUL/////D4MgCEIBhkL+////H4N+fCIPIAyFQjCJIgg3A4gGIAAgDzcDgAEgACAIIAp8IAhC/////w+DIApCAYZC/v///x+DfnwiCDcDgAQgACAIIAmFQgGJNwOIAyAAIAsgByAThUIBiSIJfCALQgGGQv7///8fgyAJQv////8Pg358IgsgFoVCIIkiCCAQfCAIQv////8PgyAQQgGGQv7///8fg358IgwgCYVCKIkiCSALfCAJQv////8PgyALQgGGQv7///8fg358IgcgCIVCMIkiCzcDgAcgACAHNwOIASAAIAsgDHwgC0L/////D4MgDEIBhkL+////H4N+fCILNwOIBCAAIAkgC4VCAYk3A4ACIBtBAWohGwwBCwsgKSADQYAQakGACBAGIANBgBhqEIMBCyAoQQFqIQEgHUEBaiEdIB5BAWohHgwACwALIANBgCBqJAAgBSgCHCEADAELCyAlQQFqISUMAAsACyAEQSBqJAAgIkEBaiEiDAELCyMAQYAQayIDJAAgAkUgHEEEaiIERXJFBEAgA0GACGogBCgCACIdKAIEIAQoAhgiBUEKdGpBgAhrQYAIEAYaQQEgBCgCHCIAIABBAU0bIR4gBUEBayEfQQEhAQNAIAEgHkcEQCAdKAIEIB8gASAFbGpBCnRqIRtBACEAA0AgAEGAAUcEQCAAQQN0IiAgA0GACGpqIiIgIikDACAbICBqKQMAhTcDACAAQQFqIQAMAQsLIAFBAWohAQwBCwtBACEAA0AgAEGAAUcEQCADIABBA3QiAWogA0GACGogAWopAwA3AwAgAEEBaiEADAELCyACKAIAIAIoAgQgA0GACBDcASADQYAIakGACBASIANBgAgQEiAEIAIoAjgQ0gILIANBgBBqJABBACEACyAcQTBqJAACQCAAIgEEQCAkICEQEgwBCyAjBEAgIyAkICEQBhoLICQgIRASQQAhAQsgJBBOCyAGQUBrJABBf0EAIAEbDAELQX8LC4sBAQR/IwBBMGsiBSQAIAAgAUEoaiIDIAEQFiAAQShqIgQgAyABEBkgAEHQAGoiAyAAIAIQByAEIAQgAkEoahAHIABB+ABqIgYgAkHQAGogAUH4AGoQByAFIAFB0ABqIgEgARAWIAAgAyAEEBkgBCADIAQQFiADIAUgBhAWIAYgBSAG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BCAEEAggA0HgAGoiBSAHIAFBwAFqIggQBSAFIAUgBRAIIAMgCBAPIABBwAFqIgIgCCAHEAggAiACIAEQCCACIAIQDyACIAIgBhAKIAIgAiADEAogAiACIAQQCiACIAIgBRAKIAAgBRAnIAAgACAGEAggAEHgAGoiACADECcgACAAIAQQCCADQYADaiQAC7wCAQt/IwBBoAhrIgIkACACQaACaiIFIAEQmQIgAiABQaACaiILEJkCIAJBwAFqIgogChAnIAUgBSAKEAogAkGAA2oiByAHIAIQCiACQeADaiIEIAQgAkHgAGoiDBAKIAJBwAdqIgggBRAPIAJBoAVqIgMgByAEEAUgAyADECcgCCAIIAMQCiACQeAGaiIGIAQQDyAGIAYQJyADIAUgBxAFIAYgBiADEAogAkGABmoiCSAHEA8gAyAFIAQQBSAJIAkgAxAKIAMgBiAEEAUgAkHABGoiBCAJIAcQBSADIAMgBBAIIAMgAxAnIAQgCCAFEAUgAyADIAQQCCAEIAMQrAIgAiAIIAQQBSAMIAYgBBAFIAogCSAEEAUgACABIAIQUiAAQaACaiIAIAsgAhBSIAAgABCcAiACQaAIaiQACwkAIAAgARCaAgsqACAAIAFBARBfIABB4ABqIAFB4ABqQQEQXyAAQcABaiABQcABakEBEF8LqgEBCH8jAEHgA2siAyQAIANBgANqIgUgASACEAUgA0GgAmoiBiABQeAAaiIIIAJB4ABqIgcQBSADQcABaiIEIAFBwAFqIgkgBxAFIAQgBBAnIANB4ABqIgogASAIEAggAyACIAcQCCAAQeAAaiIBIAogAxAFIAEgASAFEAogASABIAYQCiAAQcABaiIBIAkgAhAFIAEgASAGEAggACAEIAUQCCADQeADaiQACwoAIAAgASACECYLsgEBBX8jAEHABGsiAiQAIAJBoAJqIgQgASABQaACaiIFEHwgAkHAAWoiAyABQeADahAnIAIgASADEAggAkHgAGoiBiABQeAAaiAFEAggAyABQcABaiABQYADahAIIAQgBCACEFIgAiABIAUQUiAAQaACaiACIAIQfCAAIAQgAhB7IAMgAxAnIAAgACADEAogAEHgAGoiASABIAIQCiAAQcABaiIAIAAgBhAKIAJBwARqJAALMgEBfyMAQcABayIFJAAgBUEEIAEgAiAD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QRh2cnI2AEwgBkHQAGoiAyAGQaACakHQARAGGiADIAZBzABqQgQQNyADIAZBIGoQbCAGIAYpAzg3AxggBiAGKQMwNwMQIAYgBikDKDcDCCAGIAYpAyA3AwBCAiEJA0AgCUIBWARAIAZB0ABqIgMgACABEG0gAyAGQSBqIghCIBA3IAMgCBBsQQAhAwNAIANBIEcEQCADIAZqIgggCC0AACAGQSBqIANqLQAAczoAACADQQFqIQMMAQsLIAlCAXwhCQwBCwsgBCAHaiAGQSAgBSAHayIDIANBIE8bEAYaDAELCyAGQaACakHQARASIAZB8ANqJAALGQAgACgCABBOIABBADYCCCAAQgA3AgBBAAtQAQF/IwBBQGoiAiQAIAIgAUHAABAGIgEQaCAAIAEpAxg3ABggACABKQMQNwAQIAAgASkDCDcACCAAIAEpAwA3AAAgAUHAABASIAFBQGskAAv2AQIDfwJ+IwBBgAFrIgMkACADQgA3A2ggA0IANwNwIANCADcDeCADQgA3A2AgAyABKQAQNwNQIAMgASkAGDcDWCABKQAIIQYgASkAACEHIANCADcDKCADQgA3AzAgA0IANwM4IAMgBzcDQCADIAY3A0ggA0IANwMgIAMgAikAEDcDECADIAIpABg3AxggAyACKQAANwMAIAMgAikACDcDCCADQUBrIQRBACEBQQAhAgNAIAFBIEcEQCABIARqIgUgASADai0AACACIAUtAABqaiICOgAAIAJBCHYhAiABQQFqIQEMAQsLIAAgBBDGAiADQYABaiQAC94BAQF/IwBBgAFrIgIkACACQgA3A1AgAkIANwNYIAJCADcDKCACQgA3AzAgAkIANwM4IAJB6JcCKQMANwNoIAJB8JcCKQMANwNwIAJB+JcCKQMANwN4IAJCADcDQCACQgA3A0ggAkIANwMgIAJB4JcCKQMANwNgIAIgASkAEDcDECACIAEpABg3AxggAiABKQAANwMAIAIgASkACDcDCCACQUBrIgEgAhDJAiABEGggACACKQNYNwAYIAAgAikDUDcAECAAIAIpA0g3AAggACACKQNANwAAIAJBgAFqJAALPQEDfwNAIAJBwABHBEAgACACaiIDIAMtAAAgASACai0AAGsgBGoiAzoAACADQQh1IQQgAkEBaiECDAELCwt2AQF/IwBBEGsiAyAA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DQAgBEGgAWoiCiAEQcACaiIHEBUgByANIAoQFiABIA0gChAZIAkgB0EAIAZrQf4BcUEBdkH4AGxBoBBqIgZBKGoQByABIAEgBhAHIAggBkHQAGogDxAHIARB4BFqIgYgDCAMEBYgByAJIAEQGSABIAkgARAWIAkgBiAIEBkgCCAGIAgQFgsgBSAEQcACahA5IANBAWshAwwBCwsgBEGQEmokACALQaACaiIDIA4QS0F/IAMgAEEgEMoCIAAgA0YbIRAjAEEQayIBIAA2AgwgASADNgIIQQAhACABQQA6AAcDQCAAQSBHBEAgASABLQAHIAEoAgggAGotAAAgASgCDCAAai0AAHNyOgAHIABBAWohAAwBCwsgECABLQAHQQFrQQh2QQFxQQFrciEMCyALQdAEaiQAIAwLtQECAX8DfiMAQaABayIDJAAgASACQiAQ3wEgASABLQAAQfgBcToAACABIAEtAB9BP3FBwAByOgAfIAMgARCnASAAIAMQSyACKQAIIQQgAikAECEFIAIpAAAhBiABIAIpABg3ABggASAFNwAQIAEgBDcACCABIAY3AAAgACkACCEEIAApABAhBSAAKQAAIQYgASAAKQAYNwA4IAEgBTcAMCABIAQ3ACggASAGNwAgIANBoAFqJAALLwECfwNAIAJBgAFGRQRAIAAgAkEDdCIDaiABIANqKQAANwMAIAJBAWohAgwBCwsLZgACQCABQQRxRQ0AIAAoAgAiAQRAIAEoAgQgACgCEEEKdBASCyAAKAIEIgFFDQAgASAAKAIUQQN0EBILIAAoAgQQTiAAQQA2AgQgACgCACIBBEAgASgCABBOCyABEE4gAEEANgIAC6UDAgx/A34gACkDOCIOUEUEQEEBIQIDQCAAIA6nakFAayACOgAAQQAhAiAOQgF8Ig5CEFQNAAsgAEEBOgBQIAAgAEFAa0IQEN4BCyAANQI0IQ4gADUCMCEPIAA1AiwhECABIAAoAhQgACgCJCAAKAIgIAAoAhwgACgCGCICQRp2aiIDQRp2aiIGQRp2aiIJQRp2QQVsaiIEQf///x9xIgVBBWoiB0EadiACQf///x9xIARBGnZqIgRqIghBGnYgA0H///8fcSIKaiILQRp2IAZB////H3EiBmoiDEEadiAJQf///x9xaiINQYCAgCBrIgNBH3UiAiAEcSADQR92QQFrIgRB////H3EiAyAIcXIiCEEadCADIAdxIAIgBXFyciIFIAAoAihqIgc2AAAgASAFIAdLrSAQIAIgCnEgAyALcXIiBUEUdCAIQQZ2cq18fCIQPgAEIAEgDyACIAZxIAMgDHFyIgNBDnQgBUEMdnKtfCAQQiCIfCIPPgAIIAEgDiAEIA1xIAIgCXFyQQh0IANBEnZyrXwgD0IgiHw+AAwgAEHYABASC/sBAQJ+AkAgACkDOCIDUEUEQEIQIAN9IgMgAiACIANWGyEEQgAhAwNAIAMgBFFFBEAgACAAKQM4IAN8p2pBQGsgASADp2otAAA6AAAgA0IBfCEDDAELCyAAIAApAzggBHwiAzcDOCADQhBUDQEgACAAQUBrQhAQ3gEgAEIANwM4IAIgBH0hAiABIASnaiEBCyACQhBaBEAgACABIAJCcIMiAxDeASACQg+DIQIgASADp2ohAQsgAlANAEIAIQMDQCACIANRRQRAIAAgACkDOCADfKdqQUBrIAEgA6dqLQAAOgAAIANCAXwhAwwBCwsgACAAKQM4IAJ8NwM4CwuyAQEBfyAAIAEoAABB////H3E2AgAgACABKAADQQJ2QYP+/x9xNgIEIAAgASgABkEEdkH/gf8fcTYCCCAAIAEoAAlBBnZB///AH3E2AgwgASgADCECIABCADcCFCAAQgA3AhwgAEEANgIkIAAgAkEIdkH//z9xNgIQIAAgASgAEDYCKCAAIAEoABQ2AiwgACABKAAYNgIwIAEoABwhASAAQQA6AFAgAEIANwM4IAAgATYCNAswAQJ/IwAiBUGAAWtBQHEiBCQAIAQgAxDVAiAEIAEgAhDUAiAEIAAQ0wIgBSQAQQALEQAgACABQZC/AigCABECABoLEQAgACABQYi/AigCABECABoLjgECAX4CfyACQQN2IQRBACECA0AgAiAERkUEQCAAIAJBA3QiBWogASAFaikDACIDQjiGIANCgP4Dg0IohoQgA0KAgPwHg0IYhiADQoCAgPgPg0IIhoSEIANCCIhCgICA+A+DIANCGIhCgID8B4OEIANCKIhCgP4DgyADQjiIhISENwAAIAJBAWohAgwBCwsLcQECfyABQcEAa0FASQR/QX8FAn8jACIDIQQgA0GAA2tBQHEiAyQAIAJFIABFIAFB/wFxIgFBwQBrQf8BcUG/AU1yckUEQCADIAEQ3QIaIAMgAkLAABDcAhogAyAAIAEQ2wIaIAQkAEEADAELEFUACwsLhQMCA38CfiMAQUBqIgMkAAJAIAJBwQBrQf8BcUG/AUsEQEF/IQQgACkAUFAEQCAAKADgAiIFQYEBTwRAIABBQGsiBSAFKQAAIgZCgAF8NwAAIAAgACkASCAGQv9+Vq18NwBIIAAgAEHgAGoiBBDiASAAIAAoAOACQYABayIFNgDgAiAFQYEBTw0DIAQgAEHgAWogBRAGGiAAKADgAiEFCyAAQUBrIgQgBCkAACIGIAWtfCIHNwAAIAAgACkASCAGIAdWrXw3AEggAC0A5AIEQCAAQn83AFgLIABCfzcAUCAAQeAAaiIEIAVqQQBBgAIgBWsQERogACAEEOIBIAMgACkAADcDACADIAApAAg3AwggAyAAKQAQNwMQIAMgACkAGDcDGCADIAApACA3AyAgAyAAKQAoNwMoIAMgACkAMDcDMCADIAApADg3AzggASADIAIQBhogAEHAABASIARBgAIQEkEAIQQLIANBQGskACAEDwsQVQALQboJQcQIQbICQaYIEAAAC80BAgR/An4gAEHgAWohBiAAQeAAaiEFA0AgAlBFBEAgBSAAKADgAiIDaiEEAn5BgAIgA2siA60iByACVARAIAQgASADEAYaIAAgACgA4AIgA2o2AOACIAAgACkAQCIIQoABfDcAQCAAIAApAEggCEL/flatfDcASCAAIAUQ4gEgBSAGQYABEAYaIAAoAOACQYABayEEIAIgB30MAQsgBCABIAKnIgMQBhogACgA4AIgA2ohBEIACyECIAAgBDYA4AIgASADaiEBDAELC0EAC1MBAX8jAEFAaiICJAAgAUHBAGtB/wFxQb8BTQRAEFUACyACQQE6AAMgAkGAAjsAASACIAE6AAAgAkEEckEAQTwQERogACACELYDIAJBQGskAEEAC4YDAQh/IwBBoAVrIgIkACACQQE2ApAEIAJBkARqIghBBHJBAEEkEBEaIAJB4ANqIgMgARANIANBwA8gAxAHIAJB8AFqIgUgAyAIEBYgBSAFQcCMAhAHIAJBATYC8AQgAkHwBGoiBkEEckEAQSQQERogBiAGEDogAkGwA2oiByADQZAPEBYgAkHAAWoiBCADQZAPEAcgBCAGIAQQGSAEIAQgBxAHIAJBgANqIgcg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CwALtwEBAn8jAEHgAmsiBiQAIAAgBkHAAmoiByAFEO0BIABBMGogASACIAcQ6wEgBkHYAWoiAhBJIAIgAEIwECAgAiABQsAEECAgAiAAQfAEahBBIAAgAykAGDcAqAUgACADKQAQNwCgBSAAIAMpAAg3AJgFIAAgAykAADcAkAUgBkEIaiIBEB4gASAAQrAFECggASAAQbAFaiAEENsBIAdBIBAEIAJB6AAQBCABQdABEAQgBkHgAmokAAs2AQF/IwBBoAJrIgIkACACIAFBwARBAEEAEJMBIAIQrQIgACACED8gAkGgAhAEIAJBoAJqJAALMQEBfyMAQaACayICJAAgAiABQcAEQQBBABCTASAAIAIQPyACQaACEAQgAkGgAmokAAtiAQF/IwBBQGoiAyQAIANB+A4oAgA2AjggA0HwDikDADcDMCADQegOKQMANwMoIANB4A4pAwA3AyAgAyACQSAgA0EgakEcQSAQuQEaIAAgASADEPkCIANBIBAEIANBQGskAAsyAQJ/IAFBACABQQBKGyEDQQEhAQN/IAIgA0YEfyABBSACQQFqIQIgACABbCEBDAELCwt1AQV/IwBBQGoiAyQAIABBIBAEIAJBACACQQBKGyEFA0AgBCAFRgRAIANBIGpBIBAEIANBIBAEIANBQGskAAUgAyABIARBBnRqIgYgASACEPcCIANBIGoiByAGQSBqIAMQMCAAIAAgBxA8IARBAWohBAwBCwsLMAAgAEEgEAQDQCADQQBKBEAgACABIAAQMCAAIAAgAiADQQFrIgNBBXRqEDwMAQsLCzYBAn8gAkEAIAJBAEobIQIDQCACIANHBEAgACADQQV0IgRqIAEgBGoQKhogA0EBaiEDDAELCwvsAgEEfyMAQUBqIgYkAEF/IQcgBCAFSCAFQQJIckUEQCABIAIpAAA3AAAgASACKQAYNwAYIAEgAikAEDcAECABIAIpAAg3AAggBUEBayEJQQAhAgN/IAIgCUYEfyAEQQAgBEEAShtBAWohA0EBIQcDfyADIAdGBH8gBkEgakEgEARBAAUgBkIANwMYIAZCADcDECAGQgA3AwAgBkIANwMIIAYgBzoAACAGQSBqIAYgASAFEPACIAdBBnQgAGpBQGoiAiAGKQMANwAAIAIgBikDGDcAGCACIAYpAxA3ABAgAiAGKQMINwAIIAIg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EEUEQCAIQeAAaiAEEARBfyEJIAhBIGohBSAIQUBrDAELIAAgByAIEBsaIAhB4ABqIAQQBCAIQUBrQSAQBEEAIQkgCCEFIAhBIGoLQSAQBCAFQSAQBAsgCEHwEGokACAJCw0AIAAQQCABIAAQKhoLTgEBfyMAQYAJayICJAAgAkHABGogAEHABBAGGiACIAFBwAQQBiIAQcAEaiAAEJYCIQEgAEHABGpBwAQQBCAAQcAEEAQgAEGACWokACABC0UBAn8jAEGACWsiAiQAIAJBwARqIgMgAUHABBAGGiACIAMQlwIgACACQcAEEAYaIANBwAQQBCACQcAEEAQgAkGACWokAAtYAQJ/IwBB4AZrIgMkACADQYAGaiIEIAEQMxogA0HABGoiASACED4aIAMgASAEEJEBIAAgA0HABBAGGiAEQeAAEAQgAUHAARAEIANBwAQQBCADQeAGaiQAC1QBAn8jAEGABmsiAyQAIANBwARqIgQgAhA+GiADQaACaiICIAQQmAEgAyACIAEQpgIgACADED8gBEHAARAEIAJBoAIQBCADQaACEAQgA0GABmokAAslAQF/IwBBIGsiASQAIAEQvAEgACABEHMgAUEgEAQgAUEgaiQACwoAIABBsJkCED8LUwECfyMAQYADayIDJAAgA0GgAmoiBCACEDMaIANBkAFqIgIgBBBkIAMgAiABELcCIAAgAxBjIARB4AAQBCACQZABEAQgA0GQARAEIANBgANqJAALJgAgACABIAIQBiACaiADIAQQBiAEaiAFIAYQBiAGaiAHIAgQBhoLJgEBfyMAQSBrIgEkACABELwBIAAgARC7ASABQSAQBCABQSBqJAALCgAgAEGAmAIQYwtEAQJ/IwBB8AFrIgIkACACQZABaiIDIAEQMxogAiADEGQgAkEBEJwBIAAgAhBjIANB4AAQBCACQZABEAQgAkHwAWokAAt6AQN/IwBB8ARrIgMkACADQZAEaiIEIAEQMxogA0GAA2oiASAEEGQgA0GgAmoiBSACEDMaIANBkAFqIgIgBRBkIAMgASACENYBIAAgAxBjIARB4AAQBCABQZABEAQgBUHgABAEIAJBkAEQBCADQZABEAQgA0HwBGokAAvOAQECfyMAQYAJayIDJAACQCACRQRAIABBgJwCQcAEEAYaDAELAkAgAkEASARAIANBwARq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QRBqIgEQHiAFQQ5qIgYgA0ECEA4gASAGQgIQCyABIAIgA6wQCyAGQSBBAhAOIAVBEGogBUEOakICEAsgASAEQiAQCyAFQsbSuYvGrZq95QA3AwAgASAFQggQCyABIAAQHyAHQSAQBCAEQSAQBCABQdABEARBACEECyAFQaACaiQAIAQLC8WqAiYAQYAIC+ECYjY0X3BvcyA8PSBiNjRfbGVuAGNyeXB0b19nZW5lcmljaGFzaF9ibGFrZTJiX2ZpbmFsAHNvZGl1bS9jb2RlY3MuYwBjcnlwdG9fZ2VuZXJpY2hhc2gvYmxha2UyYi9yZWYvYmxha2UyYi1yZWYuYwBjcnlwdG9fZ2VuZXJpY2hhc2gvYmxha2UyYi9yZWYvZ2VuZXJpY2hhc2hfYmxha2UyYi5jAG91dGxlbiA8PSBVSU5UOF9NQVgAUy0+YnVmbGVuIDw9IEJMQUtFMkJfQkxPQ0tCWVRFUwAkYXJnb24yaSR2PQAkYXJnb24yaWQkdj0Ac29kaXVtX2JpbjJiYXNlNjQAMS4wLjIzAEgyQy1PVkVSU0laRS1EU1QtAENoYWxsZW5nZVNlZWQtQ29tcG9zaXRlRGVyaXZlS2V5UGFpckhhc2hUb0dyb3VwLUhhc2hUb1NjYWxhci1PUFJGVjEAQfAKCxNyaXN0cmV0dG8yNTUtU0hBNTEyAEGQCwtiT1BBUVVFLURlcml2ZUtleVBhaXJBdXRoS2V5RXhwb3J0S2V5UHJpdmF0ZUtleQAAT1BBUVVFLURlcml2ZURpZmZpZUhlbGxtYW5LZXlQYWlyT3ByZktleU1hc2tpbmdLZXkAQYAMC4EBQ3JlZGVudGlhbFJlc3BvbnNlUGFkT1BBUVVFLU9QQVFVRXYxLUhhbmRzaGFrZVNlY3JldFNlc3Npb25LZXlTZXJ2ZXJNQUNDbGllbnRNQUNCTFNfU0lHX0JMUzEyMzgxRzJfWE1EOlNIQS0yNTZfU1NXVV9ST19QT1BfAAAAAAABAEGgDQtBRlJPU1QtUklTVFJFVFRPMjU1LVNIQTUxMi12MTFyaG9GUk9TVC1SSVNUUkVUVE8yNTUtU0hBNTEyLXYxMWNoYWwAQfANCyVGUk9TVC1SSVNUUkVUVE8yNTUtU0hBNTEyLXYxMW5vbmNlbXNnAEGgDgs1RlJPU1QtUklTVFJFVFRPMjU1LVNIQTUxMi12MTFjb21QUkUtU0NIRU1BMS1EZXJpdmVLZXkAQeAOCxxQUkUtU0NIRU1BMS1EZXJpdmVTaWduaW5nS2V5AEGQDwtXtnhZ/4Vy0wC9bhX/DwpqACnAAQCY6Hn/vDyg/5lxzv8At+L+tA1I/wAAAAAAAAAAsKAO/tPJhv+eGI8Af2k1AGAMvQCn1/v/n0yA/mpl4f8e/AQAkgyuAEHwDwsnWfGy/grlpv973Sr+HhTUAFKAAwAw0fMAd3lA/zLjnP8AbsUBZxuQAEGgEAvAB4U7jAG98ST/+CXDAWDcNwC3TD7/w0I9ADJMpAHhpEz/TD2j/3U+HwBRkUD/dkEOAKJz1v8Gii4AfOb0/wqKjwA0GsIAuPRMAIGPKQG+9BP/e6p6/2KBRAB51ZMAVmUe/6FnmwCMWUP/7+W+AUMLtQDG8In+7kW8/0OX7gATKmz/5VVxATJEh/8RagkAMmcB/1ABqAEjmB7/EKi5AThZ6P9l0vwAKfpHAMyqT/8OLu//UE3vAL3WS/8RjfkAJlBM/75VdQBW5KoAnNjQAcPPpP+WQkz/r+EQ/41QYgFM2/IAxqJyAC7amACbK/H+m6Bo/zO7pQACEa8AQlSgAfc6HgAjQTX+Rey/AC2G9QGje90AIG4U/zQXpQC61kcA6bBgAPLvNgE5WYoAUwBU/4igZABcjnj+aHy+ALWxPv/6KVUAmIIqAWD89gCXlz/+74U+ACA4nAAtp73/joWzAYNW0wC7s5b++qoO/9KjTgAlNJcAY00aAO6c1f/VwNEBSS5UABRBKQE2zk8AyYOS/qpvGP+xITL+qybL/073dADR3ZkAhYCyATosGQDJJzsBvRP8ADHl0gF1u3UAtbO4AQBy2wAwXpMA9Sk4AH0NzP70rXcALN0g/lTqFAD5oMYB7H7q/y9jqP6q4pn/ZrPYAOKNev96Qpn+tvWGAOPkGQHWOev/2K04/7Xn0gB3gJ3/gV+I/25+MwACqbf/B4Ji/kWwXv90BOMB2fKR/8qtHwFpASf/Lq9FAOQvOv/X4EX+zzhF/xD+i/8Xz9T/yhR+/1/VYP8JsCEAyAXP//EqgP4jIcD/+OXEAYEReAD7Z5f/BzRw/4w4Qv8o4vX/2UYl/qzWCf9IQ4YBksDW/ywmcABEuEv/zlr7AJXrjQC1qjoAdPTvAFydAgBmrWIA6YlgAX8xywAFm5QAF5QJ/9N6DAAihhr/28yIAIYIKf/gUyv+VRn3AG1/AP6piDAA7nfb/+et1QDOEv7+CLoH/34JBwFvKkgAbzTs/mA/jQCTv3/+zU7A/w5q7QG720wAr/O7/mlZrQBVGVkBovOUAAJ20f4hngkAi6Mu/11GKABsKo7+b/yO/5vfkAAz5af/Sfyb/150DP+YoNr/nO4l/7Pqz//FALP/mqSNAOHEaAAKIxn+0dTy/2H93v64ZeUA3hJ/AaSIh/8ez4z+kmHzAIHAGv7JVCH/bwpO/5NRsv8EBBgAoe7X/waNIQA11w7/KbXQ/+eLnQCzy93//7lxAL3irP9xQtb/yj4t/2ZACP9OrhD+hXVE/wBBgBgLAQEAQaAYC7ABJuiVj8KyJ7BFw/SJ8u+Y8NXfrAXTxjM5sTgCiG1T/AXHF2pwPU3YT7o8C3YNEGcPKiBT+iw5zMZOx/13kqwDeuz///////////////////////////////////////9/7f///////////////////////////////////////3/u////////////////////////////////////////f+3T9VwaYxJY1pz3ot753hQAQd8ZC6zxARD9QF0AoGo/ADnTV/4M0roAWLx0/kHYAQD/yD0B2EKU/wD7XAAksuH/AAAAAAAAAACFO4wBvfEk//glwwFg3DcAt0w+/8NCPQAyTKQB4aRM/0w9o/91Ph8AUZFA/3ZBDgCic9b/BoouAHzm9P8Kio8ANBrCALj0TACBjykBvvQT/3uqev9igUQAedWTAFZlHv+hZ5sAjFlD/+/lvgFDC7UAxvCJ/u5FvP/qcTz/Jf85/0Wytv6A0LMAdhp9/gMH1v/xMk3/VcvF/9OH+v8ZMGT/u9W0/hFYaQBT0Z4BBXNiAASuPP6rN27/2bUR/xS8qgCSnGb+V9au/3J6mwHpLKoAfwjvAdbs6gCvBdsAMWo9/wZC0P8Cam7/UeoT/9drwP9Dl+4AEyps/+VVcQEyRIf/EWoJADJnAf9QAagBI5ge/xCouQE4Wej/ZdL8ACn6RwDMqk//Di7v/1BN7wC91kv/EY35ACZQTP++VXUAVuSqAJzY0AHDz6T/lkJM/6/hEP+NUGIBTNvyAMaicgAu2pgAmyvx/pugaP+yCfz+ZG7UAA4FpwDp76P/HJed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");
+  var HEAP32, HEAPU8, HEAPF64, wasmMemory;
+  function updateMemoryViews() {
+    var b = wasmMemory.buffer;
+    HEAP32 = new Int32Array(b);
+    HEAPU8 = new Uint8Array(b);
+    HEAPF64 = new Float64Array(b);
+  }
+  var ASM_CONSTS = { 40872: () => {
+    return Module.getRandomValue();
+  }, 40908: () => {
+    if (Module.getRandomValue === void 0) {
+      try {
+        var window_ = "object" === typeof window ? window : self;
+        var crypto_ = typeof window_.crypto !== "undefined" ? window_.crypto : window_.msCrypto;
+        var randomValuesStandard = function() {
+          var buf = new Uint32Array(1);
+          crypto_.getRandomValues(buf);
+          return buf[0] >>> 0;
+        };
+        randomValuesStandard();
+        Module.getRandomValue = randomValuesStandard;
+      } catch (e) {
+        try {
+          var crypto2 = require("crypto");
+          var randomValueNodeJS = function() {
+            var buf = crypto2["randomBytes"](4);
+            return (buf[0] << 24 | buf[1] << 16 | buf[2] << 8 | buf[3]) >>> 0;
+          };
+          randomValueNodeJS();
+          Module.getRandomValue = randomValueNodeJS;
+        } catch (e2) {
+          throw "No secure random number generator found";
+        }
+      }
+    }
+  } };
+  var UTF8Decoder = typeof TextDecoder != "undefined" ? new TextDecoder("utf8") : void 0;
+  function UTF8ArrayToString(heapOrArray, idx, maxBytesToRead) {
+    var endIdx = idx + maxBytesToRead;
+    var endPtr = idx;
+    while (heapOrArray[endPtr] && !(endPtr >= endIdx)) ++endPtr;
+    if (endPtr - idx > 16 && heapOrArray.buffer && UTF8Decoder) {
+      return UTF8Decoder.decode(heapOrArray.subarray(idx, endPtr));
+    }
+    var str = "";
+    while (idx < endPtr) {
+      var u0 = heapOrArray[idx++];
+      if (!(u0 & 128)) {
+        str += String.fromCharCode(u0);
+        continue;
+      }
+      var u1 = heapOrArray[idx++] & 63;
+      if ((u0 & 224) == 192) {
+        str += String.fromCharCode((u0 & 31) << 6 | u1);
+        continue;
+      }
+      var u2 = heapOrArray[idx++] & 63;
+      if ((u0 & 240) == 224) {
+        u0 = (u0 & 15) << 12 | u1 << 6 | u2;
+      } else {
+        u0 = (u0 & 7) << 18 | u1 << 12 | u2 << 6 | heapOrArray[idx++] & 63;
+      }
+      if (u0 < 65536) {
+        str += String.fromCharCode(u0);
+      } else {
+        var ch = u0 - 65536;
+        str += String.fromCharCode(55296 | ch >> 10, 56320 | ch & 1023);
+      }
+    }
+    return str;
+  }
+  function UTF8ToString(ptr, maxBytesToRead) {
+    return ptr ? UTF8ArrayToString(HEAPU8, ptr, maxBytesToRead) : "";
+  }
+  function ___assert_fail(condition, filename, line, func) {
+    abort("Assertion failed: " + UTF8ToString(condition) + ", at: " + [filename ? UTF8ToString(filename) : "unknown filename", line, func ? UTF8ToString(func) : "unknown function"]);
+  }
+  function _abort() {
+    abort("");
+  }
+  var readEmAsmArgsArray = [];
+  function readEmAsmArgs(sigPtr, buf) {
+    readEmAsmArgsArray.length = 0;
+    var ch;
+    buf >>= 2;
+    while (ch = HEAPU8[sigPtr++]) {
+      buf += ch != 105 & buf;
+      readEmAsmArgsArray.push(ch == 105 ? HEAP32[buf] : HEAPF64[buf++ >> 1]);
+      ++buf;
+    }
+    return readEmAsmArgsArray;
+  }
+  function runEmAsmFunction(code, sigPtr, argbuf) {
+    var args = readEmAsmArgs(sigPtr, argbuf);
+    return ASM_CONSTS[code].apply(null, args);
+  }
+  function _emscripten_asm_const_int(code, sigPtr, argbuf) {
+    return runEmAsmFunction(code, sigPtr, argbuf);
+  }
+  function getHeapMax() {
+    return 2147483648;
+  }
+  function emscripten_realloc_buffer(size) {
+    var b = wasmMemory.buffer;
+    try {
+      wasmMemory.grow(size - b.byteLength + 65535 >>> 16);
+      updateMemoryViews();
+      return 1;
+    } catch (e) {
+    }
+  }
+  function _emscripten_resize_heap(requestedSize) {
+    var oldSize = HEAPU8.length;
+    requestedSize = requestedSize >>> 0;
+    var maxHeapSize = getHeapMax();
+    if (requestedSize > maxHeapSize) {
+      return false;
+    }
+    let alignUp = (x, multiple) => x + (multiple - x % multiple) % multiple;
+    for (var cutDown = 1; cutDown <= 4; cutDown *= 2) {
+      var overGrownHeapSize = oldSize * (1 + 0.2 / cutDown);
+      overGrownHeapSize = Math.min(overGrownHeapSize, requestedSize + 100663296);
+      var newSize = Math.min(maxHeapSize, alignUp(Math.max(requestedSize, overGrownHeapSize), 65536));
+      var replacement = emscripten_realloc_buffer(newSize);
+      if (replacement) {
+        return true;
+      }
+    }
+    return false;
+  }
+  var wasmImports = { "a": ___assert_fail, "b": _abort, "d": _emscripten_asm_const_int, "c": _emscripten_resize_heap };
+  function initRuntime(asm) {
+    asm["f"]();
+  }
+  var imports = { "a": wasmImports };
+  var _ecc_randombytes, _ecc_concat2, _ecc_concat3, _ecc_concat4, _ecc_strxor, _ecc_I2OSP, _ecc_compare, _ecc_is_zero, _ecc_version, _ecc_malloc, _ecc_free, _ecc_hash_sha256, _ecc_hash_sha512, _ecc_mac_hmac_sha256, _ecc_mac_hmac_sha512, _ecc_kdf_hkdf_sha256_extract, _ecc_kdf_hkdf_sha256_expand, _ecc_kdf_hkdf_sha512_extract, _ecc_kdf_hkdf_sha512_expand, _ecc_kdf_scrypt, _ecc_kdf_argon2id, _ecc_aead_chacha20poly1305_encrypt, _ecc_aead_chacha20poly1305_decrypt, _ecc_ed25519_is_valid_point, _ecc_ed25519_add, _ecc_ed25519_sub, _ecc_ed25519_generator, _ecc_ed25519_scalarmult_base, _ecc_ed25519_from_uniform, _ecc_ed25519_random, _ecc_ed25519_scalar_random, _ecc_ed25519_scalar_invert, _ecc_ed25519_scalar_negate, _ecc_ed25519_scalar_complement, _ecc_ed25519_scalar_add, _ecc_ed25519_scalar_sub, _ecc_ed25519_scalar_mul, _ecc_ed25519_scalar_reduce, _ecc_ed25519_scalarmult, _ecc_ristretto255_is_valid_point, _ecc_ristretto255_add, _ecc_ristretto255_sub, _ecc_ristretto255_generator, _ecc_ristretto255_scalarmult_base, _ecc_ristretto255_from_hash, _ecc_ristretto255_random, _ecc_ristretto255_scalar_random, _ecc_ristretto255_scalar_invert, _ecc_ristretto255_scalar_negate, _ecc_ristretto255_scalar_complement, _ecc_ristretto255_scalar_add, _ecc_ristretto255_scalar_sub, _ecc_ristretto255_scalar_mul, _ecc_ristretto255_scalar_reduce, _ecc_ristretto255_scalarmult, _ecc_bls12_381_fp_random, _ecc_bls12_381_fp12_one, _ecc_bls12_381_fp12_is_one, _ecc_bls12_381_fp12_inverse, _ecc_bls12_381_fp12_sqr, _ecc_bls12_381_fp12_mul, _ecc_bls12_381_fp12_pow, _ecc_bls12_381_fp12_random, _ecc_bls12_381_g1_add, _ecc_bls12_381_g1_negate, _ecc_bls12_381_g1_generator, _ecc_bls12_381_g1_random, _ecc_bls12_381_scalar_random, _ecc_bls12_381_g1_scalarmult_base, _ecc_bls12_381_g1_scalarmult, _ecc_bls12_381_g2_add, _ecc_bls12_381_g2_negate, _ecc_bls12_381_g2_generator, _ecc_bls12_381_g2_random, _ecc_bls12_381_g2_scalarmult_base, _ecc_bls12_381_g2_scalarmult, _ecc_bls12_381_pairing, _ecc_bls12_381_pairing_miller_loop, _ecc_bls12_381_pairing_final_exp, _ecc_bls12_381_pairing_final_verify, _ecc_h2c_expand_message_xmd_sha256, _ecc_h2c_expand_message_xmd_sha512, _ecc_voprf_ristretto255_sha512_GenerateProofWithScalar, _ecc_voprf_ristretto255_sha512_ComputeCompositesFast, _ecc_voprf_ristretto255_sha512_HashToScalar, _ecc_voprf_ristretto255_sha512_HashToScalarWithDST, _ecc_voprf_ristretto255_sha512_GenerateProof, _ecc_voprf_ristretto255_sha512_VerifyProof, _ecc_voprf_ristretto255_sha512_ComputeComposites, _ecc_voprf_ristretto255_sha512_GenerateKeyPair, _ecc_voprf_ristretto255_sha512_DeriveKeyPair, _ecc_voprf_ristretto255_sha512_BlindWithScalar, _ecc_voprf_ristretto255_sha512_HashToGroup, _ecc_voprf_ristretto255_sha512_HashToGroupWithDST, _ecc_voprf_ristretto255_sha512_Blind, _ecc_voprf_ristretto255_sha512_BlindEvaluate, _ecc_voprf_ristretto255_sha512_Finalize, _ecc_voprf_ristretto255_sha512_Evaluate, _ecc_voprf_ristretto255_sha512_VerifiableBlindEvaluateWithScalar, _ecc_voprf_ristretto255_sha512_VerifiableBlindEvaluate, _ecc_voprf_ristretto255_sha512_VerifiableFinalize, _ecc_voprf_ristretto255_sha512_PartiallyBlindWithScalar, _ecc_voprf_ristretto255_sha512_PartiallyBlind, _ecc_voprf_ristretto255_sha512_PartiallyBlindEvaluateWithScalar, _ecc_voprf_ristretto255_sha512_PartiallyBlindEvaluate, _ecc_voprf_ristretto255_sha512_PartiallyFinalize, _ecc_voprf_ristretto255_sha512_PartiallyEvaluate, _ecc_opaque_ristretto255_sha512_DeriveKeyPair, _ecc_opaque_ristretto255_sha512_CreateCleartextCredentials, _ecc_opaque_ristretto255_sha512_EnvelopeStoreWithNonce, _ecc_opaque_ristretto255_sha512_DeriveDiffieHellmanKeyPair, _ecc_opaque_ristretto255_sha512_EnvelopeStore, _ecc_opaque_ristretto255_sha512_EnvelopeRecover, _ecc_opaque_ristretto255_sha512_RecoverPublicKey, _ecc_opaque_ristretto255_sha512_GenerateAuthKeyPairWithSeed, _ecc_opaque_ristretto255_sha512_GenerateAuthKeyPair, _ecc_opaque_ristretto255_sha512_CreateRegistrationRequestWithBlind, _ecc_opaque_ristretto255_sha512_CreateRegistrationRequest, _ecc_opaque_ristretto255_sha512_CreateRegistrationResponse, _ecc_opaque_ristretto255_sha512_FinalizeRegistrationRequestWithNonce, _ecc_opaque_ristretto255_sha512_FinalizeRegistrationRequest, _ecc_opaque_ristretto255_sha512_CreateCredentialRequestWithBlind, _ecc_opaque_ristretto255_sha512_CreateCredentialRequest, _ecc_opaque_ristretto255_sha512_CreateCredentialResponseWithMasking, _ecc_opaque_ristretto255_sha512_CreateCredentialResponse, _ecc_opaque_ristretto255_sha512_RecoverCredentials, _ecc_opaque_ristretto255_sha512_3DH_Expand_Label, _ecc_opaque_ristretto255_sha512_3DH_Derive_Secret, _ecc_opaque_ristretto255_sha512_3DH_Preamble, _ecc_opaque_ristretto255_sha512_3DH_TripleDHIKM, _ecc_opaque_ristretto255_sha512_3DH_DeriveKeys, _ecc_opaque_ristretto255_sha512_GenerateKE1WithSeed, _ecc_opaque_ristretto255_sha512_3DH_StartWithSeed, _ecc_opaque_ristretto255_sha512_GenerateKE1, _ecc_opaque_ristretto255_sha512_3DH_Start, _ecc_opaque_ristretto255_sha512_GenerateKE3, _ecc_opaque_ristretto255_sha512_3DH_ClientFinalize, _ecc_opaque_ristretto255_sha512_GenerateKE2WithSeed, _ecc_opaque_ristretto255_sha512_3DH_ResponseWithSeed, _ecc_opaque_ristretto255_sha512_GenerateKE2, _ecc_opaque_ristretto255_sha512_3DH_Response, _ecc_opaque_ristretto255_sha512_ServerFinish, _ecc_sign_ed25519_Sign, _ecc_sign_ed25519_Verify, _ecc_sign_ed25519_KeyPair, _ecc_sign_ed25519_SeedKeyPair, _ecc_sign_ed25519_SkToSeed, _ecc_sign_ed25519_SkToPk, _ecc_sign_eth_bls_KeyGen, _ecc_sign_eth_bls_SkToPk, _ecc_sign_eth_bls_KeyValidate, _ecc_sign_eth_bls_Sign, _ecc_sign_eth_bls_Verify, _ecc_sign_eth_bls_Aggregate, _ecc_sign_eth_bls_FastAggregateVerify, _ecc_sign_eth_bls_AggregateVerify, _ecc_frost_ristretto255_sha512_nonce_generate_with_randomness, _ecc_frost_ristretto255_sha512_H3_2, _ecc_frost_ristretto255_sha512_nonce_generate, _ecc_frost_ristretto255_sha512_derive_interpolating_value, _ecc_frost_ristretto255_sha512_derive_interpolating_value_with_points, _ecc_frost_ristretto255_sha512_encode_group_commitment_list, _ecc_frost_ristretto255_sha512_participants_from_commitment_list, _ecc_frost_ristretto255_sha512_binding_factor_for_participant, _ecc_frost_ristretto255_sha512_compute_binding_factors, _ecc_frost_ristretto255_sha512_H4, _ecc_frost_ristretto255_sha512_H5, _ecc_frost_ristretto255_sha512_H1, _ecc_frost_ristretto255_sha512_compute_group_commitment, _ecc_frost_ristretto255_sha512_compute_challenge, _ecc_frost_ristretto255_sha512_H2_3, _ecc_frost_ristretto255_sha512_commit_with_randomness, _ecc_frost_ristretto255_sha512_commit, _ecc_frost_ristretto255_sha512_sign, _ecc_frost_ristretto255_sha512_aggregate, _ecc_frost_ristretto255_sha512_verify_signature_share, _ecc_frost_ristretto255_sha512_H1_2, _ecc_frost_ristretto255_sha512_H2, _ecc_frost_ristretto255_sha512_H3, _ecc_frost_ristretto255_sha512_prime_order_sign, _ecc_frost_ristretto255_sha512_prime_order_verify, _ecc_frost_ristretto255_sha512_trusted_dealer_keygen_with_coefficients, _ecc_frost_ristretto255_sha512_secret_share_shard, _ecc_frost_ristretto255_sha512_vss_commit, _ecc_frost_ristretto255_sha512_polynomial_evaluate, _ecc_frost_ristretto255_sha512_secret_share_combine, _ecc_frost_ristretto255_sha512_polynomial_interpolate_constant, _ecc_frost_ristretto255_sha512_vss_verify, _ecc_frost_ristretto255_sha512_derive_group_info, _ecc_pre_schema1_MessageGen, _ecc_pre_schema1_DeriveKey, _ecc_pre_schema1_KeyGen, _ecc_pre_schema1_DeriveSigningKey, _ecc_pre_schema1_SigningKeyGen, _ecc_pre_schema1_EncryptWithSeed, _ecc_pre_schema1_Encrypt, _ecc_pre_schema1_ReKeyGen, _ecc_pre_schema1_ReEncrypt, _ecc_pre_schema1_DecryptLevel1, _ecc_pre_schema1_DecryptLevel2;
+  WebAssembly.instantiate(Module["wasm"], imports).then(function(output) {
+    var asm = output.instance.exports;
+    asm["g"];
+    _ecc_randombytes = asm["h"];
+    asm["i"];
+    asm["j"];
+    _ecc_concat2 = asm["k"];
+    _ecc_concat3 = asm["l"];
+    _ecc_concat4 = asm["m"];
+    _ecc_strxor = asm["n"];
+    _ecc_I2OSP = asm["o"];
+    _ecc_compare = asm["p"];
+    _ecc_is_zero = asm["q"];
+    _ecc_version = asm["r"];
+    _ecc_malloc = asm["s"];
+    _ecc_free = asm["t"];
+    _ecc_hash_sha256 = asm["v"];
+    _ecc_hash_sha512 = asm["w"];
+    _ecc_mac_hmac_sha256 = asm["x"];
+    _ecc_mac_hmac_sha512 = asm["y"];
+    _ecc_kdf_hkdf_sha256_extract = asm["z"];
+    _ecc_kdf_hkdf_sha256_expand = asm["A"];
+    _ecc_kdf_hkdf_sha512_extract = asm["B"];
+    _ecc_kdf_hkdf_sha512_expand = asm["C"];
+    _ecc_kdf_scrypt = asm["D"];
+    _ecc_kdf_argon2id = asm["E"];
+    _ecc_aead_chacha20poly1305_encrypt = asm["F"];
+    _ecc_aead_chacha20poly1305_decrypt = asm["G"];
+    _ecc_ed25519_is_valid_point = asm["H"];
+    _ecc_ed25519_add = asm["I"];
+    _ecc_ed25519_sub = asm["J"];
+    _ecc_ed25519_generator = asm["K"];
+    _ecc_ed25519_scalarmult_base = asm["L"];
+    _ecc_ed25519_from_uniform = asm["M"];
+    _ecc_ed25519_random = asm["N"];
+    _ecc_ed25519_scalar_random = asm["O"];
+    _ecc_ed25519_scalar_invert = asm["P"];
+    _ecc_ed25519_scalar_negate = asm["Q"];
+    _ecc_ed25519_scalar_complement = asm["R"];
+    _ecc_ed25519_scalar_add = asm["S"];
+    _ecc_ed25519_scalar_sub = asm["T"];
+    _ecc_ed25519_scalar_mul = asm["U"];
+    _ecc_ed25519_scalar_reduce = asm["V"];
+    _ecc_ed25519_scalarmult = asm["W"];
+    _ecc_ristretto255_is_valid_point = asm["X"];
+    _ecc_ristretto255_add = asm["Y"];
+    _ecc_ristretto255_sub = asm["Z"];
+    _ecc_ristretto255_generator = asm["_"];
+    _ecc_ristretto255_scalarmult_base = asm["$"];
+    _ecc_ristretto255_from_hash = asm["aa"];
+    _ecc_ristretto255_random = asm["ba"];
+    _ecc_ristretto255_scalar_random = asm["ca"];
+    _ecc_ristretto255_scalar_invert = asm["da"];
+    _ecc_ristretto255_scalar_negate = asm["ea"];
+    _ecc_ristretto255_scalar_complement = asm["fa"];
+    _ecc_ristretto255_scalar_add = asm["ga"];
+    _ecc_ristretto255_scalar_sub = asm["ha"];
+    _ecc_ristretto255_scalar_mul = asm["ia"];
+    _ecc_ristretto255_scalar_reduce = asm["ja"];
+    _ecc_ristretto255_scalarmult = asm["ka"];
+    _ecc_bls12_381_fp_random = asm["la"];
+    _ecc_bls12_381_fp12_one = asm["ma"];
+    _ecc_bls12_381_fp12_is_one = asm["na"];
+    _ecc_bls12_381_fp12_inverse = asm["oa"];
+    _ecc_bls12_381_fp12_sqr = asm["pa"];
+    _ecc_bls12_381_fp12_mul = asm["qa"];
+    _ecc_bls12_381_fp12_pow = asm["ra"];
+    _ecc_bls12_381_fp12_random = asm["sa"];
+    _ecc_bls12_381_g1_add = asm["ta"];
+    _ecc_bls12_381_g1_negate = asm["ua"];
+    _ecc_bls12_381_g1_generator = asm["va"];
+    _ecc_bls12_381_g1_random = asm["wa"];
+    _ecc_bls12_381_scalar_random = asm["xa"];
+    _ecc_bls12_381_g1_scalarmult_base = asm["ya"];
+    _ecc_bls12_381_g1_scalarmult = asm["za"];
+    _ecc_bls12_381_g2_add = asm["Aa"];
+    _ecc_bls12_381_g2_negate = asm["Ba"];
+    _ecc_bls12_381_g2_generator = asm["Ca"];
+    _ecc_bls12_381_g2_random = asm["Da"];
+    _ecc_bls12_381_g2_scalarmult_base = asm["Ea"];
+    _ecc_bls12_381_g2_scalarmult = asm["Fa"];
+    _ecc_bls12_381_pairing = asm["Ga"];
+    _ecc_bls12_381_pairing_miller_loop = asm["Ha"];
+    _ecc_bls12_381_pairing_final_exp = asm["Ia"];
+    _ecc_bls12_381_pairing_final_verify = asm["Ja"];
+    _ecc_h2c_expand_message_xmd_sha256 = asm["Ka"];
+    _ecc_h2c_expand_message_xmd_sha512 = asm["La"];
+    _ecc_voprf_ristretto255_sha512_GenerateProofWithScalar = asm["Ma"];
+    _ecc_voprf_ristretto255_sha512_ComputeCompositesFast = asm["Na"];
+    _ecc_voprf_ristretto255_sha512_HashToScalar = asm["Oa"];
+    _ecc_voprf_ristretto255_sha512_HashToScalarWithDST = asm["Pa"];
+    _ecc_voprf_ristretto255_sha512_GenerateProof = asm["Qa"];
+    _ecc_voprf_ristretto255_sha512_VerifyProof = asm["Ra"];
+    _ecc_voprf_ristretto255_sha512_ComputeComposites = asm["Sa"];
+    _ecc_voprf_ristretto255_sha512_GenerateKeyPair = asm["Ta"];
+    _ecc_voprf_ristretto255_sha512_DeriveKeyPair = asm["Ua"];
+    _ecc_voprf_ristretto255_sha512_BlindWithScalar = asm["Va"];
+    _ecc_voprf_ristretto255_sha512_HashToGroup = asm["Wa"];
+    _ecc_voprf_ristretto255_sha512_HashToGroupWithDST = asm["Xa"];
+    _ecc_voprf_ristretto255_sha512_Blind = asm["Ya"];
+    _ecc_voprf_ristretto255_sha512_BlindEvaluate = asm["Za"];
+    _ecc_voprf_ristretto255_sha512_Finalize = asm["_a"];
+    _ecc_voprf_ristretto255_sha512_Evaluate = asm["$a"];
+    _ecc_voprf_ristretto255_sha512_VerifiableBlindEvaluateWithScalar = asm["ab"];
+    _ecc_voprf_ristretto255_sha512_VerifiableBlindEvaluate = asm["bb"];
+    _ecc_voprf_ristretto255_sha512_VerifiableFinalize = asm["cb"];
+    _ecc_voprf_ristretto255_sha512_PartiallyBlindWithScalar = asm["db"];
+    _ecc_voprf_ristretto255_sha512_PartiallyBlind = asm["eb"];
+    _ecc_voprf_ristretto255_sha512_PartiallyBlindEvaluateWithScalar = asm["fb"];
+    _ecc_voprf_ristretto255_sha512_PartiallyBlindEvaluate = asm["gb"];
+    _ecc_voprf_ristretto255_sha512_PartiallyFinalize = asm["hb"];
+    _ecc_voprf_ristretto255_sha512_PartiallyEvaluate = asm["ib"];
+    _ecc_opaque_ristretto255_sha512_DeriveKeyPair = asm["jb"];
+    _ecc_opaque_ristretto255_sha512_CreateCleartextCredentials = asm["kb"];
+    _ecc_opaque_ristretto255_sha512_EnvelopeStoreWithNonce = asm["lb"];
+    _ecc_opaque_ristretto255_sha512_DeriveDiffieHellmanKeyPair = asm["mb"];
+    _ecc_opaque_ristretto255_sha512_EnvelopeStore = asm["nb"];
+    _ecc_opaque_ristretto255_sha512_EnvelopeRecover = asm["ob"];
+    _ecc_opaque_ristretto255_sha512_RecoverPublicKey = asm["pb"];
+    _ecc_opaque_ristretto255_sha512_GenerateAuthKeyPairWithSeed = asm["qb"];
+    _ecc_opaque_ristretto255_sha512_GenerateAuthKeyPair = asm["rb"];
+    _ecc_opaque_ristretto255_sha512_CreateRegistrationRequestWithBlind = asm["sb"];
+    _ecc_opaque_ristretto255_sha512_CreateRegistrationRequest = asm["tb"];
+    _ecc_opaque_ristretto255_sha512_CreateRegistrationResponse = asm["ub"];
+    _ecc_opaque_ristretto255_sha512_FinalizeRegistrationRequestWithNonce = asm["vb"];
+    _ecc_opaque_ristretto255_sha512_FinalizeRegistrationRequest = asm["wb"];
+    _ecc_opaque_ristretto255_sha512_CreateCredentialRequestWithBlind = asm["xb"];
+    _ecc_opaque_ristretto255_sha512_CreateCredentialRequest = asm["yb"];
+    _ecc_opaque_ristretto255_sha512_CreateCredentialResponseWithMasking = asm["zb"];
+    _ecc_opaque_ristretto255_sha512_CreateCredentialResponse = asm["Ab"];
+    _ecc_opaque_ristretto255_sha512_RecoverCredentials = asm["Bb"];
+    _ecc_opaque_ristretto255_sha512_3DH_Expand_Label = asm["Cb"];
+    _ecc_opaque_ristretto255_sha512_3DH_Derive_Secret = asm["Db"];
+    _ecc_opaque_ristretto255_sha512_3DH_Preamble = asm["Eb"];
+    _ecc_opaque_ristretto255_sha512_3DH_TripleDHIKM = asm["Fb"];
+    _ecc_opaque_ristretto255_sha512_3DH_DeriveKeys = asm["Gb"];
+    _ecc_opaque_ristretto255_sha512_GenerateKE1WithSeed = asm["Hb"];
+    _ecc_opaque_ristretto255_sha512_3DH_StartWithSeed = asm["Ib"];
+    _ecc_opaque_ristretto255_sha512_GenerateKE1 = asm["Jb"];
+    _ecc_opaque_ristretto255_sha512_3DH_Start = asm["Kb"];
+    _ecc_opaque_ristretto255_sha512_GenerateKE3 = asm["Lb"];
+    _ecc_opaque_ristretto255_sha512_3DH_ClientFinalize = asm["Mb"];
+    _ecc_opaque_ristretto255_sha512_GenerateKE2WithSeed = asm["Nb"];
+    _ecc_opaque_ristretto255_sha512_3DH_ResponseWithSeed = asm["Ob"];
+    _ecc_opaque_ristretto255_sha512_GenerateKE2 = asm["Pb"];
+    _ecc_opaque_ristretto255_sha512_3DH_Response = asm["Qb"];
+    _ecc_opaque_ristretto255_sha512_ServerFinish = asm["Rb"];
+    _ecc_sign_ed25519_Sign = asm["Sb"];
+    _ecc_sign_ed25519_Verify = asm["Tb"];
+    _ecc_sign_ed25519_KeyPair = asm["Ub"];
+    _ecc_sign_ed25519_SeedKeyPair = asm["Vb"];
+    _ecc_sign_ed25519_SkToSeed = asm["Wb"];
+    _ecc_sign_ed25519_SkToPk = asm["Xb"];
+    _ecc_sign_eth_bls_KeyGen = asm["Yb"];
+    _ecc_sign_eth_bls_SkToPk = asm["Zb"];
+    _ecc_sign_eth_bls_KeyValidate = asm["_b"];
+    _ecc_sign_eth_bls_Sign = asm["$b"];
+    _ecc_sign_eth_bls_Verify = asm["ac"];
+    _ecc_sign_eth_bls_Aggregate = asm["bc"];
+    _ecc_sign_eth_bls_FastAggregateVerify = asm["cc"];
+    _ecc_sign_eth_bls_AggregateVerify = asm["dc"];
+    _ecc_frost_ristretto255_sha512_nonce_generate_with_randomness = asm["ec"];
+    _ecc_frost_ristretto255_sha512_H3_2 = asm["fc"];
+    _ecc_frost_ristretto255_sha512_nonce_generate = asm["gc"];
+    _ecc_frost_ristretto255_sha512_derive_interpolating_value = asm["hc"];
+    _ecc_frost_ristretto255_sha512_derive_interpolating_value_with_points = asm["ic"];
+    _ecc_frost_ristretto255_sha512_encode_group_commitment_list = asm["jc"];
+    _ecc_frost_ristretto255_sha512_participants_from_commitment_list = asm["kc"];
+    _ecc_frost_ristretto255_sha512_binding_factor_for_participant = asm["lc"];
+    _ecc_frost_ristretto255_sha512_compute_binding_factors = asm["mc"];
+    _ecc_frost_ristretto255_sha512_H4 = asm["nc"];
+    _ecc_frost_ristretto255_sha512_H5 = asm["oc"];
+    _ecc_frost_ristretto255_sha512_H1 = asm["pc"];
+    _ecc_frost_ristretto255_sha512_compute_group_commitment = asm["qc"];
+    _ecc_frost_ristretto255_sha512_compute_challenge = asm["rc"];
+    _ecc_frost_ristretto255_sha512_H2_3 = asm["sc"];
+    _ecc_frost_ristretto255_sha512_commit_with_randomness = asm["tc"];
+    _ecc_frost_ristretto255_sha512_commit = asm["uc"];
+    _ecc_frost_ristretto255_sha512_sign = asm["vc"];
+    _ecc_frost_ristretto255_sha512_aggregate = asm["wc"];
+    _ecc_frost_ristretto255_sha512_verify_signature_share = asm["xc"];
+    _ecc_frost_ristretto255_sha512_H1_2 = asm["yc"];
+    _ecc_frost_ristretto255_sha512_H2 = asm["zc"];
+    _ecc_frost_ristretto255_sha512_H3 = asm["Ac"];
+    _ecc_frost_ristretto255_sha512_prime_order_sign = asm["Bc"];
+    _ecc_frost_ristretto255_sha512_prime_order_verify = asm["Cc"];
+    _ecc_frost_ristretto255_sha512_trusted_dealer_keygen_with_coefficients = asm["Dc"];
+    _ecc_frost_ristretto255_sha512_secret_share_shard = asm["Ec"];
+    _ecc_frost_ristretto255_sha512_vss_commit = asm["Fc"];
+    _ecc_frost_ristretto255_sha512_polynomial_evaluate = asm["Gc"];
+    _ecc_frost_ristretto255_sha512_secret_share_combine = asm["Hc"];
+    _ecc_frost_ristretto255_sha512_polynomial_interpolate_constant = asm["Ic"];
+    _ecc_frost_ristretto255_sha512_vss_verify = asm["Jc"];
+    _ecc_frost_ristretto255_sha512_derive_group_info = asm["Kc"];
+    _ecc_pre_schema1_MessageGen = asm["Lc"];
+    _ecc_pre_schema1_DeriveKey = asm["Mc"];
+    _ecc_pre_schema1_KeyGen = asm["Nc"];
+    _ecc_pre_schema1_DeriveSigningKey = asm["Oc"];
+    _ecc_pre_schema1_SigningKeyGen = asm["Pc"];
+    _ecc_pre_schema1_EncryptWithSeed = asm["Qc"];
+    _ecc_pre_schema1_Encrypt = asm["Rc"];
+    _ecc_pre_schema1_ReKeyGen = asm["Sc"];
+    _ecc_pre_schema1_ReEncrypt = asm["Tc"];
+    _ecc_pre_schema1_DecryptLevel1 = asm["Uc"];
+    _ecc_pre_schema1_DecryptLevel2 = asm["Vc"];
+    asm["u"];
+    wasmMemory = asm["e"];
+    updateMemoryViews();
+    initRuntime(asm);
+    ready();
+  });
+  function arraycopy(src, srcPos, dest, destPos, length) {
+    dest.set(src.subarray(srcPos, srcPos + length), destPos);
+  }
+  function mput(src, size) {
+    if (!src) return 0;
+    const pos = _ecc_malloc(size);
+    arraycopy(src, 0, HEAPU8, pos, size);
+    return pos;
+  }
+  function mget(dest, pos, size) {
+    arraycopy(HEAPU8, pos, dest, 0, size);
+  }
+  function mfree(ptr, size) {
+    _ecc_free(ptr, size);
+  }
+  Module.ecc_randombytes = (buf, n) => {
+    const ptr_buf = mput(buf, n);
+    _ecc_randombytes(ptr_buf, n);
+    mget(buf, ptr_buf, n);
+    mfree(ptr_buf, n);
+  };
+  Module.ecc_concat2 = (out, a1, a1_len, a2, a2_len) => {
+    const ptr_out = mput(out, a1_len + a2_len);
+    const ptr_a1 = mput(a1, a1_len);
+    const ptr_a2 = mput(a2, a2_len);
+    _ecc_concat2(ptr_out, ptr_a1, a1_len, ptr_a2, a2_len);
+    mget(out, ptr_out, a1_len + a2_len);
+    mfree(ptr_out, a1_len + a2_len);
+    mfree(ptr_a1, a1_len);
+    mfree(ptr_a2, a2_len);
+  };
+  Module.ecc_concat3 = (out, a1, a1_len, a2, a2_len, a3, a3_len) => {
+    const ptr_out = mput(out, a1_len + a2_len + a3_len);
+    const ptr_a1 = mput(a1, a1_len);
+    const ptr_a2 = mput(a2, a2_len);
+    const ptr_a3 = mput(a3, a3_len);
+    _ecc_concat3(ptr_out, ptr_a1, a1_len, ptr_a2, a2_len, ptr_a3, a3_len);
+    mget(out, ptr_out, a1_len + a2_len + a3_len);
+    mfree(ptr_out, a1_len + a2_len + a3_len);
+    mfree(ptr_a1, a1_len);
+    mfree(ptr_a2, a2_len);
+    mfree(ptr_a3, a3_len);
+  };
+  Module.ecc_concat4 = (out, a1, a1_len, a2, a2_len, a3, a3_len, a4, a4_len) => {
+    const ptr_out = mput(out, a1_len + a2_len + a3_len + a4_len);
+    const ptr_a1 = mput(a1, a1_len);
+    const ptr_a2 = mput(a2, a2_len);
+    const ptr_a3 = mput(a3, a3_len);
+    const ptr_a4 = mput(a4, a4_len);
+    _ecc_concat4(ptr_out, ptr_a1, a1_len, ptr_a2, a2_len, ptr_a3, a3_len, ptr_a4, a4_len);
+    mget(out, ptr_out, a1_len + a2_len + a3_len + a4_len);
+    mfree(ptr_out, a1_len + a2_len + a3_len + a4_len);
+    mfree(ptr_a1, a1_len);
+    mfree(ptr_a2, a2_len);
+    mfree(ptr_a3, a3_len);
+    mfree(ptr_a4, a4_len);
+  };
+  Module.ecc_strxor = (out, a, b, len) => {
+    const ptr_out = mput(out, len);
+    const ptr_a = mput(a, len);
+    const ptr_b = mput(b, len);
+    _ecc_strxor(ptr_out, ptr_a, ptr_b, len);
+    mget(out, ptr_out, len);
+    mfree(ptr_out, len);
+    mfree(ptr_a, len);
+    mfree(ptr_b, len);
+  };
+  Module.ecc_I2OSP = (out, x, xLen) => {
+    const ptr_out = mput(out, xLen);
+    _ecc_I2OSP(ptr_out, x, xLen);
+    mget(out, ptr_out, xLen);
+    mfree(ptr_out, xLen);
+  };
+  Module.ecc_compare = (a, b, len) => {
+    const ptr_a = mput(a, len);
+    const ptr_b = mput(b, len);
+    const fun_ret = _ecc_compare(ptr_a, ptr_b, len);
+    mfree(ptr_a, len);
+    mfree(ptr_b, len);
+    return fun_ret;
+  };
+  Module.ecc_is_zero = (n, len) => {
+    const ptr_n = mput(n, len);
+    const fun_ret = _ecc_is_zero(ptr_n, len);
+    mfree(ptr_n, len);
+    return fun_ret;
+  };
+  Module.ecc_version = (out, len) => {
+    const ptr_out = mput(out, len);
+    const fun_ret = _ecc_version(ptr_out, len);
+    mget(out, ptr_out, len);
+    mfree(ptr_out, len);
+    return fun_ret;
+  };
+  const ecc_hash_sha256_HASHSIZE = 32;
+  Module.ecc_hash_sha256_HASHSIZE = ecc_hash_sha256_HASHSIZE;
+  const ecc_hash_sha512_HASHSIZE = 64;
+  Module.ecc_hash_sha512_HASHSIZE = ecc_hash_sha512_HASHSIZE;
+  Module.ecc_hash_sha256 = (digest, input, input_len) => {
+    const ptr_digest = mput(digest, ecc_hash_sha256_HASHSIZE);
+    const ptr_input = mput(input, input_len);
+    _ecc_hash_sha256(ptr_digest, ptr_input, input_len);
+    mget(digest, ptr_digest, ecc_hash_sha256_HASHSIZE);
+    mfree(ptr_digest, ecc_hash_sha256_HASHSIZE);
+    mfree(ptr_input, input_len);
+  };
+  Module.ecc_hash_sha512 = (digest, input, input_len) => {
+    const ptr_digest = mput(digest, ecc_hash_sha512_HASHSIZE);
+    const ptr_input = mput(input, input_len);
+    _ecc_hash_sha512(ptr_digest, ptr_input, input_len);
+    mget(digest, ptr_digest, ecc_hash_sha512_HASHSIZE);
+    mfree(ptr_digest, ecc_hash_sha512_HASHSIZE);
+    mfree(ptr_input, input_len);
+  };
+  const ecc_mac_hmac_sha256_HASHSIZE = 32;
+  Module.ecc_mac_hmac_sha256_HASHSIZE = ecc_mac_hmac_sha256_HASHSIZE;
+  const ecc_mac_hmac_sha512_HASHSIZE = 64;
+  Module.ecc_mac_hmac_sha512_HASHSIZE = ecc_mac_hmac_sha512_HASHSIZE;
+  Module.ecc_mac_hmac_sha256 = (digest, text, text_len, key, key_len) => {
+    const ptr_digest = mput(digest, ecc_mac_hmac_sha256_HASHSIZE);
+    const ptr_text = mput(text, text_len);
+    const ptr_key = mput(key, key_len);
+    _ecc_mac_hmac_sha256(ptr_digest, ptr_text, text_len, ptr_key, key_len);
+    mget(digest, ptr_digest, ecc_mac_hmac_sha256_HASHSIZE);
+    mfree(ptr_digest, ecc_mac_hmac_sha256_HASHSIZE);
+    mfree(ptr_text, text_len);
+    mfree(ptr_key, key_len);
+  };
+  Module.ecc_mac_hmac_sha512 = (digest, text, text_len, key, key_len) => {
+    const ptr_digest = mput(digest, ecc_mac_hmac_sha512_HASHSIZE);
+    const ptr_text = mput(text, text_len);
+    const ptr_key = mput(key, key_len);
+    _ecc_mac_hmac_sha512(ptr_digest, ptr_text, text_len, ptr_key, key_len);
+    mget(digest, ptr_digest, ecc_mac_hmac_sha512_HASHSIZE);
+    mfree(ptr_digest, ecc_mac_hmac_sha512_HASHSIZE);
+    mfree(ptr_text, text_len);
+    mfree(ptr_key, key_len);
+  };
+  const ecc_kdf_hkdf_sha256_KEYSIZE = 32;
+  Module.ecc_kdf_hkdf_sha256_KEYSIZE = ecc_kdf_hkdf_sha256_KEYSIZE;
+  const ecc_kdf_hkdf_sha512_KEYSIZE = 64;
+  Module.ecc_kdf_hkdf_sha512_KEYSIZE = ecc_kdf_hkdf_sha512_KEYSIZE;
+  const ecc_kdf_argon2id_SALTIZE = 16;
+  Module.ecc_kdf_argon2id_SALTIZE = ecc_kdf_argon2id_SALTIZE;
+  Module.ecc_kdf_hkdf_sha256_extract = (prk, salt, salt_len, ikm, ikm_len) => {
+    const ptr_prk = mput(prk, ecc_kdf_hkdf_sha256_KEYSIZE);
+    const ptr_salt = mput(salt, salt_len);
+    const ptr_ikm = mput(ikm, ikm_len);
+    _ecc_kdf_hkdf_sha256_extract(ptr_prk, ptr_salt, salt_len, ptr_ikm, ikm_len);
+    mget(prk, ptr_prk, ecc_kdf_hkdf_sha256_KEYSIZE);
+    mfree(ptr_prk, ecc_kdf_hkdf_sha256_KEYSIZE);
+    mfree(ptr_salt, salt_len);
+    mfree(ptr_ikm, ikm_len);
+  };
+  Module.ecc_kdf_hkdf_sha256_expand = (okm, prk, info, info_len, len) => {
+    const ptr_okm = mput(okm, len);
+    const ptr_prk = mput(prk, ecc_kdf_hkdf_sha256_KEYSIZE);
+    const ptr_info = mput(info, info_len);
+    _ecc_kdf_hkdf_sha256_expand(ptr_okm, ptr_prk, ptr_info, info_len, len);
+    mget(okm, ptr_okm, len);
+    mfree(ptr_okm, len);
+    mfree(ptr_prk, ecc_kdf_hkdf_sha256_KEYSIZE);
+    mfree(ptr_info, info_len);
+  };
+  Module.ecc_kdf_hkdf_sha512_extract = (prk, salt, salt_len, ikm, ikm_len) => {
+    const ptr_prk = mput(prk, ecc_kdf_hkdf_sha512_KEYSIZE);
+    const ptr_salt = mput(salt, salt_len);
+    const ptr_ikm = mput(ikm, ikm_len);
+    _ecc_kdf_hkdf_sha512_extract(ptr_prk, ptr_salt, salt_len, ptr_ikm, ikm_len);
+    mget(prk, ptr_prk, ecc_kdf_hkdf_sha512_KEYSIZE);
+    mfree(ptr_prk, ecc_kdf_hkdf_sha512_KEYSIZE);
+    mfree(ptr_salt, salt_len);
+    mfree(ptr_ikm, ikm_len);
+  };
+  Module.ecc_kdf_hkdf_sha512_expand = (okm, prk, info, info_len, len) => {
+    const ptr_okm = mput(okm, len);
+    const ptr_prk = mput(prk, ecc_kdf_hkdf_sha512_KEYSIZE);
+    const ptr_info = mput(info, info_len);
+    _ecc_kdf_hkdf_sha512_expand(ptr_okm, ptr_prk, ptr_info, info_len, len);
+    mget(okm, ptr_okm, len);
+    mfree(ptr_okm, len);
+    mfree(ptr_prk, ecc_kdf_hkdf_sha512_KEYSIZE);
+    mfree(ptr_info, info_len);
+  };
+  Module.ecc_kdf_scrypt = (out, passphrase, passphrase_len, salt, salt_len, cost, block_size, parallelization, len) => {
+    const ptr_out = mput(out, len);
+    const ptr_passphrase = mput(passphrase, passphrase_len);
+    const ptr_salt = mput(salt, salt_len);
+    const fun_ret = _ecc_kdf_scrypt(ptr_out, ptr_passphrase, passphrase_len, ptr_salt, salt_len, cost, block_size, parallelization, len);
+    mget(out, ptr_out, len);
+    mfree(ptr_out, len);
+    mfree(ptr_passphrase, passphrase_len);
+    mfree(ptr_salt, salt_len);
+    return fun_ret;
+  };
+  Module.ecc_kdf_argon2id = (out, passphrase, passphrase_len, salt, memory_size, iterations, len) => {
+    const ptr_out = mput(out, len);
+    const ptr_passphrase = mput(passphrase, passphrase_len);
+    const ptr_salt = mput(salt, ecc_kdf_argon2id_SALTIZE);
+    const fun_ret = _ecc_kdf_argon2id(ptr_out, ptr_passphrase, passphrase_len, ptr_salt, memory_size, iterations, len);
+    mget(out, ptr_out, len);
+    mfree(ptr_out, len);
+    mfree(ptr_passphrase, passphrase_len);
+    mfree(ptr_salt, ecc_kdf_argon2id_SALTIZE);
+    return fun_ret;
+  };
+  const ecc_aead_chacha20poly1305_NONCESIZE = 12;
+  Module.ecc_aead_chacha20poly1305_NONCESIZE = ecc_aead_chacha20poly1305_NONCESIZE;
+  const ecc_aead_chacha20poly1305_KEYSIZE = 32;
+  Module.ecc_aead_chacha20poly1305_KEYSIZE = ecc_aead_chacha20poly1305_KEYSIZE;
+  const ecc_aead_chacha20poly1305_MACSIZE = 16;
+  Module.ecc_aead_chacha20poly1305_MACSIZE = ecc_aead_chacha20poly1305_MACSIZE;
+  Module.ecc_aead_chacha20poly1305_encrypt = (ciphertext, plaintext, plaintext_len, aad, aad_len, nonce, key) => {
+    const ptr_ciphertext = mput(ciphertext, plaintext_len + ecc_aead_chacha20poly1305_MACSIZE);
+    const ptr_plaintext = mput(plaintext, plaintext_len);
+    const ptr_aad = mput(aad, aad_len);
+    const ptr_nonce = mput(nonce, ecc_aead_chacha20poly1305_NONCESIZE);
+    const ptr_key = mput(key, ecc_aead_chacha20poly1305_KEYSIZE);
+    _ecc_aead_chacha20poly1305_encrypt(ptr_ciphertext, ptr_plaintext, plaintext_len, ptr_aad, aad_len, ptr_nonce, ptr_key);
+    mget(ciphertext, ptr_ciphertext, plaintext_len + ecc_aead_chacha20poly1305_MACSIZE);
+    mfree(ptr_ciphertext, plaintext_len + ecc_aead_chacha20poly1305_MACSIZE);
+    mfree(ptr_plaintext, plaintext_len);
+    mfree(ptr_aad, aad_len);
+    mfree(ptr_nonce, ecc_aead_chacha20poly1305_NONCESIZE);
+    mfree(ptr_key, ecc_aead_chacha20poly1305_KEYSIZE);
+  };
+  Module.ecc_aead_chacha20poly1305_decrypt = (plaintext, ciphertext, ciphertext_len, aad, aad_len, nonce, key) => {
+    const ptr_plaintext = mput(plaintext, ciphertext_len - ecc_aead_chacha20poly1305_MACSIZE);
+    const ptr_ciphertext = mput(ciphertext, ciphertext_len);
+    const ptr_aad = mput(aad, aad_len);
+    const ptr_nonce = mput(nonce, ecc_aead_chacha20poly1305_NONCESIZE);
+    const ptr_key = mput(key, ecc_aead_chacha20poly1305_KEYSIZE);
+    const fun_ret = _ecc_aead_chacha20poly1305_decrypt(ptr_plaintext, ptr_ciphertext, ciphertext_len, ptr_aad, aad_len, ptr_nonce, ptr_key);
+    mget(plaintext, ptr_plaintext, ciphertext_len - ecc_aead_chacha20poly1305_MACSIZE);
+    mfree(ptr_plaintext, ciphertext_len - ecc_aead_chacha20poly1305_MACSIZE);
+    mfree(ptr_ciphertext, ciphertext_len);
+    mfree(ptr_aad, aad_len);
+    mfree(ptr_nonce, ecc_aead_chacha20poly1305_NONCESIZE);
+    mfree(ptr_key, ecc_aead_chacha20poly1305_KEYSIZE);
+    return fun_ret;
+  };
+  const ecc_ed25519_ELEMENTSIZE = 32;
+  Module.ecc_ed25519_ELEMENTSIZE = ecc_ed25519_ELEMENTSIZE;
+  const ecc_ed25519_UNIFORMSIZE = 32;
+  Module.ecc_ed25519_UNIFORMSIZE = ecc_ed25519_UNIFORMSIZE;
+  const ecc_ed25519_SCALARSIZE = 32;
+  Module.ecc_ed25519_SCALARSIZE = ecc_ed25519_SCALARSIZE;
+  const ecc_ed25519_NONREDUCEDSCALARSIZE = 64;
+  Module.ecc_ed25519_NONREDUCEDSCALARSIZE = ecc_ed25519_NONREDUCEDSCALARSIZE;
+  Module.ecc_ed25519_is_valid_point = (p) => {
+    const ptr_p = mput(p, ecc_ed25519_ELEMENTSIZE);
+    const fun_ret = _ecc_ed25519_is_valid_point(ptr_p);
+    mfree(ptr_p, ecc_ed25519_ELEMENTSIZE);
+    return fun_ret;
+  };
+  Module.ecc_ed25519_add = (r, p, q) => {
+    const ptr_r = mput(r, ecc_ed25519_ELEMENTSIZE);
+    const ptr_p = mput(p, ecc_ed25519_ELEMENTSIZE);
+    const ptr_q = mput(q, ecc_ed25519_ELEMENTSIZE);
+    const fun_ret = _ecc_ed25519_add(ptr_r, ptr_p, ptr_q);
+    mget(r, ptr_r, ecc_ed25519_ELEMENTSIZE);
+    mfree(ptr_r, ecc_ed25519_ELEMENTSIZE);
+    mfree(ptr_p, ecc_ed25519_ELEMENTSIZE);
+    mfree(ptr_q, ecc_ed25519_ELEMENTSIZE);
+    return fun_ret;
+  };
+  Module.ecc_ed25519_sub = (r, p, q) => {
+    const ptr_r = mput(r, ecc_ed25519_ELEMENTSIZE);
+    const ptr_p = mput(p, ecc_ed25519_ELEMENTSIZE);
+    const ptr_q = mput(q, ecc_ed25519_ELEMENTSIZE);
+    const fun_ret = _ecc_ed25519_sub(ptr_r, ptr_p, ptr_q);
+    mget(r, ptr_r, ecc_ed25519_ELEMENTSIZE);
+    mfree(ptr_r, ecc_ed25519_ELEMENTSIZE);
+    mfree(ptr_p, ecc_ed25519_ELEMENTSIZE);
+    mfree(ptr_q, ecc_ed25519_ELEMENTSIZE);
+    return fun_ret;
+  };
+  Module.ecc_ed25519_generator = (g) => {
+    const ptr_g = mput(g, ecc_ed25519_ELEMENTSIZE);
+    _ecc_ed25519_generator(ptr_g);
+    mget(g, ptr_g, ecc_ed25519_ELEMENTSIZE);
+    mfree(ptr_g, ecc_ed25519_ELEMENTSIZE);
+  };
+  Module.ecc_ed25519_from_uniform = (p, r) => {
+    const ptr_p = mput(p, ecc_ed25519_ELEMENTSIZE);
+    const ptr_r = mput(r, ecc_ed25519_UNIFORMSIZE);
+    _ecc_ed25519_from_uniform(ptr_p, ptr_r);
+    mget(p, ptr_p, ecc_ed25519_ELEMENTSIZE);
+    mfree(ptr_p, ecc_ed25519_ELEMENTSIZE);
+    mfree(ptr_r, ecc_ed25519_UNIFORMSIZE);
+  };
+  Module.ecc_ed25519_random = (p) => {
+    const ptr_p = mput(p, ecc_ed25519_ELEMENTSIZE);
+    _ecc_ed25519_random(ptr_p);
+    mget(p, ptr_p, ecc_ed25519_ELEMENTSIZE);
+    mfree(ptr_p, ecc_ed25519_ELEMENTSIZE);
+  };
+  Module.ecc_ed25519_scalar_random = (r) => {
+    const ptr_r = mput(r, ecc_ed25519_SCALARSIZE);
+    _ecc_ed25519_scalar_random(ptr_r);
+    mget(r, ptr_r, ecc_ed25519_SCALARSIZE);
+    mfree(ptr_r, ecc_ed25519_SCALARSIZE);
+  };
+  Module.ecc_ed25519_scalar_invert = (recip, s) => {
+    const ptr_recip = mput(recip, ecc_ed25519_SCALARSIZE);
+    const ptr_s = mput(s, ecc_ed25519_SCALARSIZE);
+    const fun_ret = _ecc_ed25519_scalar_invert(ptr_recip, ptr_s);
+    mget(recip, ptr_recip, ecc_ed25519_SCALARSIZE);
+    mfree(ptr_recip, ecc_ed25519_SCALARSIZE);
+    mfree(ptr_s, ecc_ed25519_SCALARSIZE);
+    return fun_ret;
+  };
+  Module.ecc_ed25519_scalar_negate = (neg, s) => {
+    const ptr_neg = mput(neg, ecc_ed25519_SCALARSIZE);
+    const ptr_s = mput(s, ecc_ed25519_SCALARSIZE);
+    _ecc_ed25519_scalar_negate(ptr_neg, ptr_s);
+    mget(neg, ptr_neg, ecc_ed25519_SCALARSIZE);
+    mfree(ptr_neg, ecc_ed25519_SCALARSIZE);
+    mfree(ptr_s, ecc_ed25519_SCALARSIZE);
+  };
+  Module.ecc_ed25519_scalar_complement = (comp, s) => {
+    const ptr_comp = mput(comp, ecc_ed25519_SCALARSIZE);
+    const ptr_s = mput(s, ecc_ed25519_SCALARSIZE);
+    _ecc_ed25519_scalar_complement(ptr_comp, ptr_s);
+    mget(comp, ptr_comp, ecc_ed25519_SCALARSIZE);
+    mfree(ptr_comp, ecc_ed25519_SCALARSIZE);
+    mfree(ptr_s, ecc_ed25519_SCALARSIZE);
+  };
+  Module.ecc_ed25519_scalar_add = (z, x, y) => {
+    const ptr_z = mput(z, ecc_ed25519_SCALARSIZE);
+    const ptr_x = mput(x, ecc_ed25519_SCALARSIZE);
+    const ptr_y = mput(y, ecc_ed25519_SCALARSIZE);
+    _ecc_ed25519_scalar_add(ptr_z, ptr_x, ptr_y);
+    mget(z, ptr_z, ecc_ed25519_SCALARSIZE);
+    mfree(ptr_z, ecc_ed25519_SCALARSIZE);
+    mfree(ptr_x, ecc_ed25519_SCALARSIZE);
+    mfree(ptr_y, ecc_ed25519_SCALARSIZE);
+  };
+  Module.ecc_ed25519_scalar_sub = (z, x, y) => {
+    const ptr_z = mput(z, ecc_ed25519_SCALARSIZE);
+    const ptr_x = mput(x, ecc_ed25519_SCALARSIZE);
+    const ptr_y = mput(y, ecc_ed25519_SCALARSIZE);
+    _ecc_ed25519_scalar_sub(ptr_z, ptr_x, ptr_y);
+    mget(z, ptr_z, ecc_ed25519_SCALARSIZE);
+    mfree(ptr_z, ecc_ed25519_SCALARSIZE);
+    mfree(ptr_x, ecc_ed25519_SCALARSIZE);
+    mfree(ptr_y, ecc_ed25519_SCALARSIZE);
+  };
+  Module.ecc_ed25519_scalar_mul = (z, x, y) => {
+    const ptr_z = mput(z, ecc_ed25519_SCALARSIZE);
+    const ptr_x = mput(x, ecc_ed25519_SCALARSIZE);
+    const ptr_y = mput(y, ecc_ed25519_SCALARSIZE);
+    _ecc_ed25519_scalar_mul(ptr_z, ptr_x, ptr_y);
+    mget(z, ptr_z, ecc_ed25519_SCALARSIZE);
+    mfree(ptr_z, ecc_ed25519_SCALARSIZE);
+    mfree(ptr_x, ecc_ed25519_SCALARSIZE);
+    mfree(ptr_y, ecc_ed25519_SCALARSIZE);
+  };
+  Module.ecc_ed25519_scalar_reduce = (r, s) => {
+    const ptr_r = mput(r, ecc_ed25519_SCALARSIZE);
+    const ptr_s = mput(s, ecc_ed25519_NONREDUCEDSCALARSIZE);
+    _ecc_ed25519_scalar_reduce(ptr_r, ptr_s);
+    mget(r, ptr_r, ecc_ed25519_SCALARSIZE);
+    mfree(ptr_r, ecc_ed25519_SCALARSIZE);
+    mfree(ptr_s, ecc_ed25519_NONREDUCEDSCALARSIZE);
+  };
+  Module.ecc_ed25519_scalarmult = (q, n, p) => {
+    const ptr_q = mput(q, ecc_ed25519_ELEMENTSIZE);
+    const ptr_n = mput(n, ecc_ed25519_SCALARSIZE);
+    const ptr_p = mput(p, ecc_ed25519_ELEMENTSIZE);
+    const fun_ret = _ecc_ed25519_scalarmult(ptr_q, ptr_n, ptr_p);
+    mget(q, ptr_q, ecc_ed25519_ELEMENTSIZE);
+    mfree(ptr_q, ecc_ed25519_ELEMENTSIZE);
+    mfree(ptr_n, ecc_ed25519_SCALARSIZE);
+    mfree(ptr_p, ecc_ed25519_ELEMENTSIZE);
+    return fun_ret;
+  };
+  Module.ecc_ed25519_scalarmult_base = (q, n) => {
+    const ptr_q = mput(q, ecc_ed25519_ELEMENTSIZE);
+    const ptr_n = mput(n, ecc_ed25519_SCALARSIZE);
+    const fun_ret = _ecc_ed25519_scalarmult_base(ptr_q, ptr_n);
+    mget(q, ptr_q, ecc_ed25519_ELEMENTSIZE);
+    mfree(ptr_q, ecc_ed25519_ELEMENTSIZE);
+    mfree(ptr_n, ecc_ed25519_SCALARSIZE);
+    return fun_ret;
+  };
+  const ecc_ristretto255_ELEMENTSIZE = 32;
+  Module.ecc_ristretto255_ELEMENTSIZE = ecc_ristretto255_ELEMENTSIZE;
+  const ecc_ristretto255_HASHSIZE = 64;
+  Module.ecc_ristretto255_HASHSIZE = ecc_ristretto255_HASHSIZE;
+  const ecc_ristretto255_SCALARSIZE = 32;
+  Module.ecc_ristretto255_SCALARSIZE = ecc_ristretto255_SCALARSIZE;
+  const ecc_ristretto255_NONREDUCEDSCALARSIZE = 64;
+  Module.ecc_ristretto255_NONREDUCEDSCALARSIZE = ecc_ristretto255_NONREDUCEDSCALARSIZE;
+  Module.ecc_ristretto255_is_valid_point = (p) => {
+    const ptr_p = mput(p, ecc_ristretto255_ELEMENTSIZE);
+    const fun_ret = _ecc_ristretto255_is_valid_point(ptr_p);
+    mfree(ptr_p, ecc_ristretto255_ELEMENTSIZE);
+    return fun_ret;
+  };
+  Module.ecc_ristretto255_add = (r, p, q) => {
+    const ptr_r = mput(r, ecc_ristretto255_ELEMENTSIZE);
+    const ptr_p = mput(p, ecc_ristretto255_ELEMENTSIZE);
+    const ptr_q = mput(q, ecc_ristretto255_ELEMENTSIZE);
+    const fun_ret = _ecc_ristretto255_add(ptr_r, ptr_p, ptr_q);
+    mget(r, ptr_r, ecc_ristretto255_ELEMENTSIZE);
+    mfree(ptr_r, ecc_ristretto255_ELEMENTSIZE);
+    mfree(ptr_p, ecc_ristretto255_ELEMENTSIZE);
+    mfree(ptr_q, ecc_ristretto255_ELEMENTSIZE);
+    return fun_ret;
+  };
+  Module.ecc_ristretto255_sub = (r, p, q) => {
+    const ptr_r = mput(r, ecc_ristretto255_ELEMENTSIZE);
+    const ptr_p = mput(p, ecc_ristretto255_ELEMENTSIZE);
+    const ptr_q = mput(q, ecc_ristretto255_ELEMENTSIZE);
+    const fun_ret = _ecc_ristretto255_sub(ptr_r, ptr_p, ptr_q);
+    mget(r, ptr_r, ecc_ristretto255_ELEMENTSIZE);
+    mfree(ptr_r, ecc_ristretto255_ELEMENTSIZE);
+    mfree(ptr_p, ecc_ristretto255_ELEMENTSIZE);
+    mfree(ptr_q, ecc_ristretto255_ELEMENTSIZE);
+    return fun_ret;
+  };
+  Module.ecc_ristretto255_generator = (g) => {
+    const ptr_g = mput(g, ecc_ristretto255_ELEMENTSIZE);
+    _ecc_ristretto255_generator(ptr_g);
+    mget(g, ptr_g, ecc_ristretto255_ELEMENTSIZE);
+    mfree(ptr_g, ecc_ristretto255_ELEMENTSIZE);
+  };
+  Module.ecc_ristretto255_from_hash = (p, r) => {
+    const ptr_p = mput(p, ecc_ristretto255_ELEMENTSIZE);
+    const ptr_r = mput(r, ecc_ristretto255_HASHSIZE);
+    _ecc_ristretto255_from_hash(ptr_p, ptr_r);
+    mget(p, ptr_p, ecc_ristretto255_ELEMENTSIZE);
+    mfree(ptr_p, ecc_ristretto255_ELEMENTSIZE);
+    mfree(ptr_r, ecc_ristretto255_HASHSIZE);
+  };
+  Module.ecc_ristretto255_random = (p) => {
+    const ptr_p = mput(p, ecc_ristretto255_ELEMENTSIZE);
+    _ecc_ristretto255_random(ptr_p);
+    mget(p, ptr_p, ecc_ristretto255_ELEMENTSIZE);
+    mfree(ptr_p, ecc_ristretto255_ELEMENTSIZE);
+  };
+  Module.ecc_ristretto255_scalar_random = (r) => {
+    const ptr_r = mput(r, ecc_ristretto255_SCALARSIZE);
+    _ecc_ristretto255_scalar_random(ptr_r);
+    mget(r, ptr_r, ecc_ristretto255_SCALARSIZE);
+    mfree(ptr_r, ecc_ristretto255_SCALARSIZE);
+  };
+  Module.ecc_ristretto255_scalar_invert = (recip, s) => {
+    const ptr_recip = mput(recip, ecc_ristretto255_SCALARSIZE);
+    const ptr_s = mput(s, ecc_ristretto255_SCALARSIZE);
+    const fun_ret = _ecc_ristretto255_scalar_invert(ptr_recip, ptr_s);
+    mget(recip, ptr_recip, ecc_ristretto255_SCALARSIZE);
+    mfree(ptr_recip, ecc_ristretto255_SCALARSIZE);
+    mfree(ptr_s, ecc_ristretto255_SCALARSIZE);
+    return fun_ret;
+  };
+  Module.ecc_ristretto255_scalar_negate = (neg, s) => {
+    const ptr_neg = mput(neg, ecc_ristretto255_SCALARSIZE);
+    const ptr_s = mput(s, ecc_ristretto255_SCALARSIZE);
+    _ecc_ristretto255_scalar_negate(ptr_neg, ptr_s);
+    mget(neg, ptr_neg, ecc_ristretto255_SCALARSIZE);
+    mfree(ptr_neg, ecc_ristretto255_SCALARSIZE);
+    mfree(ptr_s, ecc_ristretto255_SCALARSIZE);
+  };
+  Module.ecc_ristretto255_scalar_complement = (comp, s) => {
+    const ptr_comp = mput(comp, ecc_ristretto255_SCALARSIZE);
+    const ptr_s = mput(s, ecc_ristretto255_SCALARSIZE);
+    _ecc_ristretto255_scalar_complement(ptr_comp, ptr_s);
+    mget(comp, ptr_comp, ecc_ristretto255_SCALARSIZE);
+    mfree(ptr_comp, ecc_ristretto255_SCALARSIZE);
+    mfree(ptr_s, ecc_ristretto255_SCALARSIZE);
+  };
+  Module.ecc_ristretto255_scalar_add = (z, x, y) => {
+    const ptr_z = mput(z, ecc_ristretto255_SCALARSIZE);
+    const ptr_x = mput(x, ecc_ristretto255_SCALARSIZE);
+    const ptr_y = mput(y, ecc_ristretto255_SCALARSIZE);
+    _ecc_ristretto255_scalar_add(ptr_z, ptr_x, ptr_y);
+    mget(z, ptr_z, ecc_ristretto255_SCALARSIZE);
+    mfree(ptr_z, ecc_ristretto255_SCALARSIZE);
+    mfree(ptr_x, ecc_ristretto255_SCALARSIZE);
+    mfree(ptr_y, ecc_ristretto255_SCALARSIZE);
+  };
+  Module.ecc_ristretto255_scalar_sub = (z, x, y) => {
+    const ptr_z = mput(z, ecc_ristretto255_SCALARSIZE);
+    const ptr_x = mput(x, ecc_ristretto255_SCALARSIZE);
+    const ptr_y = mput(y, ecc_ristretto255_SCALARSIZE);
+    _ecc_ristretto255_scalar_sub(ptr_z, ptr_x, ptr_y);
+    mget(z, ptr_z, ecc_ristretto255_SCALARSIZE);
+    mfree(ptr_z, ecc_ristretto255_SCALARSIZE);
+    mfree(ptr_x, ecc_ristretto255_SCALARSIZE);
+    mfree(ptr_y, ecc_ristretto255_SCALARSIZE);
+  };
+  Module.ecc_ristretto255_scalar_mul = (z, x, y) => {
+    const ptr_z = mput(z, ecc_ristretto255_SCALARSIZE);
+    const ptr_x = mput(x, ecc_ristretto255_SCALARSIZE);
+    const ptr_y = mput(y, ecc_ristretto255_SCALARSIZE);
+    _ecc_ristretto255_scalar_mul(ptr_z, ptr_x, ptr_y);
+    mget(z, ptr_z, ecc_ristretto255_SCALARSIZE);
+    mfree(ptr_z, ecc_ristretto255_SCALARSIZE);
+    mfree(ptr_x, ecc_ristretto255_SCALARSIZE);
+    mfree(ptr_y, ecc_ristretto255_SCALARSIZE);
+  };
+  Module.ecc_ristretto255_scalar_reduce = (r, s) => {
+    const ptr_r = mput(r, ecc_ristretto255_SCALARSIZE);
+    const ptr_s = mput(s, ecc_ristretto255_NONREDUCEDSCALARSIZE);
+    _ecc_ristretto255_scalar_reduce(ptr_r, ptr_s);
+    mget(r, ptr_r, ecc_ristretto255_SCALARSIZE);
+    mfree(ptr_r, ecc_ristretto255_SCALARSIZE);
+    mfree(ptr_s, ecc_ristretto255_NONREDUCEDSCALARSIZE);
+  };
+  Module.ecc_ristretto255_scalarmult = (q, n, p) => {
+    const ptr_q = mput(q, ecc_ristretto255_ELEMENTSIZE);
+    const ptr_n = mput(n, ecc_ristretto255_SCALARSIZE);
+    const ptr_p = mput(p, ecc_ristretto255_ELEMENTSIZE);
+    const fun_ret = _ecc_ristretto255_scalarmult(ptr_q, ptr_n, ptr_p);
+    mget(q, ptr_q, ecc_ristretto255_ELEMENTSIZE);
+    mfree(ptr_q, ecc_ristretto255_ELEMENTSIZE);
+    mfree(ptr_n, ecc_ristretto255_SCALARSIZE);
+    mfree(ptr_p, ecc_ristretto255_ELEMENTSIZE);
+    return fun_ret;
+  };
+  Module.ecc_ristretto255_scalarmult_base = (q, n) => {
+    const ptr_q = mput(q, ecc_ristretto255_ELEMENTSIZE);
+    const ptr_n = mput(n, ecc_ristretto255_SCALARSIZE);
+    const fun_ret = _ecc_ristretto255_scalarmult_base(ptr_q, ptr_n);
+    mget(q, ptr_q, ecc_ristretto255_ELEMENTSIZE);
+    mfree(ptr_q, ecc_ristretto255_ELEMENTSIZE);
+    mfree(ptr_n, ecc_ristretto255_SCALARSIZE);
+    return fun_ret;
+  };
+  const ecc_bls12_381_G1SIZE = 48;
+  Module.ecc_bls12_381_G1SIZE = ecc_bls12_381_G1SIZE;
+  const ecc_bls12_381_G2SIZE = 96;
+  Module.ecc_bls12_381_G2SIZE = ecc_bls12_381_G2SIZE;
+  const ecc_bls12_381_SCALARSIZE = 32;
+  Module.ecc_bls12_381_SCALARSIZE = ecc_bls12_381_SCALARSIZE;
+  const ecc_bls12_381_FPSIZE = 48;
+  Module.ecc_bls12_381_FPSIZE = ecc_bls12_381_FPSIZE;
+  const ecc_bls12_381_FP12SIZE = 576;
+  Module.ecc_bls12_381_FP12SIZE = ecc_bls12_381_FP12SIZE;
+  Module.ecc_bls12_381_fp_random = (ret) => {
+    const ptr_ret = mput(ret, ecc_bls12_381_FPSIZE);
+    _ecc_bls12_381_fp_random(ptr_ret);
+    mget(ret, ptr_ret, ecc_bls12_381_FPSIZE);
+    mfree(ptr_ret, ecc_bls12_381_FPSIZE);
+  };
+  Module.ecc_bls12_381_fp12_one = (ret) => {
+    const ptr_ret = mput(ret, ecc_bls12_381_FP12SIZE);
+    _ecc_bls12_381_fp12_one(ptr_ret);
+    mget(ret, ptr_ret, ecc_bls12_381_FP12SIZE);
+    mfree(ptr_ret, ecc_bls12_381_FP12SIZE);
+  };
+  Module.ecc_bls12_381_fp12_is_one = (a) => {
+    const ptr_a = mput(a, ecc_bls12_381_FP12SIZE);
+    const fun_ret = _ecc_bls12_381_fp12_is_one(ptr_a);
+    mfree(ptr_a, ecc_bls12_381_FP12SIZE);
+    return fun_ret;
+  };
+  Module.ecc_bls12_381_fp12_inverse = (ret, a) => {
+    const ptr_ret = mput(ret, ecc_bls12_381_FP12SIZE);
+    const ptr_a = mput(a, ecc_bls12_381_FP12SIZE);
+    _ecc_bls12_381_fp12_inverse(ptr_ret, ptr_a);
+    mget(ret, ptr_ret, ecc_bls12_381_FP12SIZE);
+    mfree(ptr_ret, ecc_bls12_381_FP12SIZE);
+    mfree(ptr_a, ecc_bls12_381_FP12SIZE);
+  };
+  Module.ecc_bls12_381_fp12_sqr = (ret, a) => {
+    const ptr_ret = mput(ret, ecc_bls12_381_FP12SIZE);
+    const ptr_a = mput(a, ecc_bls12_381_FP12SIZE);
+    _ecc_bls12_381_fp12_sqr(ptr_ret, ptr_a);
+    mget(ret, ptr_ret, ecc_bls12_381_FP12SIZE);
+    mfree(ptr_ret, ecc_bls12_381_FP12SIZE);
+    mfree(ptr_a, ecc_bls12_381_FP12SIZE);
+  };
+  Module.ecc_bls12_381_fp12_mul = (ret, a, b) => {
+    const ptr_ret = mput(ret, ecc_bls12_381_FP12SIZE);
+    const ptr_a = mput(a, ecc_bls12_381_FP12SIZE);
+    const ptr_b = mput(b, ecc_bls12_381_FP12SIZE);
+    _ecc_bls12_381_fp12_mul(ptr_ret, ptr_a, ptr_b);
+    mget(ret, ptr_ret, ecc_bls12_381_FP12SIZE);
+    mfree(ptr_ret, ecc_bls12_381_FP12SIZE);
+    mfree(ptr_a, ecc_bls12_381_FP12SIZE);
+    mfree(ptr_b, ecc_bls12_381_FP12SIZE);
+  };
+  Module.ecc_bls12_381_fp12_pow = (ret, a, n) => {
+    const ptr_ret = mput(ret, ecc_bls12_381_FP12SIZE);
+    const ptr_a = mput(a, ecc_bls12_381_FP12SIZE);
+    _ecc_bls12_381_fp12_pow(ptr_ret, ptr_a, n);
+    mget(ret, ptr_ret, ecc_bls12_381_FP12SIZE);
+    mfree(ptr_ret, ecc_bls12_381_FP12SIZE);
+    mfree(ptr_a, ecc_bls12_381_FP12SIZE);
+  };
+  Module.ecc_bls12_381_fp12_random = (ret) => {
+    const ptr_ret = mput(ret, ecc_bls12_381_FP12SIZE);
+    _ecc_bls12_381_fp12_random(ptr_ret);
+    mget(ret, ptr_ret, ecc_bls12_381_FP12SIZE);
+    mfree(ptr_ret, ecc_bls12_381_FP12SIZE);
+  };
+  Module.ecc_bls12_381_g1_add = (r, p, q) => {
+    const ptr_r = mput(r, ecc_bls12_381_G1SIZE);
+    const ptr_p = mput(p, ecc_bls12_381_G1SIZE);
+    const ptr_q = mput(q, ecc_bls12_381_G1SIZE);
+    _ecc_bls12_381_g1_add(ptr_r, ptr_p, ptr_q);
+    mget(r, ptr_r, ecc_bls12_381_G1SIZE);
+    mfree(ptr_r, ecc_bls12_381_G1SIZE);
+    mfree(ptr_p, ecc_bls12_381_G1SIZE);
+    mfree(ptr_q, ecc_bls12_381_G1SIZE);
+  };
+  Module.ecc_bls12_381_g1_negate = (neg, p) => {
+    const ptr_neg = mput(neg, ecc_bls12_381_G1SIZE);
+    const ptr_p = mput(p, ecc_bls12_381_G1SIZE);
+    _ecc_bls12_381_g1_negate(ptr_neg, ptr_p);
+    mget(neg, ptr_neg, ecc_bls12_381_G1SIZE);
+    mfree(ptr_neg, ecc_bls12_381_G1SIZE);
+    mfree(ptr_p, ecc_bls12_381_G1SIZE);
+  };
+  Module.ecc_bls12_381_g1_generator = (g) => {
+    const ptr_g = mput(g, ecc_bls12_381_G1SIZE);
+    _ecc_bls12_381_g1_generator(ptr_g);
+    mget(g, ptr_g, ecc_bls12_381_G1SIZE);
+    mfree(ptr_g, ecc_bls12_381_G1SIZE);
+  };
+  Module.ecc_bls12_381_g1_random = (p) => {
+    const ptr_p = mput(p, ecc_bls12_381_G1SIZE);
+    _ecc_bls12_381_g1_random(ptr_p);
+    mget(p, ptr_p, ecc_bls12_381_G1SIZE);
+    mfree(ptr_p, ecc_bls12_381_G1SIZE);
+  };
+  Module.ecc_bls12_381_g1_scalarmult = (q, n, p) => {
+    const ptr_q = mput(q, ecc_bls12_381_G1SIZE);
+    const ptr_n = mput(n, ecc_bls12_381_SCALARSIZE);
+    const ptr_p = mput(p, ecc_bls12_381_G1SIZE);
+    _ecc_bls12_381_g1_scalarmult(ptr_q, ptr_n, ptr_p);
+    mget(q, ptr_q, ecc_bls12_381_G1SIZE);
+    mfree(ptr_q, ecc_bls12_381_G1SIZE);
+    mfree(ptr_n, ecc_bls12_381_SCALARSIZE);
+    mfree(ptr_p, ecc_bls12_381_G1SIZE);
+  };
+  Module.ecc_bls12_381_g1_scalarmult_base = (q, n) => {
+    const ptr_q = mput(q, ecc_bls12_381_G1SIZE);
+    const ptr_n = mput(n, ecc_bls12_381_SCALARSIZE);
+    _ecc_bls12_381_g1_scalarmult_base(ptr_q, ptr_n);
+    mget(q, ptr_q, ecc_bls12_381_G1SIZE);
+    mfree(ptr_q, ecc_bls12_381_G1SIZE);
+    mfree(ptr_n, ecc_bls12_381_SCALARSIZE);
+  };
+  Module.ecc_bls12_381_g2_add = (r, p, q) => {
+    const ptr_r = mput(r, ecc_bls12_381_G2SIZE);
+    const ptr_p = mput(p, ecc_bls12_381_G2SIZE);
+    const ptr_q = mput(q, ecc_bls12_381_G2SIZE);
+    _ecc_bls12_381_g2_add(ptr_r, ptr_p, ptr_q);
+    mget(r, ptr_r, ecc_bls12_381_G2SIZE);
+    mfree(ptr_r, ecc_bls12_381_G2SIZE);
+    mfree(ptr_p, ecc_bls12_381_G2SIZE);
+    mfree(ptr_q, ecc_bls12_381_G2SIZE);
+  };
+  Module.ecc_bls12_381_g2_negate = (neg, p) => {
+    const ptr_neg = mput(neg, ecc_bls12_381_G2SIZE);
+    const ptr_p = mput(p, ecc_bls12_381_G2SIZE);
+    _ecc_bls12_381_g2_negate(ptr_neg, ptr_p);
+    mget(neg, ptr_neg, ecc_bls12_381_G2SIZE);
+    mfree(ptr_neg, ecc_bls12_381_G2SIZE);
+    mfree(ptr_p, ecc_bls12_381_G2SIZE);
+  };
+  Module.ecc_bls12_381_g2_generator = (g) => {
+    const ptr_g = mput(g, ecc_bls12_381_G2SIZE);
+    _ecc_bls12_381_g2_generator(ptr_g);
+    mget(g, ptr_g, ecc_bls12_381_G2SIZE);
+    mfree(ptr_g, ecc_bls12_381_G2SIZE);
+  };
+  Module.ecc_bls12_381_g2_random = (p) => {
+    const ptr_p = mput(p, ecc_bls12_381_G2SIZE);
+    _ecc_bls12_381_g2_random(ptr_p);
+    mget(p, ptr_p, ecc_bls12_381_G2SIZE);
+    mfree(ptr_p, ecc_bls12_381_G2SIZE);
+  };
+  Module.ecc_bls12_381_g2_scalarmult = (q, n, p) => {
+    const ptr_q = mput(q, ecc_bls12_381_G2SIZE);
+    const ptr_n = mput(n, ecc_bls12_381_SCALARSIZE);
+    const ptr_p = mput(p, ecc_bls12_381_G2SIZE);
+    _ecc_bls12_381_g2_scalarmult(ptr_q, ptr_n, ptr_p);
+    mget(q, ptr_q, ecc_bls12_381_G2SIZE);
+    mfree(ptr_q, ecc_bls12_381_G2SIZE);
+    mfree(ptr_n, ecc_bls12_381_SCALARSIZE);
+    mfree(ptr_p, ecc_bls12_381_G2SIZE);
+  };
+  Module.ecc_bls12_381_g2_scalarmult_base = (q, n) => {
+    const ptr_q = mput(q, ecc_bls12_381_G2SIZE);
+    const ptr_n = mput(n, ecc_bls12_381_SCALARSIZE);
+    _ecc_bls12_381_g2_scalarmult_base(ptr_q, ptr_n);
+    mget(q, ptr_q, ecc_bls12_381_G2SIZE);
+    mfree(ptr_q, ecc_bls12_381_G2SIZE);
+    mfree(ptr_n, ecc_bls12_381_SCALARSIZE);
+  };
+  Module.ecc_bls12_381_scalar_random = (r) => {
+    const ptr_r = mput(r, ecc_bls12_381_SCALARSIZE);
+    _ecc_bls12_381_scalar_random(ptr_r);
+    mget(r, ptr_r, ecc_bls12_381_SCALARSIZE);
+    mfree(ptr_r, ecc_bls12_381_SCALARSIZE);
+  };
+  Module.ecc_bls12_381_pairing = (ret, p1_g1, p2_g2) => {
+    const ptr_ret = mput(ret, ecc_bls12_381_FP12SIZE);
+    const ptr_p1_g1 = mput(p1_g1, ecc_bls12_381_G1SIZE);
+    const ptr_p2_g2 = mput(p2_g2, ecc_bls12_381_G2SIZE);
+    _ecc_bls12_381_pairing(ptr_ret, ptr_p1_g1, ptr_p2_g2);
+    mget(ret, ptr_ret, ecc_bls12_381_FP12SIZE);
+    mfree(ptr_ret, ecc_bls12_381_FP12SIZE);
+    mfree(ptr_p1_g1, ecc_bls12_381_G1SIZE);
+    mfree(ptr_p2_g2, ecc_bls12_381_G2SIZE);
+  };
+  Module.ecc_bls12_381_pairing_miller_loop = (ret, p1_g1, p2_g2) => {
+    const ptr_ret = mput(ret, ecc_bls12_381_FP12SIZE);
+    const ptr_p1_g1 = mput(p1_g1, ecc_bls12_381_G1SIZE);
+    const ptr_p2_g2 = mput(p2_g2, ecc_bls12_381_G2SIZE);
+    _ecc_bls12_381_pairing_miller_loop(ptr_ret, ptr_p1_g1, ptr_p2_g2);
+    mget(ret, ptr_ret, ecc_bls12_381_FP12SIZE);
+    mfree(ptr_ret, ecc_bls12_381_FP12SIZE);
+    mfree(ptr_p1_g1, ecc_bls12_381_G1SIZE);
+    mfree(ptr_p2_g2, ecc_bls12_381_G2SIZE);
+  };
+  Module.ecc_bls12_381_pairing_final_exp = (ret, a) => {
+    const ptr_ret = mput(ret, ecc_bls12_381_FP12SIZE);
+    const ptr_a = mput(a, ecc_bls12_381_FP12SIZE);
+    _ecc_bls12_381_pairing_final_exp(ptr_ret, ptr_a);
+    mget(ret, ptr_ret, ecc_bls12_381_FP12SIZE);
+    mfree(ptr_ret, ecc_bls12_381_FP12SIZE);
+    mfree(ptr_a, ecc_bls12_381_FP12SIZE);
+  };
+  Module.ecc_bls12_381_pairing_final_verify = (a, b) => {
+    const ptr_a = mput(a, ecc_bls12_381_FP12SIZE);
+    const ptr_b = mput(b, ecc_bls12_381_FP12SIZE);
+    const fun_ret = _ecc_bls12_381_pairing_final_verify(ptr_a, ptr_b);
+    mfree(ptr_a, ecc_bls12_381_FP12SIZE);
+    mfree(ptr_b, ecc_bls12_381_FP12SIZE);
+    return fun_ret;
+  };
+  const ecc_h2c_expand_message_xmd_sha256_MAXSIZE = 8160;
+  Module.ecc_h2c_expand_message_xmd_sha256_MAXSIZE = ecc_h2c_expand_message_xmd_sha256_MAXSIZE;
+  const ecc_h2c_expand_message_xmd_sha256_DSTMAXSIZE = 255;
+  Module.ecc_h2c_expand_message_xmd_sha256_DSTMAXSIZE = ecc_h2c_expand_message_xmd_sha256_DSTMAXSIZE;
+  const ecc_h2c_expand_message_xmd_sha512_MAXSIZE = 16320;
+  Module.ecc_h2c_expand_message_xmd_sha512_MAXSIZE = ecc_h2c_expand_message_xmd_sha512_MAXSIZE;
+  const ecc_h2c_expand_message_xmd_sha512_DSTMAXSIZE = 255;
+  Module.ecc_h2c_expand_message_xmd_sha512_DSTMAXSIZE = ecc_h2c_expand_message_xmd_sha512_DSTMAXSIZE;
+  Module.ecc_h2c_expand_message_xmd_sha256 = (out, msg, msg_len, dst, dst_len, len) => {
+    const ptr_out = mput(out, len);
+    const ptr_msg = mput(msg, msg_len);
+    const ptr_dst = mput(dst, dst_len);
+    const fun_ret = _ecc_h2c_expand_message_xmd_sha256(ptr_out, ptr_msg, msg_len, ptr_dst, dst_len, len);
+    mget(out, ptr_out, len);
+    mfree(ptr_out, len);
+    mfree(ptr_msg, msg_len);
+    mfree(ptr_dst, dst_len);
+    return fun_ret;
+  };
+  Module.ecc_h2c_expand_message_xmd_sha512 = (out, msg, msg_len, dst, dst_len, len) => {
+    const ptr_out = mput(out, len);
+    const ptr_msg = mput(msg, msg_len);
+    const ptr_dst = mput(dst, dst_len);
+    const fun_ret = _ecc_h2c_expand_message_xmd_sha512(ptr_out, ptr_msg, msg_len, ptr_dst, dst_len, len);
+    mget(out, ptr_out, len);
+    mfree(ptr_out, len);
+    mfree(ptr_msg, msg_len);
+    mfree(ptr_dst, dst_len);
+    return fun_ret;
+  };
+  const ecc_voprf_ristretto255_sha512_ELEMENTSIZE = 32;
+  Module.ecc_voprf_ristretto255_sha512_ELEMENTSIZE = ecc_voprf_ristretto255_sha512_ELEMENTSIZE;
+  const ecc_voprf_ristretto255_sha512_SCALARSIZE = 32;
+  Module.ecc_voprf_ristretto255_sha512_SCALARSIZE = ecc_voprf_ristretto255_sha512_SCALARSIZE;
+  const ecc_voprf_ristretto255_sha512_PROOFSIZE = 64;
+  Module.ecc_voprf_ristretto255_sha512_PROOFSIZE = ecc_voprf_ristretto255_sha512_PROOFSIZE;
+  const ecc_voprf_ristretto255_sha512_Nh = 64;
+  Module.ecc_voprf_ristretto255_sha512_Nh = ecc_voprf_ristretto255_sha512_Nh;
+  const ecc_voprf_ristretto255_sha512_MODE_OPRF = 0;
+  Module.ecc_voprf_ristretto255_sha512_MODE_OPRF = ecc_voprf_ristretto255_sha512_MODE_OPRF;
+  const ecc_voprf_ristretto255_sha512_MODE_VOPRF = 1;
+  Module.ecc_voprf_ristretto255_sha512_MODE_VOPRF = ecc_voprf_ristretto255_sha512_MODE_VOPRF;
+  const ecc_voprf_ristretto255_sha512_MODE_POPRF = 2;
+  Module.ecc_voprf_ristretto255_sha512_MODE_POPRF = ecc_voprf_ristretto255_sha512_MODE_POPRF;
+  const ecc_voprf_ristretto255_sha512_MAXINFOSIZE = 2e3;
+  Module.ecc_voprf_ristretto255_sha512_MAXINFOSIZE = ecc_voprf_ristretto255_sha512_MAXINFOSIZE;
+  Module.ecc_voprf_ristretto255_sha512_GenerateProofWithScalar = (proof, k, A, B, C, D, m, mode, r) => {
+    const ptr_proof = mput(proof, ecc_voprf_ristretto255_sha512_PROOFSIZE);
+    const ptr_k = mput(k, ecc_voprf_ristretto255_sha512_SCALARSIZE);
+    const ptr_A = mput(A, ecc_voprf_ristretto255_sha512_ELEMENTSIZE);
+    const ptr_B = mput(B, ecc_voprf_ristretto255_sha512_ELEMENTSIZE);
+    const ptr_C = mput(C, m * ecc_voprf_ristretto255_sha512_ELEMENTSIZE);
+    const ptr_D = mput(D, m * ecc_voprf_ristretto255_sha512_ELEMENTSIZE);
+    const ptr_r = mput(r, ecc_voprf_ristretto255_sha512_SCALARSIZE);
+    _ecc_voprf_ristretto255_sha512_GenerateProofWithScalar(ptr_proof, ptr_k, ptr_A, ptr_B, ptr_C, ptr_D, m, mode, ptr_r);
+    mget(proof, ptr_proof, ecc_voprf_ristretto255_sha512_PROOFSIZE);
+    mfree(ptr_proof, ecc_voprf_ristretto255_sha512_PROOFSIZE);
+    mfree(ptr_k, ecc_voprf_ristretto255_sha512_SCALARSIZE);
+    mfree(ptr_A, ecc_voprf_ristretto255_sha512_ELEMENTSIZE);
+    mfree(ptr_B, ecc_voprf_ristretto255_sha512_ELEMENTSIZE);
+    mfree(ptr_C, m * ecc_voprf_ristretto255_sha512_ELEMENTSIZE);
+    mfree(ptr_D, m * ecc_voprf_ristretto255_sha512_ELEMENTSIZE);
+    mfree(ptr_r, ecc_voprf_ristretto255_sha512_SCALARSIZE);
+  };
+  Module.ecc_voprf_ristretto255_sha512_GenerateProof = (proof, k, A, B, C, D, m, mode) => {
+    const ptr_proof = mput(proof, ecc_voprf_ristretto255_sha512_PROOFSIZE);
+    const ptr_k = mput(k, ecc_voprf_ristretto255_sha512_SCALARSIZE);
+    const ptr_A = mput(A, ecc_voprf_ristretto255_sha512_ELEMENTSIZE);
+    const ptr_B = mput(B, ecc_voprf_ristretto255_sha512_ELEMENTSIZE);
+    const ptr_C = mput(C, m * ecc_voprf_ristretto255_sha512_ELEMENTSIZE);
+    const ptr_D = mput(D, m * ecc_voprf_ristretto255_sha512_ELEMENTSIZE);
+    _ecc_voprf_ristretto255_sha512_GenerateProof(ptr_proof, ptr_k, ptr_A, ptr_B, ptr_C, ptr_D, m, mode);
+    mget(proof, ptr_proof, ecc_voprf_ristretto255_sha512_PROOFSIZE);
+    mfree(ptr_proof, ecc_voprf_ristretto255_sha512_PROOFSIZE);
+    mfree(ptr_k, ecc_voprf_ristretto255_sha512_SCALARSIZE);
+    mfree(ptr_A, ecc_voprf_ristretto255_sha512_ELEMENTSIZE);
+    mfree(ptr_B, ecc_voprf_ristretto255_sha512_ELEMENTSIZE);
+    mfree(ptr_C, m * ecc_voprf_ristretto255_sha512_ELEMENTSIZE);
+    mfree(ptr_D, m * ecc_voprf_ristretto255_sha512_ELEMENTSIZE);
+  };
+  Module.ecc_voprf_ristretto255_sha512_ComputeCompositesFast = (M, Z, k, B, C, D, m, mode) => {
+    const ptr_M = mput(M, ecc_voprf_ristretto255_sha512_ELEMENTSIZE);
+    const ptr_Z = mput(Z, ecc_voprf_ristretto255_sha512_ELEMENTSIZE);
+    const ptr_k = mput(k, ecc_voprf_ristretto255_sha512_SCALARSIZE);
+    const ptr_B = mput(B, ecc_voprf_ristretto255_sha512_ELEMENTSIZE);
+    const ptr_C = mput(C, m * ecc_voprf_ristretto255_sha512_ELEMENTSIZE);
+    const ptr_D = mput(D, m * ecc_voprf_ristretto255_sha512_ELEMENTSIZE);
+    _ecc_voprf_ristretto255_sha512_ComputeCompositesFast(ptr_M, ptr_Z, ptr_k, ptr_B, ptr_C, ptr_D, m, mode);
+    mget(M, ptr_M, ecc_voprf_ristretto255_sha512_ELEMENTSIZE);
+    mget(Z, ptr_Z, ecc_voprf_ristretto255_sha512_ELEMENTSIZE);
+    mfree(ptr_M, ecc_voprf_ristretto255_sha512_ELEMENTSIZE);
+    mfree(ptr_Z, ecc_voprf_ristretto255_sha512_ELEMENTSIZE);
+    mfree(ptr_k, ecc_voprf_ristretto255_sha512_SCALARSIZE);
+    mfree(ptr_B, ecc_voprf_ristretto255_sha512_ELEMENTSIZE);
+    mfree(ptr_C, m * ecc_voprf_ristretto255_sha512_ELEMENTSIZE);
+    mfree(ptr_D, m * ecc_voprf_ristretto255_sha512_ELEMENTSIZE);
+  };
+  Module.ecc_voprf_ristretto255_sha512_VerifyProof = (A, B, C, D, m, mode, proof) => {
+    const ptr_A = mput(A, ecc_voprf_ristretto255_sha512_ELEMENTSIZE);
+    const ptr_B = mput(B, ecc_voprf_ristretto255_sha512_ELEMENTSIZE);
+    const ptr_C = mput(C, m * ecc_voprf_ristretto255_sha512_ELEMENTSIZE);
+    const ptr_D = mput(D, m * ecc_voprf_ristretto255_sha512_ELEMENTSIZE);
+    const ptr_proof = mput(proof, ecc_voprf_ristretto255_sha512_PROOFSIZE);
+    const fun_ret = _ecc_voprf_ristretto255_sha512_VerifyProof(ptr_A, ptr_B, ptr_C, ptr_D, m, mode, ptr_proof);
+    mfree(ptr_A, ecc_voprf_ristretto255_sha512_ELEMENTSIZE);
+    mfree(ptr_B, ecc_voprf_ristretto255_sha512_ELEMENTSIZE);
+    mfree(ptr_C, m * ecc_voprf_ristretto255_sha512_ELEMENTSIZE);
+    mfree(ptr_D, m * ecc_voprf_ristretto255_sha512_ELEMENTSIZE);
+    mfree(ptr_proof, ecc_voprf_ristretto255_sha512_PROOFSIZE);
+    return fun_ret;
+  };
+  Module.ecc_voprf_ristretto255_sha512_ComputeComposites = (M, Z, B, C, D, m, mode) => {
+    const ptr_M = mput(M, ecc_voprf_ristretto255_sha512_ELEMENTSIZE);
+    const ptr_Z = mput(Z, ecc_voprf_ristretto255_sha512_ELEMENTSIZE);
+    const ptr_B = mput(B, ecc_voprf_ristretto255_sha512_ELEMENTSIZE);
+    const ptr_C = mput(C, m * ecc_voprf_ristretto255_sha512_ELEMENTSIZE);
+    const ptr_D = mput(D, m * ecc_voprf_ristretto255_sha512_ELEMENTSIZE);
+    _ecc_voprf_ristretto255_sha512_ComputeComposites(ptr_M, ptr_Z, ptr_B, ptr_C, ptr_D, m, mode);
+    mget(M, ptr_M, ecc_voprf_ristretto255_sha512_ELEMENTSIZE);
+    mget(Z, ptr_Z, ecc_voprf_ristretto255_sha512_ELEMENTSIZE);
+    mfree(ptr_M, ecc_voprf_ristretto255_sha512_ELEMENTSIZE);
+    mfree(ptr_Z, ecc_voprf_ristretto255_sha512_ELEMENTSIZE);
+    mfree(ptr_B, ecc_voprf_ristretto255_sha512_ELEMENTSIZE);
+    mfree(ptr_C, m * ecc_voprf_ristretto255_sha512_ELEMENTSIZE);
+    mfree(ptr_D, m * ecc_voprf_ristretto255_sha512_ELEMENTSIZE);
+  };
+  Module.ecc_voprf_ristretto255_sha512_GenerateKeyPair = (skS, pkS) => {
+    const ptr_skS = mput(skS, ecc_voprf_ristretto255_sha512_SCALARSIZE);
+    const ptr_pkS = mput(pkS, ecc_voprf_ristretto255_sha512_ELEMENTSIZE);
+    _ecc_voprf_ristretto255_sha512_GenerateKeyPair(ptr_skS, ptr_pkS);
+    mget(skS, ptr_skS, ecc_voprf_ristretto255_sha512_SCALARSIZE);
+    mget(pkS, ptr_pkS, ecc_voprf_ristretto255_sha512_ELEMENTSIZE);
+    mfree(ptr_skS, ecc_voprf_ristretto255_sha512_SCALARSIZE);
+    mfree(ptr_pkS, ecc_voprf_ristretto255_sha512_ELEMENTSIZE);
+  };
+  Module.ecc_voprf_ristretto255_sha512_DeriveKeyPair = (skS, pkS, seed, info, infoLen, mode) => {
+    const ptr_skS = mput(skS, ecc_voprf_ristretto255_sha512_SCALARSIZE);
+    const ptr_pkS = mput(pkS, ecc_voprf_ristretto255_sha512_ELEMENTSIZE);
+    const ptr_seed = mput(seed, ecc_voprf_ristretto255_sha512_SCALARSIZE);
+    const ptr_info = mput(info, infoLen);
+    const fun_ret = _ecc_voprf_ristretto255_sha512_DeriveKeyPair(ptr_skS, ptr_pkS, ptr_seed, ptr_info, infoLen, mode);
+    mget(skS, ptr_skS, ecc_voprf_ristretto255_sha512_SCALARSIZE);
+    mget(pkS, ptr_pkS, ecc_voprf_ristretto255_sha512_ELEMENTSIZE);
+    mfree(ptr_skS, ecc_voprf_ristretto255_sha512_SCALARSIZE);
+    mfree(ptr_pkS, ecc_voprf_ristretto255_sha512_ELEMENTSIZE);
+    mfree(ptr_seed, ecc_voprf_ristretto255_sha512_SCALARSIZE);
+    mfree(ptr_info, infoLen);
+    return fun_ret;
+  };
+  Module.ecc_voprf_ristretto255_sha512_BlindWithScalar = (blindedElement, input, inputLen, blind, mode) => {
+    const ptr_blindedElement = mput(blindedElement, ecc_voprf_ristretto255_sha512_ELEMENTSIZE);
+    const ptr_input = mput(input, inputLen);
+    const ptr_blind = mput(blind, ecc_voprf_ristretto255_sha512_SCALARSIZE);
+    const fun_ret = _ecc_voprf_ristretto255_sha512_BlindWithScalar(ptr_blindedElement, ptr_input, inputLen, ptr_blind, mode);
+    mget(blindedElement, ptr_blindedElement, ecc_voprf_ristretto255_sha512_ELEMENTSIZE);
+    mfree(ptr_blindedElement, ecc_voprf_ristretto255_sha512_ELEMENTSIZE);
+    mfree(ptr_input, inputLen);
+    mfree(ptr_blind, ecc_voprf_ristretto255_sha512_SCALARSIZE);
+    return fun_ret;
+  };
+  Module.ecc_voprf_ristretto255_sha512_Blind = (blind, blindedElement, input, inputLen, mode) => {
+    const ptr_blind = mput(blind, ecc_voprf_ristretto255_sha512_SCALARSIZE);
+    const ptr_blindedElement = mput(blindedElement, ecc_voprf_ristretto255_sha512_ELEMENTSIZE);
+    const ptr_input = mput(input, inputLen);
+    const fun_ret = _ecc_voprf_ristretto255_sha512_Blind(ptr_blind, ptr_blindedElement, ptr_input, inputLen, mode);
+    mget(blind, ptr_blind, ecc_voprf_ristretto255_sha512_SCALARSIZE);
+    mget(blindedElement, ptr_blindedElement, ecc_voprf_ristretto255_sha512_ELEMENTSIZE);
+    mfree(ptr_blind, ecc_voprf_ristretto255_sha512_SCALARSIZE);
+    mfree(ptr_blindedElement, ecc_voprf_ristretto255_sha512_ELEMENTSIZE);
+    mfree(ptr_input, inputLen);
+    return fun_ret;
+  };
+  Module.ecc_voprf_ristretto255_sha512_BlindEvaluate = (evaluatedElement, skS, blindedElement) => {
+    const ptr_evaluatedElement = mput(evaluatedElement, ecc_voprf_ristretto255_sha512_ELEMENTSIZE);
+    const ptr_skS = mput(skS, ecc_voprf_ristretto255_sha512_SCALARSIZE);
+    const ptr_blindedElement = mput(blindedElement, ecc_voprf_ristretto255_sha512_ELEMENTSIZE);
+    _ecc_voprf_ristretto255_sha512_BlindEvaluate(ptr_evaluatedElement, ptr_skS, ptr_blindedElement);
+    mget(evaluatedElement, ptr_evaluatedElement, ecc_voprf_ristretto255_sha512_ELEMENTSIZE);
+    mfree(ptr_evaluatedElement, ecc_voprf_ristretto255_sha512_ELEMENTSIZE);
+    mfree(ptr_skS, ecc_voprf_ristretto255_sha512_SCALARSIZE);
+    mfree(ptr_blindedElement, ecc_voprf_ristretto255_sha512_ELEMENTSIZE);
+  };
+  Module.ecc_voprf_ristretto255_sha512_Finalize = (output, input, inputLen, blind, evaluatedElement) => {
+    const ptr_output = mput(output, ecc_voprf_ristretto255_sha512_Nh);
+    const ptr_input = mput(input, inputLen);
+    const ptr_blind = mput(blind, ecc_voprf_ristretto255_sha512_SCALARSIZE);
+    const ptr_evaluatedElement = mput(evaluatedElement, ecc_voprf_ristretto255_sha512_ELEMENTSIZE);
+    _ecc_voprf_ristretto255_sha512_Finalize(ptr_output, ptr_input, inputLen, ptr_blind, ptr_evaluatedElement);
+    mget(output, ptr_output, ecc_voprf_ristretto255_sha512_Nh);
+    mfree(ptr_output, ecc_voprf_ristretto255_sha512_Nh);
+    mfree(ptr_input, inputLen);
+    mfree(ptr_blind, ecc_voprf_ristretto255_sha512_SCALARSIZE);
+    mfree(ptr_evaluatedElement, ecc_voprf_ristretto255_sha512_ELEMENTSIZE);
+  };
+  Module.ecc_voprf_ristretto255_sha512_Evaluate = (output, skS, input, inputLen, mode) => {
+    const ptr_output = mput(output, ecc_voprf_ristretto255_sha512_Nh);
+    const ptr_skS = mput(skS, ecc_voprf_ristretto255_sha512_SCALARSIZE);
+    const ptr_input = mput(input, inputLen);
+    const fun_ret = _ecc_voprf_ristretto255_sha512_Evaluate(ptr_output, ptr_skS, ptr_input, inputLen, mode);
+    mget(output, ptr_output, ecc_voprf_ristretto255_sha512_Nh);
+    mfree(ptr_output, ecc_voprf_ristretto255_sha512_Nh);
+    mfree(ptr_skS, ecc_voprf_ristretto255_sha512_SCALARSIZE);
+    mfree(ptr_input, inputLen);
+    return fun_ret;
+  };
+  Module.ecc_voprf_ristretto255_sha512_VerifiableBlindEvaluateWithScalar = (evaluatedElement, proof, skS, pkS, blindedElement, r) => {
+    const ptr_evaluatedElement = mput(evaluatedElement, ecc_voprf_ristretto255_sha512_ELEMENTSIZE);
+    const ptr_proof = mput(proof, ecc_voprf_ristretto255_sha512_PROOFSIZE);
+    const ptr_skS = mput(skS, ecc_voprf_ristretto255_sha512_SCALARSIZE);
+    const ptr_pkS = mput(pkS, ecc_voprf_ristretto255_sha512_ELEMENTSIZE);
+    const ptr_blindedElement = mput(blindedElement, ecc_voprf_ristretto255_sha512_ELEMENTSIZE);
+    const ptr_r = mput(r, ecc_voprf_ristretto255_sha512_SCALARSIZE);
+    _ecc_voprf_ristretto255_sha512_VerifiableBlindEvaluateWithScalar(ptr_evaluatedElement, ptr_proof, ptr_skS, ptr_pkS, ptr_blindedElement, ptr_r);
+    mget(evaluatedElement, ptr_evaluatedElement, ecc_voprf_ristretto255_sha512_ELEMENTSIZE);
+    mget(proof, ptr_proof, ecc_voprf_ristretto255_sha512_PROOFSIZE);
+    mfree(ptr_evaluatedElement, ecc_voprf_ristretto255_sha512_ELEMENTSIZE);
+    mfree(ptr_proof, ecc_voprf_ristretto255_sha512_PROOFSIZE);
+    mfree(ptr_skS, ecc_voprf_ristretto255_sha512_SCALARSIZE);
+    mfree(ptr_pkS, ecc_voprf_ristretto255_sha512_ELEMENTSIZE);
+    mfree(ptr_blindedElement, ecc_voprf_ristretto255_sha512_ELEMENTSIZE);
+    mfree(ptr_r, ecc_voprf_ristretto255_sha512_SCALARSIZE);
+  };
+  Module.ecc_voprf_ristretto255_sha512_VerifiableBlindEvaluate = (evaluatedElement, proof, skS, pkS, blindedElement) => {
+    const ptr_evaluatedElement = mput(evaluatedElement, ecc_voprf_ristretto255_sha512_ELEMENTSIZE);
+    const ptr_proof = mput(proof, ecc_voprf_ristretto255_sha512_PROOFSIZE);
+    const ptr_skS = mput(skS, ecc_voprf_ristretto255_sha512_SCALARSIZE);
+    const ptr_pkS = mput(pkS, ecc_voprf_ristretto255_sha512_ELEMENTSIZE);
+    const ptr_blindedElement = mput(blindedElement, ecc_voprf_ristretto255_sha512_ELEMENTSIZE);
+    _ecc_voprf_ristretto255_sha512_VerifiableBlindEvaluate(ptr_evaluatedElement, ptr_proof, ptr_skS, ptr_pkS, ptr_blindedElement);
+    mget(evaluatedElement, ptr_evaluatedElement, ecc_voprf_ristretto255_sha512_ELEMENTSIZE);
+    mget(proof, ptr_proof, ecc_voprf_ristretto255_sha512_PROOFSIZE);
+    mfree(ptr_evaluatedElement, ecc_voprf_ristretto255_sha512_ELEMENTSIZE);
+    mfree(ptr_proof, ecc_voprf_ristretto255_sha512_PROOFSIZE);
+    mfree(ptr_skS, ecc_voprf_ristretto255_sha512_SCALARSIZE);
+    mfree(ptr_pkS, ecc_voprf_ristretto255_sha512_ELEMENTSIZE);
+    mfree(ptr_blindedElement, ecc_voprf_ristretto255_sha512_ELEMENTSIZE);
+  };
+  Module.ecc_voprf_ristretto255_sha512_VerifiableFinalize = (output, input, inputLen, blind, evaluatedElement, blindedElement, pkS, proof) => {
+    const ptr_output = mput(output, ecc_voprf_ristretto255_sha512_Nh);
+    const ptr_input = mput(input, inputLen);
+    const ptr_blind = mput(blind, ecc_voprf_ristretto255_sha512_SCALARSIZE);
+    const ptr_evaluatedElement = mput(evaluatedElement, ecc_voprf_ristretto255_sha512_ELEMENTSIZE);
+    const ptr_blindedElement = mput(blindedElement, ecc_voprf_ristretto255_sha512_ELEMENTSIZE);
+    const ptr_pkS = mput(pkS, ecc_voprf_ristretto255_sha512_ELEMENTSIZE);
+    const ptr_proof = mput(proof, ecc_voprf_ristretto255_sha512_PROOFSIZE);
+    const fun_ret = _ecc_voprf_ristretto255_sha512_VerifiableFinalize(ptr_output, ptr_input, inputLen, ptr_blind, ptr_evaluatedElement, ptr_blindedElement, ptr_pkS, ptr_proof);
+    mget(output, ptr_output, ecc_voprf_ristretto255_sha512_Nh);
+    mfree(ptr_output, ecc_voprf_ristretto255_sha512_Nh);
+    mfree(ptr_input, inputLen);
+    mfree(ptr_blind, ecc_voprf_ristretto255_sha512_SCALARSIZE);
+    mfree(ptr_evaluatedElement, ecc_voprf_ristretto255_sha512_ELEMENTSIZE);
+    mfree(ptr_blindedElement, ecc_voprf_ristretto255_sha512_ELEMENTSIZE);
+    mfree(ptr_pkS, ecc_voprf_ristretto255_sha512_ELEMENTSIZE);
+    mfree(ptr_proof, ecc_voprf_ristretto255_sha512_PROOFSIZE);
+    return fun_ret;
+  };
+  Module.ecc_voprf_ristretto255_sha512_PartiallyBlindWithScalar = (blindedElement, tweakedKey, input, inputLen, info, infoLen, pkS, blind) => {
+    const ptr_blindedElement = mput(blindedElement, ecc_voprf_ristretto255_sha512_ELEMENTSIZE);
+    const ptr_tweakedKey = mput(tweakedKey, ecc_voprf_ristretto255_sha512_ELEMENTSIZE);
+    const ptr_input = mput(input, inputLen);
+    const ptr_info = mput(info, infoLen);
+    const ptr_pkS = mput(pkS, ecc_voprf_ristretto255_sha512_ELEMENTSIZE);
+    const ptr_blind = mput(blind, ecc_voprf_ristretto255_sha512_SCALARSIZE);
+    const fun_ret = _ecc_voprf_ristretto255_sha512_PartiallyBlindWithScalar(ptr_blindedElement, ptr_tweakedKey, ptr_input, inputLen, ptr_info, infoLen, ptr_pkS, ptr_blind);
+    mget(blindedElement, ptr_blindedElement, ecc_voprf_ristretto255_sha512_ELEMENTSIZE);
+    mget(tweakedKey, ptr_tweakedKey, ecc_voprf_ristretto255_sha512_ELEMENTSIZE);
+    mfree(ptr_blindedElement, ecc_voprf_ristretto255_sha512_ELEMENTSIZE);
+    mfree(ptr_tweakedKey, ecc_voprf_ristretto255_sha512_ELEMENTSIZE);
+    mfree(ptr_input, inputLen);
+    mfree(ptr_info, infoLen);
+    mfree(ptr_pkS, ecc_voprf_ristretto255_sha512_ELEMENTSIZE);
+    mfree(ptr_blind, ecc_voprf_ristretto255_sha512_SCALARSIZE);
+    return fun_ret;
+  };
+  Module.ecc_voprf_ristretto255_sha512_PartiallyBlind = (blind, blindedElement, tweakedKey, input, inputLen, info, infoLen, pkS) => {
+    const ptr_blind = mput(blind, ecc_voprf_ristretto255_sha512_SCALARSIZE);
+    const ptr_blindedElement = mput(blindedElement, ecc_voprf_ristretto255_sha512_ELEMENTSIZE);
+    const ptr_tweakedKey = mput(tweakedKey, ecc_voprf_ristretto255_sha512_ELEMENTSIZE);
+    const ptr_input = mput(input, inputLen);
+    const ptr_info = mput(info, infoLen);
+    const ptr_pkS = mput(pkS, ecc_voprf_ristretto255_sha512_ELEMENTSIZE);
+    const fun_ret = _ecc_voprf_ristretto255_sha512_PartiallyBlind(ptr_blind, ptr_blindedElement, ptr_tweakedKey, ptr_input, inputLen, ptr_info, infoLen, ptr_pkS);
+    mget(blind, ptr_blind, ecc_voprf_ristretto255_sha512_SCALARSIZE);
+    mget(blindedElement, ptr_blindedElement, ecc_voprf_ristretto255_sha512_ELEMENTSIZE);
+    mget(tweakedKey, ptr_tweakedKey, ecc_voprf_ristretto255_sha512_ELEMENTSIZE);
+    mfree(ptr_blind, ecc_voprf_ristretto255_sha512_SCALARSIZE);
+    mfree(ptr_blindedElement, ecc_voprf_ristretto255_sha512_ELEMENTSIZE);
+    mfree(ptr_tweakedKey, ecc_voprf_ristretto255_sha512_ELEMENTSIZE);
+    mfree(ptr_input, inputLen);
+    mfree(ptr_info, infoLen);
+    mfree(ptr_pkS, ecc_voprf_ristretto255_sha512_ELEMENTSIZE);
+    return fun_ret;
+  };
+  Module.ecc_voprf_ristretto255_sha512_PartiallyBlindEvaluateWithScalar = (evaluatedElement, proof, skS, blindedElement, info, infoLen, r) => {
+    const ptr_evaluatedElement = mput(evaluatedElement, ecc_voprf_ristretto255_sha512_ELEMENTSIZE);
+    const ptr_proof = mput(proof, ecc_voprf_ristretto255_sha512_PROOFSIZE);
+    const ptr_skS = mput(skS, ecc_voprf_ristretto255_sha512_SCALARSIZE);
+    const ptr_blindedElement = mput(blindedElement, ecc_voprf_ristretto255_sha512_ELEMENTSIZE);
+    const ptr_info = mput(info, infoLen);
+    const ptr_r = mput(r, ecc_voprf_ristretto255_sha512_SCALARSIZE);
+    const fun_ret = _ecc_voprf_ristretto255_sha512_PartiallyBlindEvaluateWithScalar(ptr_evaluatedElement, ptr_proof, ptr_skS, ptr_blindedElement, ptr_info, infoLen, ptr_r);
+    mget(evaluatedElement, ptr_evaluatedElement, ecc_voprf_ristretto255_sha512_ELEMENTSIZE);
+    mget(proof, ptr_proof, ecc_voprf_ristretto255_sha512_PROOFSIZE);
+    mfree(ptr_evaluatedElement, ecc_voprf_ristretto255_sha512_ELEMENTSIZE);
+    mfree(ptr_proof, ecc_voprf_ristretto255_sha512_PROOFSIZE);
+    mfree(ptr_skS, ecc_voprf_ristretto255_sha512_SCALARSIZE);
+    mfree(ptr_blindedElement, ecc_voprf_ristretto255_sha512_ELEMENTSIZE);
+    mfree(ptr_info, infoLen);
+    mfree(ptr_r, ecc_voprf_ristretto255_sha512_SCALARSIZE);
+    return fun_ret;
+  };
+  Module.ecc_voprf_ristretto255_sha512_PartiallyBlindEvaluate = (evaluatedElement, proof, skS, blindedElement, info, infoLen) => {
+    const ptr_evaluatedElement = mput(evaluatedElement, ecc_voprf_ristretto255_sha512_ELEMENTSIZE);
+    const ptr_proof = mput(proof, ecc_voprf_ristretto255_sha512_PROOFSIZE);
+    const ptr_skS = mput(skS, ecc_voprf_ristretto255_sha512_SCALARSIZE);
+    const ptr_blindedElement = mput(blindedElement, ecc_voprf_ristretto255_sha512_ELEMENTSIZE);
+    const ptr_info = mput(info, infoLen);
+    const fun_ret = _ecc_voprf_ristretto255_sha512_PartiallyBlindEvaluate(ptr_evaluatedElement, ptr_proof, ptr_skS, ptr_blindedElement, ptr_info, infoLen);
+    mget(evaluatedElement, ptr_evaluatedElement, ecc_voprf_ristretto255_sha512_ELEMENTSIZE);
+    mget(proof, ptr_proof, ecc_voprf_ristretto255_sha512_PROOFSIZE);
+    mfree(ptr_evaluatedElement, ecc_voprf_ristretto255_sha512_ELEMENTSIZE);
+    mfree(ptr_proof, ecc_voprf_ristretto255_sha512_PROOFSIZE);
+    mfree(ptr_skS, ecc_voprf_ristretto255_sha512_SCALARSIZE);
+    mfree(ptr_blindedElement, ecc_voprf_ristretto255_sha512_ELEMENTSIZE);
+    mfree(ptr_info, infoLen);
+    return fun_ret;
+  };
+  Module.ecc_voprf_ristretto255_sha512_PartiallyFinalize = (output, input, inputLen, blind, evaluatedElement, blindedElement, proof, info, infoLen, tweakedKey) => {
+    const ptr_output = mput(output, ecc_voprf_ristretto255_sha512_Nh);
+    const ptr_input = mput(input, inputLen);
+    const ptr_blind = mput(blind, ecc_voprf_ristretto255_sha512_SCALARSIZE);
+    const ptr_evaluatedElement = mput(evaluatedElement, ecc_voprf_ristretto255_sha512_ELEMENTSIZE);
+    const ptr_blindedElement = mput(blindedElement, ecc_voprf_ristretto255_sha512_ELEMENTSIZE);
+    const ptr_proof = mput(proof, ecc_voprf_ristretto255_sha512_PROOFSIZE);
+    const ptr_info = mput(info, infoLen);
+    const ptr_tweakedKey = mput(tweakedKey, ecc_voprf_ristretto255_sha512_ELEMENTSIZE);
+    const fun_ret = _ecc_voprf_ristretto255_sha512_PartiallyFinalize(ptr_output, ptr_input, inputLen, ptr_blind, ptr_evaluatedElement, ptr_blindedElement, ptr_proof, ptr_info, infoLen, ptr_tweakedKey);
+    mget(output, ptr_output, ecc_voprf_ristretto255_sha512_Nh);
+    mfree(ptr_output, ecc_voprf_ristretto255_sha512_Nh);
+    mfree(ptr_input, inputLen);
+    mfree(ptr_blind, ecc_voprf_ristretto255_sha512_SCALARSIZE);
+    mfree(ptr_evaluatedElement, ecc_voprf_ristretto255_sha512_ELEMENTSIZE);
+    mfree(ptr_blindedElement, ecc_voprf_ristretto255_sha512_ELEMENTSIZE);
+    mfree(ptr_proof, ecc_voprf_ristretto255_sha512_PROOFSIZE);
+    mfree(ptr_info, infoLen);
+    mfree(ptr_tweakedKey, ecc_voprf_ristretto255_sha512_ELEMENTSIZE);
+    return fun_ret;
+  };
+  Module.ecc_voprf_ristretto255_sha512_PartiallyEvaluate = (output, skS, input, inputLen, info, infoLen) => {
+    const ptr_output = mput(output, ecc_voprf_ristretto255_sha512_Nh);
+    const ptr_skS = mput(skS, ecc_voprf_ristretto255_sha512_SCALARSIZE);
+    const ptr_input = mput(input, inputLen);
+    const ptr_info = mput(info, infoLen);
+    const fun_ret = _ecc_voprf_ristretto255_sha512_PartiallyEvaluate(ptr_output, ptr_skS, ptr_input, inputLen, ptr_info, infoLen);
+    mget(output, ptr_output, ecc_voprf_ristretto255_sha512_Nh);
+    mfree(ptr_output, ecc_voprf_ristretto255_sha512_Nh);
+    mfree(ptr_skS, ecc_voprf_ristretto255_sha512_SCALARSIZE);
+    mfree(ptr_input, inputLen);
+    mfree(ptr_info, infoLen);
+    return fun_ret;
+  };
+  Module.ecc_voprf_ristretto255_sha512_HashToGroupWithDST = (out, input, inputLen, dst, dstLen) => {
+    const ptr_out = mput(out, ecc_voprf_ristretto255_sha512_ELEMENTSIZE);
+    const ptr_input = mput(input, inputLen);
+    const ptr_dst = mput(dst, dstLen);
+    _ecc_voprf_ristretto255_sha512_HashToGroupWithDST(ptr_out, ptr_input, inputLen, ptr_dst, dstLen);
+    mget(out, ptr_out, ecc_voprf_ristretto255_sha512_ELEMENTSIZE);
+    mfree(ptr_out, ecc_voprf_ristretto255_sha512_ELEMENTSIZE);
+    mfree(ptr_input, inputLen);
+    mfree(ptr_dst, dstLen);
+  };
+  Module.ecc_voprf_ristretto255_sha512_HashToGroup = (out, input, inputLen, mode) => {
+    const ptr_out = mput(out, ecc_voprf_ristretto255_sha512_ELEMENTSIZE);
+    const ptr_input = mput(input, inputLen);
+    _ecc_voprf_ristretto255_sha512_HashToGroup(ptr_out, ptr_input, inputLen, mode);
+    mget(out, ptr_out, ecc_voprf_ristretto255_sha512_ELEMENTSIZE);
+    mfree(ptr_out, ecc_voprf_ristretto255_sha512_ELEMENTSIZE);
+    mfree(ptr_input, inputLen);
+  };
+  Module.ecc_voprf_ristretto255_sha512_HashToScalarWithDST = (out, input, inputLen, dst, dstLen) => {
+    const ptr_out = mput(out, ecc_voprf_ristretto255_sha512_SCALARSIZE);
+    const ptr_input = mput(input, inputLen);
+    const ptr_dst = mput(dst, dstLen);
+    _ecc_voprf_ristretto255_sha512_HashToScalarWithDST(ptr_out, ptr_input, inputLen, ptr_dst, dstLen);
+    mget(out, ptr_out, ecc_voprf_ristretto255_sha512_SCALARSIZE);
+    mfree(ptr_out, ecc_voprf_ristretto255_sha512_SCALARSIZE);
+    mfree(ptr_input, inputLen);
+    mfree(ptr_dst, dstLen);
+  };
+  Module.ecc_voprf_ristretto255_sha512_HashToScalar = (out, input, inputLen, mode) => {
+    const ptr_out = mput(out, ecc_voprf_ristretto255_sha512_SCALARSIZE);
+    const ptr_input = mput(input, inputLen);
+    _ecc_voprf_ristretto255_sha512_HashToScalar(ptr_out, ptr_input, inputLen, mode);
+    mget(out, ptr_out, ecc_voprf_ristretto255_sha512_SCALARSIZE);
+    mfree(ptr_out, ecc_voprf_ristretto255_sha512_SCALARSIZE);
+    mfree(ptr_input, inputLen);
+  };
+  const ecc_opaque_ristretto255_sha512_Nn = 32;
+  Module.ecc_opaque_ristretto255_sha512_Nn = ecc_opaque_ristretto255_sha512_Nn;
+  const ecc_opaque_ristretto255_sha512_Nm = 64;
+  Module.ecc_opaque_ristretto255_sha512_Nm = ecc_opaque_ristretto255_sha512_Nm;
+  const ecc_opaque_ristretto255_sha512_Nh = 64;
+  Module.ecc_opaque_ristretto255_sha512_Nh = ecc_opaque_ristretto255_sha512_Nh;
+  const ecc_opaque_ristretto255_sha512_Nx = 64;
+  Module.ecc_opaque_ristretto255_sha512_Nx = ecc_opaque_ristretto255_sha512_Nx;
+  const ecc_opaque_ristretto255_sha512_Npk = 32;
+  Module.ecc_opaque_ristretto255_sha512_Npk = ecc_opaque_ristretto255_sha512_Npk;
+  const ecc_opaque_ristretto255_sha512_Nsk = 32;
+  Module.ecc_opaque_ristretto255_sha512_Nsk = ecc_opaque_ristretto255_sha512_Nsk;
+  const ecc_opaque_ristretto255_sha512_Noe = 32;
+  Module.ecc_opaque_ristretto255_sha512_Noe = ecc_opaque_ristretto255_sha512_Noe;
+  const ecc_opaque_ristretto255_sha512_Ns = 32;
+  Module.ecc_opaque_ristretto255_sha512_Ns = ecc_opaque_ristretto255_sha512_Ns;
+  const ecc_opaque_ristretto255_sha512_Nok = 32;
+  Module.ecc_opaque_ristretto255_sha512_Nok = ecc_opaque_ristretto255_sha512_Nok;
+  const ecc_opaque_ristretto255_sha512_Ne = 96;
+  Module.ecc_opaque_ristretto255_sha512_Ne = ecc_opaque_ristretto255_sha512_Ne;
+  const ecc_opaque_ristretto255_sha512_PASSWORDMAXSIZE = 200;
+  Module.ecc_opaque_ristretto255_sha512_PASSWORDMAXSIZE = ecc_opaque_ristretto255_sha512_PASSWORDMAXSIZE;
+  const ecc_opaque_ristretto255_sha512_IDENTITYMAXSIZE = 200;
+  Module.ecc_opaque_ristretto255_sha512_IDENTITYMAXSIZE = ecc_opaque_ristretto255_sha512_IDENTITYMAXSIZE;
+  const ecc_opaque_ristretto255_sha512_CLEARTEXTCREDENTIALSSIZE = 434;
+  Module.ecc_opaque_ristretto255_sha512_CLEARTEXTCREDENTIALSSIZE = ecc_opaque_ristretto255_sha512_CLEARTEXTCREDENTIALSSIZE;
+  const ecc_opaque_ristretto255_sha512_REGISTRATIONREQUESTSIZE = 32;
+  Module.ecc_opaque_ristretto255_sha512_REGISTRATIONREQUESTSIZE = ecc_opaque_ristretto255_sha512_REGISTRATIONREQUESTSIZE;
+  const ecc_opaque_ristretto255_sha512_REGISTRATIONRESPONSESIZE = 64;
+  Module.ecc_opaque_ristretto255_sha512_REGISTRATIONRESPONSESIZE = ecc_opaque_ristretto255_sha512_REGISTRATIONRESPONSESIZE;
+  const ecc_opaque_ristretto255_sha512_REGISTRATIONRECORDSIZE = 192;
+  Module.ecc_opaque_ristretto255_sha512_REGISTRATIONRECORDSIZE = ecc_opaque_ristretto255_sha512_REGISTRATIONRECORDSIZE;
+  const ecc_opaque_ristretto255_sha512_CREDENTIALREQUESTSIZE = 32;
+  Module.ecc_opaque_ristretto255_sha512_CREDENTIALREQUESTSIZE = ecc_opaque_ristretto255_sha512_CREDENTIALREQUESTSIZE;
+  const ecc_opaque_ristretto255_sha512_CREDENTIALRESPONSESIZE = 192;
+  Module.ecc_opaque_ristretto255_sha512_CREDENTIALRESPONSESIZE = ecc_opaque_ristretto255_sha512_CREDENTIALRESPONSESIZE;
+  const ecc_opaque_ristretto255_sha512_KE1SIZE = 96;
+  Module.ecc_opaque_ristretto255_sha512_KE1SIZE = ecc_opaque_ristretto255_sha512_KE1SIZE;
+  const ecc_opaque_ristretto255_sha512_KE2SIZE = 320;
+  Module.ecc_opaque_ristretto255_sha512_KE2SIZE = ecc_opaque_ristretto255_sha512_KE2SIZE;
+  const ecc_opaque_ristretto255_sha512_KE3SIZE = 64;
+  Module.ecc_opaque_ristretto255_sha512_KE3SIZE = ecc_opaque_ristretto255_sha512_KE3SIZE;
+  const ecc_opaque_ristretto255_sha512_CLIENTSTATESIZE = 361;
+  Module.ecc_opaque_ristretto255_sha512_CLIENTSTATESIZE = ecc_opaque_ristretto255_sha512_CLIENTSTATESIZE;
+  const ecc_opaque_ristretto255_sha512_SERVERSTATESIZE = 128;
+  Module.ecc_opaque_ristretto255_sha512_SERVERSTATESIZE = ecc_opaque_ristretto255_sha512_SERVERSTATESIZE;
+  const ecc_opaque_ristretto255_sha512_MHF_IDENTITY = 0;
+  Module.ecc_opaque_ristretto255_sha512_MHF_IDENTITY = ecc_opaque_ristretto255_sha512_MHF_IDENTITY;
+  const ecc_opaque_ristretto255_sha512_MHF_SCRYPT = 1;
+  Module.ecc_opaque_ristretto255_sha512_MHF_SCRYPT = ecc_opaque_ristretto255_sha512_MHF_SCRYPT;
+  const ecc_opaque_ristretto255_sha512_MHF_ARGON2ID = 2;
+  Module.ecc_opaque_ristretto255_sha512_MHF_ARGON2ID = ecc_opaque_ristretto255_sha512_MHF_ARGON2ID;
+  const ecc_opaque_ristretto255_sha512_MHF_ARGON2ID_SALTSIZE = 16;
+  Module.ecc_opaque_ristretto255_sha512_MHF_ARGON2ID_SALTSIZE = ecc_opaque_ristretto255_sha512_MHF_ARGON2ID_SALTSIZE;
+  Module.ecc_opaque_ristretto255_sha512_DeriveKeyPair = (private_key, public_key, seed) => {
+    const ptr_private_key = mput(private_key, ecc_opaque_ristretto255_sha512_Nsk);
+    const ptr_public_key = mput(public_key, ecc_opaque_ristretto255_sha512_Npk);
+    const ptr_seed = mput(seed, ecc_opaque_ristretto255_sha512_Nn);
+    _ecc_opaque_ristretto255_sha512_DeriveKeyPair(ptr_private_key, ptr_public_key, ptr_seed);
+    mget(private_key, ptr_private_key, ecc_opaque_ristretto255_sha512_Nsk);
+    mget(public_key, ptr_public_key, ecc_opaque_ristretto255_sha512_Npk);
+    mfree(ptr_private_key, ecc_opaque_ristretto255_sha512_Nsk);
+    mfree(ptr_public_key, ecc_opaque_ristretto255_sha512_Npk);
+    mfree(ptr_seed, ecc_opaque_ristretto255_sha512_Nn);
+  };
+  Module.ecc_opaque_ristretto255_sha512_CreateCleartextCredentials = (cleartext_credentials, server_public_key, client_public_key, server_identity, server_identity_len, client_identity, client_identity_len) => {
+    const ptr_cleartext_credentials = mput(cleartext_credentials, ecc_opaque_ristretto255_sha512_CLEARTEXTCREDENTIALSSIZE);
+    const ptr_server_public_key = mput(server_public_key, ecc_opaque_ristretto255_sha512_Npk);
+    const ptr_client_public_key = mput(client_public_key, ecc_opaque_ristretto255_sha512_Npk);
+    const ptr_server_identity = mput(server_identity, server_identity_len);
+    const ptr_client_identity = mput(client_identity, client_identity_len);
+    _ecc_opaque_ristretto255_sha512_CreateCleartextCredentials(ptr_cleartext_credentials, ptr_server_public_key, ptr_client_public_key, ptr_server_identity, server_identity_len, ptr_client_identity, client_identity_len);
+    mget(cleartext_credentials, ptr_cleartext_credentials, ecc_opaque_ristretto255_sha512_CLEARTEXTCREDENTIALSSIZE);
+    mfree(ptr_cleartext_credentials, ecc_opaque_ristretto255_sha512_CLEARTEXTCREDENTIALSSIZE);
+    mfree(ptr_server_public_key, ecc_opaque_ristretto255_sha512_Npk);
+    mfree(ptr_client_public_key, ecc_opaque_ristretto255_sha512_Npk);
+    mfree(ptr_server_identity, server_identity_len);
+    mfree(ptr_client_identity, client_identity_len);
+  };
+  Module.ecc_opaque_ristretto255_sha512_EnvelopeStoreWithNonce = (envelope, client_public_key, masking_key, export_key, randomized_password, server_public_key, server_identity, server_identity_len, client_identity, client_identity_len, nonce) => {
+    const ptr_envelope = mput(envelope, ecc_opaque_ristretto255_sha512_Ne);
+    const ptr_client_public_key = mput(client_public_key, ecc_opaque_ristretto255_sha512_Npk);
+    const ptr_masking_key = mput(masking_key, ecc_opaque_ristretto255_sha512_Nh);
+    const ptr_export_key = mput(export_key, ecc_opaque_ristretto255_sha512_Nh);
+    const ptr_randomized_password = mput(randomized_password, 64);
+    const ptr_server_public_key = mput(server_public_key, ecc_opaque_ristretto255_sha512_Npk);
+    const ptr_server_identity = mput(server_identity, server_identity_len);
+    const ptr_client_identity = mput(client_identity, client_identity_len);
+    const ptr_nonce = mput(nonce, ecc_opaque_ristretto255_sha512_Nn);
+    _ecc_opaque_ristretto255_sha512_EnvelopeStoreWithNonce(ptr_envelope, ptr_client_public_key, ptr_masking_key, ptr_export_key, ptr_randomized_password, ptr_server_public_key, ptr_server_identity, server_identity_len, ptr_client_identity, client_identity_len, ptr_nonce);
+    mget(envelope, ptr_envelope, ecc_opaque_ristretto255_sha512_Ne);
+    mget(client_public_key, ptr_client_public_key, ecc_opaque_ristretto255_sha512_Npk);
+    mget(masking_key, ptr_masking_key, ecc_opaque_ristretto255_sha512_Nh);
+    mget(export_key, ptr_export_key, ecc_opaque_ristretto255_sha512_Nh);
+    mfree(ptr_envelope, ecc_opaque_ristretto255_sha512_Ne);
+    mfree(ptr_client_public_key, ecc_opaque_ristretto255_sha512_Npk);
+    mfree(ptr_masking_key, ecc_opaque_ristretto255_sha512_Nh);
+    mfree(ptr_export_key, ecc_opaque_ristretto255_sha512_Nh);
+    mfree(ptr_randomized_password, 64);
+    mfree(ptr_server_public_key, ecc_opaque_ristretto255_sha512_Npk);
+    mfree(ptr_server_identity, server_identity_len);
+    mfree(ptr_client_identity, client_identity_len);
+    mfree(ptr_nonce, ecc_opaque_ristretto255_sha512_Nn);
+  };
+  Module.ecc_opaque_ristretto255_sha512_EnvelopeStore = (envelope, client_public_key, masking_key, export_key, randomized_password, server_public_key, server_identity, server_identity_len, client_identity, client_identity_len) => {
+    const ptr_envelope = mput(envelope, ecc_opaque_ristretto255_sha512_Ne);
+    const ptr_client_public_key = mput(client_public_key, ecc_opaque_ristretto255_sha512_Npk);
+    const ptr_masking_key = mput(masking_key, ecc_opaque_ristretto255_sha512_Nh);
+    const ptr_export_key = mput(export_key, ecc_opaque_ristretto255_sha512_Nh);
+    const ptr_randomized_password = mput(randomized_password, 64);
+    const ptr_server_public_key = mput(server_public_key, ecc_opaque_ristretto255_sha512_Npk);
+    const ptr_server_identity = mput(server_identity, server_identity_len);
+    const ptr_client_identity = mput(client_identity, client_identity_len);
+    _ecc_opaque_ristretto255_sha512_EnvelopeStore(ptr_envelope, ptr_client_public_key, ptr_masking_key, ptr_export_key, ptr_randomized_password, ptr_server_public_key, ptr_server_identity, server_identity_len, ptr_client_identity, client_identity_len);
+    mget(envelope, ptr_envelope, ecc_opaque_ristretto255_sha512_Ne);
+    mget(client_public_key, ptr_client_public_key, ecc_opaque_ristretto255_sha512_Npk);
+    mget(masking_key, ptr_masking_key, ecc_opaque_ristretto255_sha512_Nh);
+    mget(export_key, ptr_export_key, ecc_opaque_ristretto255_sha512_Nh);
+    mfree(ptr_envelope, ecc_opaque_ristretto255_sha512_Ne);
+    mfree(ptr_client_public_key, ecc_opaque_ristretto255_sha512_Npk);
+    mfree(ptr_masking_key, ecc_opaque_ristretto255_sha512_Nh);
+    mfree(ptr_export_key, ecc_opaque_ristretto255_sha512_Nh);
+    mfree(ptr_randomized_password, 64);
+    mfree(ptr_server_public_key, ecc_opaque_ristretto255_sha512_Npk);
+    mfree(ptr_server_identity, server_identity_len);
+    mfree(ptr_client_identity, client_identity_len);
+  };
+  Module.ecc_opaque_ristretto255_sha512_EnvelopeRecover = (client_private_key, export_key, randomized_password, server_public_key, envelope_raw, server_identity, server_identity_len, client_identity, client_identity_len) => {
+    const ptr_client_private_key = mput(client_private_key, ecc_opaque_ristretto255_sha512_Nsk);
+    const ptr_export_key = mput(export_key, ecc_opaque_ristretto255_sha512_Nh);
+    const ptr_randomized_password = mput(randomized_password, 64);
+    const ptr_server_public_key = mput(server_public_key, ecc_opaque_ristretto255_sha512_Npk);
+    const ptr_envelope_raw = mput(envelope_raw, ecc_opaque_ristretto255_sha512_Ne);
+    const ptr_server_identity = mput(server_identity, server_identity_len);
+    const ptr_client_identity = mput(client_identity, client_identity_len);
+    const fun_ret = _ecc_opaque_ristretto255_sha512_EnvelopeRecover(ptr_client_private_key, ptr_export_key, ptr_randomized_password, ptr_server_public_key, ptr_envelope_raw, ptr_server_identity, server_identity_len, ptr_client_identity, client_identity_len);
+    mget(client_private_key, ptr_client_private_key, ecc_opaque_ristretto255_sha512_Nsk);
+    mget(export_key, ptr_export_key, ecc_opaque_ristretto255_sha512_Nh);
+    mfree(ptr_client_private_key, ecc_opaque_ristretto255_sha512_Nsk);
+    mfree(ptr_export_key, ecc_opaque_ristretto255_sha512_Nh);
+    mfree(ptr_randomized_password, 64);
+    mfree(ptr_server_public_key, ecc_opaque_ristretto255_sha512_Npk);
+    mfree(ptr_envelope_raw, ecc_opaque_ristretto255_sha512_Ne);
+    mfree(ptr_server_identity, server_identity_len);
+    mfree(ptr_client_identity, client_identity_len);
+    return fun_ret;
+  };
+  Module.ecc_opaque_ristretto255_sha512_RecoverPublicKey = (public_key, private_key) => {
+    const ptr_public_key = mput(public_key, ecc_opaque_ristretto255_sha512_Npk);
+    const ptr_private_key = mput(private_key, ecc_opaque_ristretto255_sha512_Nsk);
+    _ecc_opaque_ristretto255_sha512_RecoverPublicKey(ptr_public_key, ptr_private_key);
+    mget(public_key, ptr_public_key, ecc_opaque_ristretto255_sha512_Npk);
+    mfree(ptr_public_key, ecc_opaque_ristretto255_sha512_Npk);
+    mfree(ptr_private_key, ecc_opaque_ristretto255_sha512_Nsk);
+  };
+  Module.ecc_opaque_ristretto255_sha512_GenerateAuthKeyPairWithSeed = (private_key, public_key, seed) => {
+    const ptr_private_key = mput(private_key, ecc_opaque_ristretto255_sha512_Nsk);
+    const ptr_public_key = mput(public_key, ecc_opaque_ristretto255_sha512_Npk);
+    const ptr_seed = mput(seed, ecc_opaque_ristretto255_sha512_Nn);
+    _ecc_opaque_ristretto255_sha512_GenerateAuthKeyPairWithSeed(ptr_private_key, ptr_public_key, ptr_seed);
+    mget(private_key, ptr_private_key, ecc_opaque_ristretto255_sha512_Nsk);
+    mget(public_key, ptr_public_key, ecc_opaque_ristretto255_sha512_Npk);
+    mfree(ptr_private_key, ecc_opaque_ristretto255_sha512_Nsk);
+    mfree(ptr_public_key, ecc_opaque_ristretto255_sha512_Npk);
+    mfree(ptr_seed, ecc_opaque_ristretto255_sha512_Nn);
+  };
+  Module.ecc_opaque_ristretto255_sha512_GenerateAuthKeyPair = (private_key, public_key) => {
+    const ptr_private_key = mput(private_key, ecc_opaque_ristretto255_sha512_Nsk);
+    const ptr_public_key = mput(public_key, ecc_opaque_ristretto255_sha512_Npk);
+    _ecc_opaque_ristretto255_sha512_GenerateAuthKeyPair(ptr_private_key, ptr_public_key);
+    mget(private_key, ptr_private_key, ecc_opaque_ristretto255_sha512_Nsk);
+    mget(public_key, ptr_public_key, ecc_opaque_ristretto255_sha512_Npk);
+    mfree(ptr_private_key, ecc_opaque_ristretto255_sha512_Nsk);
+    mfree(ptr_public_key, ecc_opaque_ristretto255_sha512_Npk);
+  };
+  Module.ecc_opaque_ristretto255_sha512_DeriveDiffieHellmanKeyPair = (private_key, public_key, seed) => {
+    const ptr_private_key = mput(private_key, ecc_opaque_ristretto255_sha512_Nsk);
+    const ptr_public_key = mput(public_key, ecc_opaque_ristretto255_sha512_Npk);
+    const ptr_seed = mput(seed, ecc_opaque_ristretto255_sha512_Nn);
+    _ecc_opaque_ristretto255_sha512_DeriveDiffieHellmanKeyPair(ptr_private_key, ptr_public_key, ptr_seed);
+    mget(private_key, ptr_private_key, ecc_opaque_ristretto255_sha512_Nsk);
+    mget(public_key, ptr_public_key, ecc_opaque_ristretto255_sha512_Npk);
+    mfree(ptr_private_key, ecc_opaque_ristretto255_sha512_Nsk);
+    mfree(ptr_public_key, ecc_opaque_ristretto255_sha512_Npk);
+    mfree(ptr_seed, ecc_opaque_ristretto255_sha512_Nn);
+  };
+  Module.ecc_opaque_ristretto255_sha512_CreateRegistrationRequestWithBlind = (request, password, password_len, blind) => {
+    const ptr_request = mput(request, ecc_opaque_ristretto255_sha512_REGISTRATIONREQUESTSIZE);
+    const ptr_password = mput(password, password_len);
+    const ptr_blind = mput(blind, ecc_opaque_ristretto255_sha512_Ns);
+    _ecc_opaque_ristretto255_sha512_CreateRegistrationRequestWithBlind(ptr_request, ptr_password, password_len, ptr_blind);
+    mget(request, ptr_request, ecc_opaque_ristretto255_sha512_REGISTRATIONREQUESTSIZE);
+    mfree(ptr_request, ecc_opaque_ristretto255_sha512_REGISTRATIONREQUESTSIZE);
+    mfree(ptr_password, password_len);
+    mfree(ptr_blind, ecc_opaque_ristretto255_sha512_Ns);
+  };
+  Module.ecc_opaque_ristretto255_sha512_CreateRegistrationRequest = (request, blind, password, password_len) => {
+    const ptr_request = mput(request, ecc_opaque_ristretto255_sha512_REGISTRATIONREQUESTSIZE);
+    const ptr_blind = mput(blind, ecc_opaque_ristretto255_sha512_Ns);
+    const ptr_password = mput(password, password_len);
+    _ecc_opaque_ristretto255_sha512_CreateRegistrationRequest(ptr_request, ptr_blind, ptr_password, password_len);
+    mget(request, ptr_request, ecc_opaque_ristretto255_sha512_REGISTRATIONREQUESTSIZE);
+    mget(blind, ptr_blind, ecc_opaque_ristretto255_sha512_Ns);
+    mfree(ptr_request, ecc_opaque_ristretto255_sha512_REGISTRATIONREQUESTSIZE);
+    mfree(ptr_blind, ecc_opaque_ristretto255_sha512_Ns);
+    mfree(ptr_password, password_len);
+  };
+  Module.ecc_opaque_ristretto255_sha512_CreateRegistrationResponse = (response, request, server_public_key, credential_identifier, credential_identifier_len, oprf_seed) => {
+    const ptr_response = mput(response, ecc_opaque_ristretto255_sha512_REGISTRATIONRESPONSESIZE);
+    const ptr_request = mput(request, ecc_opaque_ristretto255_sha512_REGISTRATIONREQUESTSIZE);
+    const ptr_server_public_key = mput(server_public_key, ecc_opaque_ristretto255_sha512_Npk);
+    const ptr_credential_identifier = mput(credential_identifier, credential_identifier_len);
+    const ptr_oprf_seed = mput(oprf_seed, ecc_opaque_ristretto255_sha512_Nh);
+    _ecc_opaque_ristretto255_sha512_CreateRegistrationResponse(ptr_response, ptr_request, ptr_server_public_key, ptr_credential_identifier, credential_identifier_len, ptr_oprf_seed);
+    mget(response, ptr_response, ecc_opaque_ristretto255_sha512_REGISTRATIONRESPONSESIZE);
+    mfree(ptr_response, ecc_opaque_ristretto255_sha512_REGISTRATIONRESPONSESIZE);
+    mfree(ptr_request, ecc_opaque_ristretto255_sha512_REGISTRATIONREQUESTSIZE);
+    mfree(ptr_server_public_key, ecc_opaque_ristretto255_sha512_Npk);
+    mfree(ptr_credential_identifier, credential_identifier_len);
+    mfree(ptr_oprf_seed, ecc_opaque_ristretto255_sha512_Nh);
+  };
+  Module.ecc_opaque_ristretto255_sha512_FinalizeRegistrationRequestWithNonce = (record, export_key, password, password_len, blind, response, server_identity, server_identity_len, client_identity, client_identity_len, mhf, mhf_salt, mhf_salt_len, nonce) => {
+    const ptr_record = mput(record, ecc_opaque_ristretto255_sha512_REGISTRATIONRECORDSIZE);
+    const ptr_export_key = mput(export_key, ecc_opaque_ristretto255_sha512_Nh);
+    const ptr_password = mput(password, password_len);
+    const ptr_blind = mput(blind, ecc_opaque_ristretto255_sha512_Ns);
+    const ptr_response = mput(response, ecc_opaque_ristretto255_sha512_REGISTRATIONRESPONSESIZE);
+    const ptr_server_identity = mput(server_identity, server_identity_len);
+    const ptr_client_identity = mput(client_identity, client_identity_len);
+    const ptr_mhf_salt = mput(mhf_salt, mhf_salt_len);
+    const ptr_nonce = mput(nonce, ecc_opaque_ristretto255_sha512_Nn);
+    _ecc_opaque_ristretto255_sha512_FinalizeRegistrationRequestWithNonce(ptr_record, ptr_export_key, ptr_password, password_len, ptr_blind, ptr_response, ptr_server_identity, server_identity_len, ptr_client_identity, client_identity_len, mhf, ptr_mhf_salt, mhf_salt_len, ptr_nonce);
+    mget(record, ptr_record, ecc_opaque_ristretto255_sha512_REGISTRATIONRECORDSIZE);
+    mget(export_key, ptr_export_key, ecc_opaque_ristretto255_sha512_Nh);
+    mfree(ptr_record, ecc_opaque_ristretto255_sha512_REGISTRATIONRECORDSIZE);
+    mfree(ptr_export_key, ecc_opaque_ristretto255_sha512_Nh);
+    mfree(ptr_password, password_len);
+    mfree(ptr_blind, ecc_opaque_ristretto255_sha512_Ns);
+    mfree(ptr_response, ecc_opaque_ristretto255_sha512_REGISTRATIONRESPONSESIZE);
+    mfree(ptr_server_identity, server_identity_len);
+    mfree(ptr_client_identity, client_identity_len);
+    mfree(ptr_mhf_salt, mhf_salt_len);
+    mfree(ptr_nonce, ecc_opaque_ristretto255_sha512_Nn);
+  };
+  Module.ecc_opaque_ristretto255_sha512_FinalizeRegistrationRequest = (record, export_key, password, password_len, blind, response, server_identity, server_identity_len, client_identity, client_identity_len, mhf, mhf_salt, mhf_salt_len) => {
+    const ptr_record = mput(record, ecc_opaque_ristretto255_sha512_REGISTRATIONRECORDSIZE);
+    const ptr_export_key = mput(export_key, ecc_opaque_ristretto255_sha512_Nh);
+    const ptr_password = mput(password, password_len);
+    const ptr_blind = mput(blind, ecc_opaque_ristretto255_sha512_Ns);
+    const ptr_response = mput(response, ecc_opaque_ristretto255_sha512_REGISTRATIONRESPONSESIZE);
+    const ptr_server_identity = mput(server_identity, server_identity_len);
+    const ptr_client_identity = mput(client_identity, client_identity_len);
+    const ptr_mhf_salt = mput(mhf_salt, mhf_salt_len);
+    _ecc_opaque_ristretto255_sha512_FinalizeRegistrationRequest(ptr_record, ptr_export_key, ptr_password, password_len, ptr_blind, ptr_response, ptr_server_identity, server_identity_len, ptr_client_identity, client_identity_len, mhf, ptr_mhf_salt, mhf_salt_len);
+    mget(record, ptr_record, ecc_opaque_ristretto255_sha512_REGISTRATIONRECORDSIZE);
+    mget(export_key, ptr_export_key, ecc_opaque_ristretto255_sha512_Nh);
+    mfree(ptr_record, ecc_opaque_ristretto255_sha512_REGISTRATIONRECORDSIZE);
+    mfree(ptr_export_key, ecc_opaque_ristretto255_sha512_Nh);
+    mfree(ptr_password, password_len);
+    mfree(ptr_blind, ecc_opaque_ristretto255_sha512_Ns);
+    mfree(ptr_response, ecc_opaque_ristretto255_sha512_REGISTRATIONRESPONSESIZE);
+    mfree(ptr_server_identity, server_identity_len);
+    mfree(ptr_client_identity, client_identity_len);
+    mfree(ptr_mhf_salt, mhf_salt_len);
+  };
+  Module.ecc_opaque_ristretto255_sha512_CreateCredentialRequestWithBlind = (request, password, password_len, blind) => {
+    const ptr_request = mput(request, ecc_opaque_ristretto255_sha512_CREDENTIALREQUESTSIZE);
+    const ptr_password = mput(password, password_len);
+    const ptr_blind = mput(blind, ecc_opaque_ristretto255_sha512_Ns);
+    _ecc_opaque_ristretto255_sha512_CreateCredentialRequestWithBlind(ptr_request, ptr_password, password_len, ptr_blind);
+    mget(request, ptr_request, ecc_opaque_ristretto255_sha512_CREDENTIALREQUESTSIZE);
+    mfree(ptr_request, ecc_opaque_ristretto255_sha512_CREDENTIALREQUESTSIZE);
+    mfree(ptr_password, password_len);
+    mfree(ptr_blind, ecc_opaque_ristretto255_sha512_Ns);
+  };
+  Module.ecc_opaque_ristretto255_sha512_CreateCredentialRequest = (request, blind, password, password_len) => {
+    const ptr_request = mput(request, ecc_opaque_ristretto255_sha512_CREDENTIALREQUESTSIZE);
+    const ptr_blind = mput(blind, ecc_opaque_ristretto255_sha512_Ns);
+    const ptr_password = mput(password, password_len);
+    _ecc_opaque_ristretto255_sha512_CreateCredentialRequest(ptr_request, ptr_blind, ptr_password, password_len);
+    mget(request, ptr_request, ecc_opaque_ristretto255_sha512_CREDENTIALREQUESTSIZE);
+    mget(blind, ptr_blind, ecc_opaque_ristretto255_sha512_Ns);
+    mfree(ptr_request, ecc_opaque_ristretto255_sha512_CREDENTIALREQUESTSIZE);
+    mfree(ptr_blind, ecc_opaque_ristretto255_sha512_Ns);
+    mfree(ptr_password, password_len);
+  };
+  Module.ecc_opaque_ristretto255_sha512_CreateCredentialResponseWithMasking = (response_raw, request_raw, server_public_key, record_raw, credential_identifier, credential_identifier_len, oprf_seed, masking_nonce) => {
+    const ptr_response_raw = mput(response_raw, ecc_opaque_ristretto255_sha512_CREDENTIALRESPONSESIZE);
+    const ptr_request_raw = mput(request_raw, ecc_opaque_ristretto255_sha512_CREDENTIALREQUESTSIZE);
+    const ptr_server_public_key = mput(server_public_key, ecc_opaque_ristretto255_sha512_Npk);
+    const ptr_record_raw = mput(record_raw, ecc_opaque_ristretto255_sha512_REGISTRATIONRECORDSIZE);
+    const ptr_credential_identifier = mput(credential_identifier, credential_identifier_len);
+    const ptr_oprf_seed = mput(oprf_seed, ecc_opaque_ristretto255_sha512_Nh);
+    const ptr_masking_nonce = mput(masking_nonce, ecc_opaque_ristretto255_sha512_Nn);
+    _ecc_opaque_ristretto255_sha512_CreateCredentialResponseWithMasking(ptr_response_raw, ptr_request_raw, ptr_server_public_key, ptr_record_raw, ptr_credential_identifier, credential_identifier_len, ptr_oprf_seed, ptr_masking_nonce);
+    mget(response_raw, ptr_response_raw, ecc_opaque_ristretto255_sha512_CREDENTIALRESPONSESIZE);
+    mfree(ptr_response_raw, ecc_opaque_ristretto255_sha512_CREDENTIALRESPONSESIZE);
+    mfree(ptr_request_raw, ecc_opaque_ristretto255_sha512_CREDENTIALREQUESTSIZE);
+    mfree(ptr_server_public_key, ecc_opaque_ristretto255_sha512_Npk);
+    mfree(ptr_record_raw, ecc_opaque_ristretto255_sha512_REGISTRATIONRECORDSIZE);
+    mfree(ptr_credential_identifier, credential_identifier_len);
+    mfree(ptr_oprf_seed, ecc_opaque_ristretto255_sha512_Nh);
+    mfree(ptr_masking_nonce, ecc_opaque_ristretto255_sha512_Nn);
+  };
+  Module.ecc_opaque_ristretto255_sha512_CreateCredentialResponse = (response_raw, request_raw, server_public_key, record_raw, credential_identifier, credential_identifier_len, oprf_seed) => {
+    const ptr_response_raw = mput(response_raw, ecc_opaque_ristretto255_sha512_CREDENTIALRESPONSESIZE);
+    const ptr_request_raw = mput(request_raw, ecc_opaque_ristretto255_sha512_CREDENTIALREQUESTSIZE);
+    const ptr_server_public_key = mput(server_public_key, ecc_opaque_ristretto255_sha512_Npk);
+    const ptr_record_raw = mput(record_raw, ecc_opaque_ristretto255_sha512_REGISTRATIONRECORDSIZE);
+    const ptr_credential_identifier = mput(credential_identifier, credential_identifier_len);
+    const ptr_oprf_seed = mput(oprf_seed, ecc_opaque_ristretto255_sha512_Nh);
+    _ecc_opaque_ristretto255_sha512_CreateCredentialResponse(ptr_response_raw, ptr_request_raw, ptr_server_public_key, ptr_record_raw, ptr_credential_identifier, credential_identifier_len, ptr_oprf_seed);
+    mget(response_raw, ptr_response_raw, ecc_opaque_ristretto255_sha512_CREDENTIALRESPONSESIZE);
+    mfree(ptr_response_raw, ecc_opaque_ristretto255_sha512_CREDENTIALRESPONSESIZE);
+    mfree(ptr_request_raw, ecc_opaque_ristretto255_sha512_CREDENTIALREQUESTSIZE);
+    mfree(ptr_server_public_key, ecc_opaque_ristretto255_sha512_Npk);
+    mfree(ptr_record_raw, ecc_opaque_ristretto255_sha512_REGISTRATIONRECORDSIZE);
+    mfree(ptr_credential_identifier, credential_identifier_len);
+    mfree(ptr_oprf_seed, ecc_opaque_ristretto255_sha512_Nh);
+  };
+  Module.ecc_opaque_ristretto255_sha512_RecoverCredentials = (client_private_key, server_public_key, export_key, password, password_len, blind, response, server_identity, server_identity_len, client_identity, client_identity_len, mhf, mhf_salt, mhf_salt_len) => {
+    const ptr_client_private_key = mput(client_private_key, ecc_opaque_ristretto255_sha512_Nsk);
+    const ptr_server_public_key = mput(server_public_key, ecc_opaque_ristretto255_sha512_Npk);
+    const ptr_export_key = mput(export_key, ecc_opaque_ristretto255_sha512_Nh);
+    const ptr_password = mput(password, password_len);
+    const ptr_blind = mput(blind, ecc_opaque_ristretto255_sha512_Noe);
+    const ptr_response = mput(response, ecc_opaque_ristretto255_sha512_CREDENTIALRESPONSESIZE);
+    const ptr_server_identity = mput(server_identity, server_identity_len);
+    const ptr_client_identity = mput(client_identity, client_identity_len);
+    const ptr_mhf_salt = mput(mhf_salt, mhf_salt_len);
+    const fun_ret = _ecc_opaque_ristretto255_sha512_RecoverCredentials(ptr_client_private_key, ptr_server_public_key, ptr_export_key, ptr_password, password_len, ptr_blind, ptr_response, ptr_server_identity, server_identity_len, ptr_client_identity, client_identity_len, mhf, ptr_mhf_salt, mhf_salt_len);
+    mget(client_private_key, ptr_client_private_key, ecc_opaque_ristretto255_sha512_Nsk);
+    mget(server_public_key, ptr_server_public_key, ecc_opaque_ristretto255_sha512_Npk);
+    mget(export_key, ptr_export_key, ecc_opaque_ristretto255_sha512_Nh);
+    mfree(ptr_client_private_key, ecc_opaque_ristretto255_sha512_Nsk);
+    mfree(ptr_server_public_key, ecc_opaque_ristretto255_sha512_Npk);
+    mfree(ptr_export_key, ecc_opaque_ristretto255_sha512_Nh);
+    mfree(ptr_password, password_len);
+    mfree(ptr_blind, ecc_opaque_ristretto255_sha512_Noe);
+    mfree(ptr_response, ecc_opaque_ristretto255_sha512_CREDENTIALRESPONSESIZE);
+    mfree(ptr_server_identity, server_identity_len);
+    mfree(ptr_client_identity, client_identity_len);
+    mfree(ptr_mhf_salt, mhf_salt_len);
+    return fun_ret;
+  };
+  Module.ecc_opaque_ristretto255_sha512_3DH_Expand_Label = (out, secret, label, label_len, context, context_len, length) => {
+    const ptr_out = mput(out, length);
+    const ptr_secret = mput(secret, 64);
+    const ptr_label = mput(label, label_len);
+    const ptr_context = mput(context, context_len);
+    _ecc_opaque_ristretto255_sha512_3DH_Expand_Label(ptr_out, ptr_secret, ptr_label, label_len, ptr_context, context_len, length);
+    mget(out, ptr_out, length);
+    mfree(ptr_out, length);
+    mfree(ptr_secret, 64);
+    mfree(ptr_label, label_len);
+    mfree(ptr_context, context_len);
+  };
+  Module.ecc_opaque_ristretto255_sha512_3DH_Derive_Secret = (out, secret, label, label_len, transcript_hash, transcript_hash_len) => {
+    const ptr_out = mput(out, ecc_opaque_ristretto255_sha512_Nx);
+    const ptr_secret = mput(secret, 64);
+    const ptr_label = mput(label, label_len);
+    const ptr_transcript_hash = mput(transcript_hash, transcript_hash_len);
+    _ecc_opaque_ristretto255_sha512_3DH_Derive_Secret(ptr_out, ptr_secret, ptr_label, label_len, ptr_transcript_hash, transcript_hash_len);
+    mget(out, ptr_out, ecc_opaque_ristretto255_sha512_Nx);
+    mfree(ptr_out, ecc_opaque_ristretto255_sha512_Nx);
+    mfree(ptr_secret, 64);
+    mfree(ptr_label, label_len);
+    mfree(ptr_transcript_hash, transcript_hash_len);
+  };
+  Module.ecc_opaque_ristretto255_sha512_3DH_Preamble = (preamble, preamble_len, context, context_len, client_identity, client_identity_len, client_public_key, ke1, server_identity, server_identity_len, server_public_key, ke2) => {
+    const ptr_preamble = mput(preamble, preamble_len);
+    const ptr_context = mput(context, context_len);
+    const ptr_client_identity = mput(client_identity, client_identity_len);
+    const ptr_client_public_key = mput(client_public_key, ecc_opaque_ristretto255_sha512_Npk);
+    const ptr_ke1 = mput(ke1, ecc_opaque_ristretto255_sha512_KE1SIZE);
+    const ptr_server_identity = mput(server_identity, server_identity_len);
+    const ptr_server_public_key = mput(server_public_key, ecc_opaque_ristretto255_sha512_Npk);
+    const ptr_ke2 = mput(ke2, ecc_opaque_ristretto255_sha512_KE2SIZE);
+    const fun_ret = _ecc_opaque_ristretto255_sha512_3DH_Preamble(ptr_preamble, preamble_len, ptr_context, context_len, ptr_client_identity, client_identity_len, ptr_client_public_key, ptr_ke1, ptr_server_identity, server_identity_len, ptr_server_public_key, ptr_ke2);
+    mget(preamble, ptr_preamble, preamble_len);
+    mfree(ptr_preamble, preamble_len);
+    mfree(ptr_context, context_len);
+    mfree(ptr_client_identity, client_identity_len);
+    mfree(ptr_client_public_key, ecc_opaque_ristretto255_sha512_Npk);
+    mfree(ptr_ke1, ecc_opaque_ristretto255_sha512_KE1SIZE);
+    mfree(ptr_server_identity, server_identity_len);
+    mfree(ptr_server_public_key, ecc_opaque_ristretto255_sha512_Npk);
+    mfree(ptr_ke2, ecc_opaque_ristretto255_sha512_KE2SIZE);
+    return fun_ret;
+  };
+  Module.ecc_opaque_ristretto255_sha512_3DH_TripleDHIKM = (ikm, sk1, pk1, sk2, pk2, sk3, pk3) => {
+    const ptr_ikm = mput(ikm, 96);
+    const ptr_sk1 = mput(sk1, 32);
+    const ptr_pk1 = mput(pk1, 32);
+    const ptr_sk2 = mput(sk2, 32);
+    const ptr_pk2 = mput(pk2, 32);
+    const ptr_sk3 = mput(sk3, 32);
+    const ptr_pk3 = mput(pk3, 32);
+    _ecc_opaque_ristretto255_sha512_3DH_TripleDHIKM(ptr_ikm, ptr_sk1, ptr_pk1, ptr_sk2, ptr_pk2, ptr_sk3, ptr_pk3);
+    mget(ikm, ptr_ikm, 96);
+    mfree(ptr_ikm, 96);
+    mfree(ptr_sk1, 32);
+    mfree(ptr_pk1, 32);
+    mfree(ptr_sk2, 32);
+    mfree(ptr_pk2, 32);
+    mfree(ptr_sk3, 32);
+    mfree(ptr_pk3, 32);
+  };
+  Module.ecc_opaque_ristretto255_sha512_3DH_DeriveKeys = (km2, km3, session_key, ikm, ikm_len, preamble, preamble_len) => {
+    const ptr_km2 = mput(km2, 64);
+    const ptr_km3 = mput(km3, 64);
+    const ptr_session_key = mput(session_key, 64);
+    const ptr_ikm = mput(ikm, ikm_len);
+    const ptr_preamble = mput(preamble, preamble_len);
+    _ecc_opaque_ristretto255_sha512_3DH_DeriveKeys(ptr_km2, ptr_km3, ptr_session_key, ptr_ikm, ikm_len, ptr_preamble, preamble_len);
+    mget(km2, ptr_km2, 64);
+    mget(km3, ptr_km3, 64);
+    mget(session_key, ptr_session_key, 64);
+    mfree(ptr_km2, 64);
+    mfree(ptr_km3, 64);
+    mfree(ptr_session_key, 64);
+    mfree(ptr_ikm, ikm_len);
+    mfree(ptr_preamble, preamble_len);
+  };
+  Module.ecc_opaque_ristretto255_sha512_GenerateKE1WithSeed = (ke1, state, password, password_len, blind, client_nonce, seed) => {
+    const ptr_ke1 = mput(ke1, ecc_opaque_ristretto255_sha512_KE1SIZE);
+    const ptr_state = mput(state, ecc_opaque_ristretto255_sha512_CLIENTSTATESIZE);
+    const ptr_password = mput(password, password_len);
+    const ptr_blind = mput(blind, ecc_opaque_ristretto255_sha512_Ns);
+    const ptr_client_nonce = mput(client_nonce, ecc_opaque_ristretto255_sha512_Nn);
+    const ptr_seed = mput(seed, ecc_opaque_ristretto255_sha512_Nn);
+    _ecc_opaque_ristretto255_sha512_GenerateKE1WithSeed(ptr_ke1, ptr_state, ptr_password, password_len, ptr_blind, ptr_client_nonce, ptr_seed);
+    mget(ke1, ptr_ke1, ecc_opaque_ristretto255_sha512_KE1SIZE);
+    mget(state, ptr_state, ecc_opaque_ristretto255_sha512_CLIENTSTATESIZE);
+    mfree(ptr_ke1, ecc_opaque_ristretto255_sha512_KE1SIZE);
+    mfree(ptr_state, ecc_opaque_ristretto255_sha512_CLIENTSTATESIZE);
+    mfree(ptr_password, password_len);
+    mfree(ptr_blind, ecc_opaque_ristretto255_sha512_Ns);
+    mfree(ptr_client_nonce, ecc_opaque_ristretto255_sha512_Nn);
+    mfree(ptr_seed, ecc_opaque_ristretto255_sha512_Nn);
+  };
+  Module.ecc_opaque_ristretto255_sha512_GenerateKE1 = (ke1, state, password, password_len) => {
+    const ptr_ke1 = mput(ke1, ecc_opaque_ristretto255_sha512_KE1SIZE);
+    const ptr_state = mput(state, ecc_opaque_ristretto255_sha512_CLIENTSTATESIZE);
+    const ptr_password = mput(password, password_len);
+    _ecc_opaque_ristretto255_sha512_GenerateKE1(ptr_ke1, ptr_state, ptr_password, password_len);
+    mget(ke1, ptr_ke1, ecc_opaque_ristretto255_sha512_KE1SIZE);
+    mget(state, ptr_state, ecc_opaque_ristretto255_sha512_CLIENTSTATESIZE);
+    mfree(ptr_ke1, ecc_opaque_ristretto255_sha512_KE1SIZE);
+    mfree(ptr_state, ecc_opaque_ristretto255_sha512_CLIENTSTATESIZE);
+    mfree(ptr_password, password_len);
+  };
+  Module.ecc_opaque_ristretto255_sha512_GenerateKE3 = (ke3_raw, session_key, export_key, state, client_identity, client_identity_len, server_identity, server_identity_len, ke2, mhf, mhf_salt, mhf_salt_len, context, context_len) => {
+    const ptr_ke3_raw = mput(ke3_raw, ecc_opaque_ristretto255_sha512_KE3SIZE);
+    const ptr_session_key = mput(session_key, 64);
+    const ptr_export_key = mput(export_key, 64);
+    const ptr_state = mput(state, ecc_opaque_ristretto255_sha512_CLIENTSTATESIZE);
+    const ptr_client_identity = mput(client_identity, client_identity_len);
+    const ptr_server_identity = mput(server_identity, server_identity_len);
+    const ptr_ke2 = mput(ke2, ecc_opaque_ristretto255_sha512_KE2SIZE);
+    const ptr_mhf_salt = mput(mhf_salt, mhf_salt_len);
+    const ptr_context = mput(context, context_len);
+    const fun_ret = _ecc_opaque_ristretto255_sha512_GenerateKE3(ptr_ke3_raw, ptr_session_key, ptr_export_key, ptr_state, ptr_client_identity, client_identity_len, ptr_server_identity, server_identity_len, ptr_ke2, mhf, ptr_mhf_salt, mhf_salt_len, ptr_context, context_len);
+    mget(ke3_raw, ptr_ke3_raw, ecc_opaque_ristretto255_sha512_KE3SIZE);
+    mget(session_key, ptr_session_key, 64);
+    mget(export_key, ptr_export_key, 64);
+    mget(state, ptr_state, ecc_opaque_ristretto255_sha512_CLIENTSTATESIZE);
+    mfree(ptr_ke3_raw, ecc_opaque_ristretto255_sha512_KE3SIZE);
+    mfree(ptr_session_key, 64);
+    mfree(ptr_export_key, 64);
+    mfree(ptr_state, ecc_opaque_ristretto255_sha512_CLIENTSTATESIZE);
+    mfree(ptr_client_identity, client_identity_len);
+    mfree(ptr_server_identity, server_identity_len);
+    mfree(ptr_ke2, ecc_opaque_ristretto255_sha512_KE2SIZE);
+    mfree(ptr_mhf_salt, mhf_salt_len);
+    mfree(ptr_context, context_len);
+    return fun_ret;
+  };
+  Module.ecc_opaque_ristretto255_sha512_3DH_StartWithSeed = (ke1, state, credential_request, client_nonce, seed) => {
+    const ptr_ke1 = mput(ke1, ecc_opaque_ristretto255_sha512_KE1SIZE);
+    const ptr_state = mput(state, ecc_opaque_ristretto255_sha512_CLIENTSTATESIZE);
+    const ptr_credential_request = mput(credential_request, ecc_opaque_ristretto255_sha512_CREDENTIALREQUESTSIZE);
+    const ptr_client_nonce = mput(client_nonce, ecc_opaque_ristretto255_sha512_Nn);
+    const ptr_seed = mput(seed, ecc_opaque_ristretto255_sha512_Nn);
+    _ecc_opaque_ristretto255_sha512_3DH_StartWithSeed(ptr_ke1, ptr_state, ptr_credential_request, ptr_client_nonce, ptr_seed);
+    mget(ke1, ptr_ke1, ecc_opaque_ristretto255_sha512_KE1SIZE);
+    mget(state, ptr_state, ecc_opaque_ristretto255_sha512_CLIENTSTATESIZE);
+    mfree(ptr_ke1, ecc_opaque_ristretto255_sha512_KE1SIZE);
+    mfree(ptr_state, ecc_opaque_ristretto255_sha512_CLIENTSTATESIZE);
+    mfree(ptr_credential_request, ecc_opaque_ristretto255_sha512_CREDENTIALREQUESTSIZE);
+    mfree(ptr_client_nonce, ecc_opaque_ristretto255_sha512_Nn);
+    mfree(ptr_seed, ecc_opaque_ristretto255_sha512_Nn);
+  };
+  Module.ecc_opaque_ristretto255_sha512_3DH_Start = (ke1, state, credential_request) => {
+    const ptr_ke1 = mput(ke1, ecc_opaque_ristretto255_sha512_KE1SIZE);
+    const ptr_state = mput(state, ecc_opaque_ristretto255_sha512_CLIENTSTATESIZE);
+    const ptr_credential_request = mput(credential_request, ecc_opaque_ristretto255_sha512_CREDENTIALREQUESTSIZE);
+    _ecc_opaque_ristretto255_sha512_3DH_Start(ptr_ke1, ptr_state, ptr_credential_request);
+    mget(ke1, ptr_ke1, ecc_opaque_ristretto255_sha512_KE1SIZE);
+    mget(state, ptr_state, ecc_opaque_ristretto255_sha512_CLIENTSTATESIZE);
+    mfree(ptr_ke1, ecc_opaque_ristretto255_sha512_KE1SIZE);
+    mfree(ptr_state, ecc_opaque_ristretto255_sha512_CLIENTSTATESIZE);
+    mfree(ptr_credential_request, ecc_opaque_ristretto255_sha512_CREDENTIALREQUESTSIZE);
+  };
+  Module.ecc_opaque_ristretto255_sha512_3DH_ClientFinalize = (ke3_raw, session_key, state_raw, client_identity, client_identity_len, client_private_key, server_identity, server_identity_len, server_public_key, ke2_raw, context, context_len) => {
+    const ptr_ke3_raw = mput(ke3_raw, ecc_opaque_ristretto255_sha512_KE3SIZE);
+    const ptr_session_key = mput(session_key, 64);
+    const ptr_state_raw = mput(state_raw, ecc_opaque_ristretto255_sha512_CLIENTSTATESIZE);
+    const ptr_client_identity = mput(client_identity, client_identity_len);
+    const ptr_client_private_key = mput(client_private_key, ecc_opaque_ristretto255_sha512_Nsk);
+    const ptr_server_identity = mput(server_identity, server_identity_len);
+    const ptr_server_public_key = mput(server_public_key, ecc_opaque_ristretto255_sha512_Npk);
+    const ptr_ke2_raw = mput(ke2_raw, ecc_opaque_ristretto255_sha512_KE2SIZE);
+    const ptr_context = mput(context, context_len);
+    const fun_ret = _ecc_opaque_ristretto255_sha512_3DH_ClientFinalize(ptr_ke3_raw, ptr_session_key, ptr_state_raw, ptr_client_identity, client_identity_len, ptr_client_private_key, ptr_server_identity, server_identity_len, ptr_server_public_key, ptr_ke2_raw, ptr_context, context_len);
+    mget(ke3_raw, ptr_ke3_raw, ecc_opaque_ristretto255_sha512_KE3SIZE);
+    mget(session_key, ptr_session_key, 64);
+    mget(state_raw, ptr_state_raw, ecc_opaque_ristretto255_sha512_CLIENTSTATESIZE);
+    mfree(ptr_ke3_raw, ecc_opaque_ristretto255_sha512_KE3SIZE);
+    mfree(ptr_session_key, 64);
+    mfree(ptr_state_raw, ecc_opaque_ristretto255_sha512_CLIENTSTATESIZE);
+    mfree(ptr_client_identity, client_identity_len);
+    mfree(ptr_client_private_key, ecc_opaque_ristretto255_sha512_Nsk);
+    mfree(ptr_server_identity, server_identity_len);
+    mfree(ptr_server_public_key, ecc_opaque_ristretto255_sha512_Npk);
+    mfree(ptr_ke2_raw, ecc_opaque_ristretto255_sha512_KE2SIZE);
+    mfree(ptr_context, context_len);
+    return fun_ret;
+  };
+  Module.ecc_opaque_ristretto255_sha512_GenerateKE2WithSeed = (ke2_raw, state_raw, server_identity, server_identity_len, server_private_key, server_public_key, record_raw, credential_identifier, credential_identifier_len, oprf_seed, ke1_raw, client_identity, client_identity_len, context, context_len, masking_nonce, server_nonce, seed) => {
+    const ptr_ke2_raw = mput(ke2_raw, ecc_opaque_ristretto255_sha512_KE2SIZE);
+    const ptr_state_raw = mput(state_raw, ecc_opaque_ristretto255_sha512_SERVERSTATESIZE);
+    const ptr_server_identity = mput(server_identity, server_identity_len);
+    const ptr_server_private_key = mput(server_private_key, ecc_opaque_ristretto255_sha512_Nsk);
+    const ptr_server_public_key = mput(server_public_key, ecc_opaque_ristretto255_sha512_Npk);
+    const ptr_record_raw = mput(record_raw, ecc_opaque_ristretto255_sha512_REGISTRATIONRECORDSIZE);
+    const ptr_credential_identifier = mput(credential_identifier, credential_identifier_len);
+    const ptr_oprf_seed = mput(oprf_seed, ecc_opaque_ristretto255_sha512_Nh);
+    const ptr_ke1_raw = mput(ke1_raw, ecc_opaque_ristretto255_sha512_KE1SIZE);
+    const ptr_client_identity = mput(client_identity, client_identity_len);
+    const ptr_context = mput(context, context_len);
+    const ptr_masking_nonce = mput(masking_nonce, ecc_opaque_ristretto255_sha512_Nn);
+    const ptr_server_nonce = mput(server_nonce, ecc_opaque_ristretto255_sha512_Nn);
+    const ptr_seed = mput(seed, ecc_opaque_ristretto255_sha512_Nn);
+    _ecc_opaque_ristretto255_sha512_GenerateKE2WithSeed(ptr_ke2_raw, ptr_state_raw, ptr_server_identity, server_identity_len, ptr_server_private_key, ptr_server_public_key, ptr_record_raw, ptr_credential_identifier, credential_identifier_len, ptr_oprf_seed, ptr_ke1_raw, ptr_client_identity, client_identity_len, ptr_context, context_len, ptr_masking_nonce, ptr_server_nonce, ptr_seed);
+    mget(ke2_raw, ptr_ke2_raw, ecc_opaque_ristretto255_sha512_KE2SIZE);
+    mget(state_raw, ptr_state_raw, ecc_opaque_ristretto255_sha512_SERVERSTATESIZE);
+    mfree(ptr_ke2_raw, ecc_opaque_ristretto255_sha512_KE2SIZE);
+    mfree(ptr_state_raw, ecc_opaque_ristretto255_sha512_SERVERSTATESIZE);
+    mfree(ptr_server_identity, server_identity_len);
+    mfree(ptr_server_private_key, ecc_opaque_ristretto255_sha512_Nsk);
+    mfree(ptr_server_public_key, ecc_opaque_ristretto255_sha512_Npk);
+    mfree(ptr_record_raw, ecc_opaque_ristretto255_sha512_REGISTRATIONRECORDSIZE);
+    mfree(ptr_credential_identifier, credential_identifier_len);
+    mfree(ptr_oprf_seed, ecc_opaque_ristretto255_sha512_Nh);
+    mfree(ptr_ke1_raw, ecc_opaque_ristretto255_sha512_KE1SIZE);
+    mfree(ptr_client_identity, client_identity_len);
+    mfree(ptr_context, context_len);
+    mfree(ptr_masking_nonce, ecc_opaque_ristretto255_sha512_Nn);
+    mfree(ptr_server_nonce, ecc_opaque_ristretto255_sha512_Nn);
+    mfree(ptr_seed, ecc_opaque_ristretto255_sha512_Nn);
+  };
+  Module.ecc_opaque_ristretto255_sha512_GenerateKE2 = (ke2_raw, state_raw, server_identity, server_identity_len, server_private_key, server_public_key, record_raw, credential_identifier, credential_identifier_len, oprf_seed, ke1_raw, client_identity, client_identity_len, context, context_len) => {
+    const ptr_ke2_raw = mput(ke2_raw, ecc_opaque_ristretto255_sha512_KE2SIZE);
+    const ptr_state_raw = mput(state_raw, ecc_opaque_ristretto255_sha512_SERVERSTATESIZE);
+    const ptr_server_identity = mput(server_identity, server_identity_len);
+    const ptr_server_private_key = mput(server_private_key, ecc_opaque_ristretto255_sha512_Nsk);
+    const ptr_server_public_key = mput(server_public_key, ecc_opaque_ristretto255_sha512_Npk);
+    const ptr_record_raw = mput(record_raw, ecc_opaque_ristretto255_sha512_REGISTRATIONRECORDSIZE);
+    const ptr_credential_identifier = mput(credential_identifier, credential_identifier_len);
+    const ptr_oprf_seed = mput(oprf_seed, ecc_opaque_ristretto255_sha512_Nh);
+    const ptr_ke1_raw = mput(ke1_raw, ecc_opaque_ristretto255_sha512_KE1SIZE);
+    const ptr_client_identity = mput(client_identity, client_identity_len);
+    const ptr_context = mput(context, context_len);
+    _ecc_opaque_ristretto255_sha512_GenerateKE2(ptr_ke2_raw, ptr_state_raw, ptr_server_identity, server_identity_len, ptr_server_private_key, ptr_server_public_key, ptr_record_raw, ptr_credential_identifier, credential_identifier_len, ptr_oprf_seed, ptr_ke1_raw, ptr_client_identity, client_identity_len, ptr_context, context_len);
+    mget(ke2_raw, ptr_ke2_raw, ecc_opaque_ristretto255_sha512_KE2SIZE);
+    mget(state_raw, ptr_state_raw, ecc_opaque_ristretto255_sha512_SERVERSTATESIZE);
+    mfree(ptr_ke2_raw, ecc_opaque_ristretto255_sha512_KE2SIZE);
+    mfree(ptr_state_raw, ecc_opaque_ristretto255_sha512_SERVERSTATESIZE);
+    mfree(ptr_server_identity, server_identity_len);
+    mfree(ptr_server_private_key, ecc_opaque_ristretto255_sha512_Nsk);
+    mfree(ptr_server_public_key, ecc_opaque_ristretto255_sha512_Npk);
+    mfree(ptr_record_raw, ecc_opaque_ristretto255_sha512_REGISTRATIONRECORDSIZE);
+    mfree(ptr_credential_identifier, credential_identifier_len);
+    mfree(ptr_oprf_seed, ecc_opaque_ristretto255_sha512_Nh);
+    mfree(ptr_ke1_raw, ecc_opaque_ristretto255_sha512_KE1SIZE);
+    mfree(ptr_client_identity, client_identity_len);
+    mfree(ptr_context, context_len);
+  };
+  Module.ecc_opaque_ristretto255_sha512_ServerFinish = (session_key, state, ke3) => {
+    const ptr_session_key = mput(session_key, 64);
+    const ptr_state = mput(state, ecc_opaque_ristretto255_sha512_SERVERSTATESIZE);
+    const ptr_ke3 = mput(ke3, ecc_opaque_ristretto255_sha512_KE3SIZE);
+    const fun_ret = _ecc_opaque_ristretto255_sha512_ServerFinish(ptr_session_key, ptr_state, ptr_ke3);
+    mget(session_key, ptr_session_key, 64);
+    mget(state, ptr_state, ecc_opaque_ristretto255_sha512_SERVERSTATESIZE);
+    mfree(ptr_session_key, 64);
+    mfree(ptr_state, ecc_opaque_ristretto255_sha512_SERVERSTATESIZE);
+    mfree(ptr_ke3, ecc_opaque_ristretto255_sha512_KE3SIZE);
+    return fun_ret;
+  };
+  Module.ecc_opaque_ristretto255_sha512_3DH_ResponseWithSeed = (ke2_raw, state_raw, server_identity, server_identity_len, server_private_key, server_public_key, client_identity, client_identity_len, client_public_key, ke1_raw, credential_response_raw, context, context_len, server_nonce, seed) => {
+    const ptr_ke2_raw = mput(ke2_raw, ecc_opaque_ristretto255_sha512_KE2SIZE);
+    const ptr_state_raw = mput(state_raw, ecc_opaque_ristretto255_sha512_SERVERSTATESIZE);
+    const ptr_server_identity = mput(server_identity, server_identity_len);
+    const ptr_server_private_key = mput(server_private_key, ecc_opaque_ristretto255_sha512_Nsk);
+    const ptr_server_public_key = mput(server_public_key, ecc_opaque_ristretto255_sha512_Npk);
+    const ptr_client_identity = mput(client_identity, client_identity_len);
+    const ptr_client_public_key = mput(client_public_key, ecc_opaque_ristretto255_sha512_Npk);
+    const ptr_ke1_raw = mput(ke1_raw, ecc_opaque_ristretto255_sha512_KE1SIZE);
+    const ptr_credential_response_raw = mput(credential_response_raw, ecc_opaque_ristretto255_sha512_CREDENTIALRESPONSESIZE);
+    const ptr_context = mput(context, context_len);
+    const ptr_server_nonce = mput(server_nonce, ecc_opaque_ristretto255_sha512_Nn);
+    const ptr_seed = mput(seed, ecc_opaque_ristretto255_sha512_Nn);
+    _ecc_opaque_ristretto255_sha512_3DH_ResponseWithSeed(ptr_ke2_raw, ptr_state_raw, ptr_server_identity, server_identity_len, ptr_server_private_key, ptr_server_public_key, ptr_client_identity, client_identity_len, ptr_client_public_key, ptr_ke1_raw, ptr_credential_response_raw, ptr_context, context_len, ptr_server_nonce, ptr_seed);
+    mget(ke2_raw, ptr_ke2_raw, ecc_opaque_ristretto255_sha512_KE2SIZE);
+    mget(state_raw, ptr_state_raw, ecc_opaque_ristretto255_sha512_SERVERSTATESIZE);
+    mfree(ptr_ke2_raw, ecc_opaque_ristretto255_sha512_KE2SIZE);
+    mfree(ptr_state_raw, ecc_opaque_ristretto255_sha512_SERVERSTATESIZE);
+    mfree(ptr_server_identity, server_identity_len);
+    mfree(ptr_server_private_key, ecc_opaque_ristretto255_sha512_Nsk);
+    mfree(ptr_server_public_key, ecc_opaque_ristretto255_sha512_Npk);
+    mfree(ptr_client_identity, client_identity_len);
+    mfree(ptr_client_public_key, ecc_opaque_ristretto255_sha512_Npk);
+    mfree(ptr_ke1_raw, ecc_opaque_ristretto255_sha512_KE1SIZE);
+    mfree(ptr_credential_response_raw, ecc_opaque_ristretto255_sha512_CREDENTIALRESPONSESIZE);
+    mfree(ptr_context, context_len);
+    mfree(ptr_server_nonce, ecc_opaque_ristretto255_sha512_Nn);
+    mfree(ptr_seed, ecc_opaque_ristretto255_sha512_Nn);
+  };
+  Module.ecc_opaque_ristretto255_sha512_3DH_Response = (ke2_raw, state_raw, server_identity, server_identity_len, server_private_key, server_public_key, client_identity, client_identity_len, client_public_key, ke1_raw, credential_response_raw, context, context_len) => {
+    const ptr_ke2_raw = mput(ke2_raw, ecc_opaque_ristretto255_sha512_KE2SIZE);
+    const ptr_state_raw = mput(state_raw, ecc_opaque_ristretto255_sha512_SERVERSTATESIZE);
+    const ptr_server_identity = mput(server_identity, server_identity_len);
+    const ptr_server_private_key = mput(server_private_key, ecc_opaque_ristretto255_sha512_Nsk);
+    const ptr_server_public_key = mput(server_public_key, ecc_opaque_ristretto255_sha512_Npk);
+    const ptr_client_identity = mput(client_identity, client_identity_len);
+    const ptr_client_public_key = mput(client_public_key, ecc_opaque_ristretto255_sha512_Npk);
+    const ptr_ke1_raw = mput(ke1_raw, ecc_opaque_ristretto255_sha512_KE1SIZE);
+    const ptr_credential_response_raw = mput(credential_response_raw, ecc_opaque_ristretto255_sha512_CREDENTIALRESPONSESIZE);
+    const ptr_context = mput(context, context_len);
+    _ecc_opaque_ristretto255_sha512_3DH_Response(ptr_ke2_raw, ptr_state_raw, ptr_server_identity, server_identity_len, ptr_server_private_key, ptr_server_public_key, ptr_client_identity, client_identity_len, ptr_client_public_key, ptr_ke1_raw, ptr_credential_response_raw, ptr_context, context_len);
+    mget(ke2_raw, ptr_ke2_raw, ecc_opaque_ristretto255_sha512_KE2SIZE);
+    mget(state_raw, ptr_state_raw, ecc_opaque_ristretto255_sha512_SERVERSTATESIZE);
+    mfree(ptr_ke2_raw, ecc_opaque_ristretto255_sha512_KE2SIZE);
+    mfree(ptr_state_raw, ecc_opaque_ristretto255_sha512_SERVERSTATESIZE);
+    mfree(ptr_server_identity, server_identity_len);
+    mfree(ptr_server_private_key, ecc_opaque_ristretto255_sha512_Nsk);
+    mfree(ptr_server_public_key, ecc_opaque_ristretto255_sha512_Npk);
+    mfree(ptr_client_identity, client_identity_len);
+    mfree(ptr_client_public_key, ecc_opaque_ristretto255_sha512_Npk);
+    mfree(ptr_ke1_raw, ecc_opaque_ristretto255_sha512_KE1SIZE);
+    mfree(ptr_credential_response_raw, ecc_opaque_ristretto255_sha512_CREDENTIALRESPONSESIZE);
+    mfree(ptr_context, context_len);
+  };
+  const ecc_sign_ed25519_SIGNATURESIZE = 64;
+  Module.ecc_sign_ed25519_SIGNATURESIZE = ecc_sign_ed25519_SIGNATURESIZE;
+  const ecc_sign_ed25519_SEEDSIZE = 32;
+  Module.ecc_sign_ed25519_SEEDSIZE = ecc_sign_ed25519_SEEDSIZE;
+  const ecc_sign_ed25519_PUBLICKEYSIZE = 32;
+  Module.ecc_sign_ed25519_PUBLICKEYSIZE = ecc_sign_ed25519_PUBLICKEYSIZE;
+  const ecc_sign_ed25519_SECRETKEYSIZE = 64;
+  Module.ecc_sign_ed25519_SECRETKEYSIZE = ecc_sign_ed25519_SECRETKEYSIZE;
+  const ecc_sign_eth_bls_PRIVATEKEYSIZE = 32;
+  Module.ecc_sign_eth_bls_PRIVATEKEYSIZE = ecc_sign_eth_bls_PRIVATEKEYSIZE;
+  const ecc_sign_eth_bls_PUBLICKEYSIZE = 48;
+  Module.ecc_sign_eth_bls_PUBLICKEYSIZE = ecc_sign_eth_bls_PUBLICKEYSIZE;
+  const ecc_sign_eth_bls_SIGNATURESIZE = 96;
+  Module.ecc_sign_eth_bls_SIGNATURESIZE = ecc_sign_eth_bls_SIGNATURESIZE;
+  Module.ecc_sign_ed25519_Sign = (signature, message, message_len, sk) => {
+    const ptr_signature = mput(signature, ecc_sign_ed25519_SIGNATURESIZE);
+    const ptr_message = mput(message, message_len);
+    const ptr_sk = mput(sk, ecc_sign_ed25519_SECRETKEYSIZE);
+    _ecc_sign_ed25519_Sign(ptr_signature, ptr_message, message_len, ptr_sk);
+    mget(signature, ptr_signature, ecc_sign_ed25519_SIGNATURESIZE);
+    mfree(ptr_signature, ecc_sign_ed25519_SIGNATURESIZE);
+    mfree(ptr_message, message_len);
+    mfree(ptr_sk, ecc_sign_ed25519_SECRETKEYSIZE);
+  };
+  Module.ecc_sign_ed25519_Verify = (signature, message, message_len, pk) => {
+    const ptr_signature = mput(signature, ecc_sign_ed25519_SIGNATURESIZE);
+    const ptr_message = mput(message, message_len);
+    const ptr_pk = mput(pk, ecc_sign_ed25519_PUBLICKEYSIZE);
+    const fun_ret = _ecc_sign_ed25519_Verify(ptr_signature, ptr_message, message_len, ptr_pk);
+    mfree(ptr_signature, ecc_sign_ed25519_SIGNATURESIZE);
+    mfree(ptr_message, message_len);
+    mfree(ptr_pk, ecc_sign_ed25519_PUBLICKEYSIZE);
+    return fun_ret;
+  };
+  Module.ecc_sign_ed25519_KeyPair = (pk, sk) => {
+    const ptr_pk = mput(pk, ecc_sign_ed25519_PUBLICKEYSIZE);
+    const ptr_sk = mput(sk, ecc_sign_ed25519_SECRETKEYSIZE);
+    _ecc_sign_ed25519_KeyPair(ptr_pk, ptr_sk);
+    mget(pk, ptr_pk, ecc_sign_ed25519_PUBLICKEYSIZE);
+    mget(sk, ptr_sk, ecc_sign_ed25519_SECRETKEYSIZE);
+    mfree(ptr_pk, ecc_sign_ed25519_PUBLICKEYSIZE);
+    mfree(ptr_sk, ecc_sign_ed25519_SECRETKEYSIZE);
+  };
+  Module.ecc_sign_ed25519_SeedKeyPair = (pk, sk, seed) => {
+    const ptr_pk = mput(pk, ecc_sign_ed25519_PUBLICKEYSIZE);
+    const ptr_sk = mput(sk, ecc_sign_ed25519_SECRETKEYSIZE);
+    const ptr_seed = mput(seed, ecc_sign_ed25519_SEEDSIZE);
+    _ecc_sign_ed25519_SeedKeyPair(ptr_pk, ptr_sk, ptr_seed);
+    mget(pk, ptr_pk, ecc_sign_ed25519_PUBLICKEYSIZE);
+    mget(sk, ptr_sk, ecc_sign_ed25519_SECRETKEYSIZE);
+    mfree(ptr_pk, ecc_sign_ed25519_PUBLICKEYSIZE);
+    mfree(ptr_sk, ecc_sign_ed25519_SECRETKEYSIZE);
+    mfree(ptr_seed, ecc_sign_ed25519_SEEDSIZE);
+  };
+  Module.ecc_sign_ed25519_SkToSeed = (seed, sk) => {
+    const ptr_seed = mput(seed, ecc_sign_ed25519_SEEDSIZE);
+    const ptr_sk = mput(sk, ecc_sign_ed25519_SECRETKEYSIZE);
+    _ecc_sign_ed25519_SkToSeed(ptr_seed, ptr_sk);
+    mget(seed, ptr_seed, ecc_sign_ed25519_SEEDSIZE);
+    mfree(ptr_seed, ecc_sign_ed25519_SEEDSIZE);
+    mfree(ptr_sk, ecc_sign_ed25519_SECRETKEYSIZE);
+  };
+  Module.ecc_sign_ed25519_SkToPk = (pk, sk) => {
+    const ptr_pk = mput(pk, ecc_sign_ed25519_PUBLICKEYSIZE);
+    const ptr_sk = mput(sk, ecc_sign_ed25519_SECRETKEYSIZE);
+    _ecc_sign_ed25519_SkToPk(ptr_pk, ptr_sk);
+    mget(pk, ptr_pk, ecc_sign_ed25519_PUBLICKEYSIZE);
+    mfree(ptr_pk, ecc_sign_ed25519_PUBLICKEYSIZE);
+    mfree(ptr_sk, ecc_sign_ed25519_SECRETKEYSIZE);
+  };
+  Module.ecc_sign_eth_bls_KeyGen = (sk, ikm, ikm_len, salt, salt_len, key_info, key_info_len) => {
+    const ptr_sk = mput(sk, ecc_sign_eth_bls_PRIVATEKEYSIZE);
+    const ptr_ikm = mput(ikm, ikm_len);
+    const ptr_salt = mput(salt, salt_len);
+    const ptr_key_info = mput(key_info, key_info_len);
+    _ecc_sign_eth_bls_KeyGen(ptr_sk, ptr_ikm, ikm_len, ptr_salt, salt_len, ptr_key_info, key_info_len);
+    mget(sk, ptr_sk, ecc_sign_eth_bls_PRIVATEKEYSIZE);
+    mfree(ptr_sk, ecc_sign_eth_bls_PRIVATEKEYSIZE);
+    mfree(ptr_ikm, ikm_len);
+    mfree(ptr_salt, salt_len);
+    mfree(ptr_key_info, key_info_len);
+  };
+  Module.ecc_sign_eth_bls_SkToPk = (pk, sk) => {
+    const ptr_pk = mput(pk, ecc_sign_eth_bls_PUBLICKEYSIZE);
+    const ptr_sk = mput(sk, ecc_sign_eth_bls_PRIVATEKEYSIZE);
+    _ecc_sign_eth_bls_SkToPk(ptr_pk, ptr_sk);
+    mget(pk, ptr_pk, ecc_sign_eth_bls_PUBLICKEYSIZE);
+    mfree(ptr_pk, ecc_sign_eth_bls_PUBLICKEYSIZE);
+    mfree(ptr_sk, ecc_sign_eth_bls_PRIVATEKEYSIZE);
+  };
+  Module.ecc_sign_eth_bls_KeyValidate = (pk) => {
+    const ptr_pk = mput(pk, ecc_sign_eth_bls_PUBLICKEYSIZE);
+    const fun_ret = _ecc_sign_eth_bls_KeyValidate(ptr_pk);
+    mfree(ptr_pk, ecc_sign_eth_bls_PUBLICKEYSIZE);
+    return fun_ret;
+  };
+  Module.ecc_sign_eth_bls_Sign = (signature, sk, message, message_len) => {
+    const ptr_signature = mput(signature, ecc_sign_eth_bls_SIGNATURESIZE);
+    const ptr_sk = mput(sk, ecc_sign_eth_bls_PRIVATEKEYSIZE);
+    const ptr_message = mput(message, message_len);
+    _ecc_sign_eth_bls_Sign(ptr_signature, ptr_sk, ptr_message, message_len);
+    mget(signature, ptr_signature, ecc_sign_eth_bls_SIGNATURESIZE);
+    mfree(ptr_signature, ecc_sign_eth_bls_SIGNATURESIZE);
+    mfree(ptr_sk, ecc_sign_eth_bls_PRIVATEKEYSIZE);
+    mfree(ptr_message, message_len);
+  };
+  Module.ecc_sign_eth_bls_Verify = (pk, message, message_len, signature) => {
+    const ptr_pk = mput(pk, ecc_sign_eth_bls_PUBLICKEYSIZE);
+    const ptr_message = mput(message, message_len);
+    const ptr_signature = mput(signature, ecc_sign_eth_bls_SIGNATURESIZE);
+    const fun_ret = _ecc_sign_eth_bls_Verify(ptr_pk, ptr_message, message_len, ptr_signature);
+    mfree(ptr_pk, ecc_sign_eth_bls_PUBLICKEYSIZE);
+    mfree(ptr_message, message_len);
+    mfree(ptr_signature, ecc_sign_eth_bls_SIGNATURESIZE);
+    return fun_ret;
+  };
+  Module.ecc_sign_eth_bls_Aggregate = (signature, signatures, n) => {
+    const ptr_signature = mput(signature, ecc_sign_eth_bls_SIGNATURESIZE);
+    const ptr_signatures = mput(signatures, n * ecc_sign_eth_bls_SIGNATURESIZE);
+    const fun_ret = _ecc_sign_eth_bls_Aggregate(ptr_signature, ptr_signatures, n);
+    mget(signature, ptr_signature, ecc_sign_eth_bls_SIGNATURESIZE);
+    mfree(ptr_signature, ecc_sign_eth_bls_SIGNATURESIZE);
+    mfree(ptr_signatures, n * ecc_sign_eth_bls_SIGNATURESIZE);
+    return fun_ret;
+  };
+  Module.ecc_sign_eth_bls_FastAggregateVerify = (pks, n, message, message_len, signature) => {
+    const ptr_pks = mput(pks, n * ecc_sign_eth_bls_PUBLICKEYSIZE);
+    const ptr_message = mput(message, message_len);
+    const ptr_signature = mput(signature, ecc_sign_eth_bls_SIGNATURESIZE);
+    const fun_ret = _ecc_sign_eth_bls_FastAggregateVerify(ptr_pks, n, ptr_message, message_len, ptr_signature);
+    mfree(ptr_pks, n * ecc_sign_eth_bls_PUBLICKEYSIZE);
+    mfree(ptr_message, message_len);
+    mfree(ptr_signature, ecc_sign_eth_bls_SIGNATURESIZE);
+    return fun_ret;
+  };
+  Module.ecc_sign_eth_bls_AggregateVerify = (n, pks, messages, messages_len, signature) => {
+    const ptr_pks = mput(pks, n * ecc_sign_eth_bls_PUBLICKEYSIZE);
+    const ptr_messages = mput(messages, messages_len);
+    const ptr_signature = mput(signature, ecc_sign_eth_bls_SIGNATURESIZE);
+    const fun_ret = _ecc_sign_eth_bls_AggregateVerify(n, ptr_pks, ptr_messages, messages_len, ptr_signature);
+    mfree(ptr_pks, n * ecc_sign_eth_bls_PUBLICKEYSIZE);
+    mfree(ptr_messages, messages_len);
+    mfree(ptr_signature, ecc_sign_eth_bls_SIGNATURESIZE);
+    return fun_ret;
+  };
+  const ecc_frost_ristretto255_sha512_SCALARSIZE = 32;
+  Module.ecc_frost_ristretto255_sha512_SCALARSIZE = ecc_frost_ristretto255_sha512_SCALARSIZE;
+  const ecc_frost_ristretto255_sha512_ELEMENTSIZE = 32;
+  Module.ecc_frost_ristretto255_sha512_ELEMENTSIZE = ecc_frost_ristretto255_sha512_ELEMENTSIZE;
+  const ecc_frost_ristretto255_sha512_POINTSIZE = 64;
+  Module.ecc_frost_ristretto255_sha512_POINTSIZE = ecc_frost_ristretto255_sha512_POINTSIZE;
+  const ecc_frost_ristretto255_sha512_COMMITMENTSIZE = 96;
+  Module.ecc_frost_ristretto255_sha512_COMMITMENTSIZE = ecc_frost_ristretto255_sha512_COMMITMENTSIZE;
+  const ecc_frost_ristretto255_sha512_BINDINGFACTORSIZE = 64;
+  Module.ecc_frost_ristretto255_sha512_BINDINGFACTORSIZE = ecc_frost_ristretto255_sha512_BINDINGFACTORSIZE;
+  const ecc_frost_ristretto255_sha512_SECRETKEYSIZE = 32;
+  Module.ecc_frost_ristretto255_sha512_SECRETKEYSIZE = ecc_frost_ristretto255_sha512_SECRETKEYSIZE;
+  const ecc_frost_ristretto255_sha512_PUBLICKEYSIZE = 32;
+  Module.ecc_frost_ristretto255_sha512_PUBLICKEYSIZE = ecc_frost_ristretto255_sha512_PUBLICKEYSIZE;
+  const ecc_frost_ristretto255_sha512_SIGNATURESIZE = 64;
+  Module.ecc_frost_ristretto255_sha512_SIGNATURESIZE = ecc_frost_ristretto255_sha512_SIGNATURESIZE;
+  const ecc_frost_ristretto255_sha512_NONCEPAIRSIZE = 64;
+  Module.ecc_frost_ristretto255_sha512_NONCEPAIRSIZE = ecc_frost_ristretto255_sha512_NONCEPAIRSIZE;
+  const ecc_frost_ristretto255_sha512_NONCECOMMITMENTPAIRSIZE = 64;
+  Module.ecc_frost_ristretto255_sha512_NONCECOMMITMENTPAIRSIZE = ecc_frost_ristretto255_sha512_NONCECOMMITMENTPAIRSIZE;
+  Module.ecc_frost_ristretto255_sha512_nonce_generate_with_randomness = (nonce, secret, random_bytes) => {
+    const ptr_nonce = mput(nonce, ecc_frost_ristretto255_sha512_SCALARSIZE);
+    const ptr_secret = mput(secret, ecc_frost_ristretto255_sha512_SCALARSIZE);
+    const ptr_random_bytes = mput(random_bytes, 32);
+    _ecc_frost_ristretto255_sha512_nonce_generate_with_randomness(ptr_nonce, ptr_secret, ptr_random_bytes);
+    mget(nonce, ptr_nonce, ecc_frost_ristretto255_sha512_SCALARSIZE);
+    mfree(ptr_nonce, ecc_frost_ristretto255_sha512_SCALARSIZE);
+    mfree(ptr_secret, ecc_frost_ristretto255_sha512_SCALARSIZE);
+    mfree(ptr_random_bytes, 32);
+  };
+  Module.ecc_frost_ristretto255_sha512_nonce_generate = (nonce, secret) => {
+    const ptr_nonce = mput(nonce, ecc_frost_ristretto255_sha512_SCALARSIZE);
+    const ptr_secret = mput(secret, ecc_frost_ristretto255_sha512_SCALARSIZE);
+    _ecc_frost_ristretto255_sha512_nonce_generate(ptr_nonce, ptr_secret);
+    mget(nonce, ptr_nonce, ecc_frost_ristretto255_sha512_SCALARSIZE);
+    mfree(ptr_nonce, ecc_frost_ristretto255_sha512_SCALARSIZE);
+    mfree(ptr_secret, ecc_frost_ristretto255_sha512_SCALARSIZE);
+  };
+  Module.ecc_frost_ristretto255_sha512_derive_interpolating_value = (L_i, x_i, L, L_len) => {
+    const ptr_L_i = mput(L_i, ecc_frost_ristretto255_sha512_SCALARSIZE);
+    const ptr_x_i = mput(x_i, ecc_frost_ristretto255_sha512_SCALARSIZE);
+    const ptr_L = mput(L, L_len * ecc_frost_ristretto255_sha512_SCALARSIZE);
+    _ecc_frost_ristretto255_sha512_derive_interpolating_value(ptr_L_i, ptr_x_i, ptr_L, L_len);
+    mget(L_i, ptr_L_i, ecc_frost_ristretto255_sha512_SCALARSIZE);
+    mfree(ptr_L_i, ecc_frost_ristretto255_sha512_SCALARSIZE);
+    mfree(ptr_x_i, ecc_frost_ristretto255_sha512_SCALARSIZE);
+    mfree(ptr_L, L_len * ecc_frost_ristretto255_sha512_SCALARSIZE);
+  };
+  Module.ecc_frost_ristretto255_sha512_derive_interpolating_value_with_points = (L_i, x_i, L, L_len) => {
+    const ptr_L_i = mput(L_i, ecc_frost_ristretto255_sha512_SCALARSIZE);
+    const ptr_x_i = mput(x_i, ecc_frost_ristretto255_sha512_SCALARSIZE);
+    const ptr_L = mput(L, L_len * ecc_frost_ristretto255_sha512_POINTSIZE);
+    _ecc_frost_ristretto255_sha512_derive_interpolating_value_with_points(ptr_L_i, ptr_x_i, ptr_L, L_len);
+    mget(L_i, ptr_L_i, ecc_frost_ristretto255_sha512_SCALARSIZE);
+    mfree(ptr_L_i, ecc_frost_ristretto255_sha512_SCALARSIZE);
+    mfree(ptr_x_i, ecc_frost_ristretto255_sha512_SCALARSIZE);
+    mfree(ptr_L, L_len * ecc_frost_ristretto255_sha512_POINTSIZE);
+  };
+  Module.ecc_frost_ristretto255_sha512_encode_group_commitment_list = (out, commitment_list, commitment_list_len) => {
+    const ptr_out = mput(out, commitment_list_len * ecc_frost_ristretto255_sha512_COMMITMENTSIZE);
+    const ptr_commitment_list = mput(commitment_list, commitment_list_len * ecc_frost_ristretto255_sha512_COMMITMENTSIZE);
+    _ecc_frost_ristretto255_sha512_encode_group_commitment_list(ptr_out, ptr_commitment_list, commitment_list_len);
+    mget(out, ptr_out, commitment_list_len * ecc_frost_ristretto255_sha512_COMMITMENTSIZE);
+    mfree(ptr_out, commitment_list_len * ecc_frost_ristretto255_sha512_COMMITMENTSIZE);
+    mfree(ptr_commitment_list, commitment_list_len * ecc_frost_ristretto255_sha512_COMMITMENTSIZE);
+  };
+  Module.ecc_frost_ristretto255_sha512_participants_from_commitment_list = (identifiers, commitment_list, commitment_list_len) => {
+    const ptr_identifiers = mput(identifiers, commitment_list_len * ecc_frost_ristretto255_sha512_SCALARSIZE);
+    const ptr_commitment_list = mput(commitment_list, commitment_list_len * ecc_frost_ristretto255_sha512_COMMITMENTSIZE);
+    _ecc_frost_ristretto255_sha512_participants_from_commitment_list(ptr_identifiers, ptr_commitment_list, commitment_list_len);
+    mget(identifiers, ptr_identifiers, commitment_list_len * ecc_frost_ristretto255_sha512_SCALARSIZE);
+    mfree(ptr_identifiers, commitment_list_len * ecc_frost_ristretto255_sha512_SCALARSIZE);
+    mfree(ptr_commitment_list, commitment_list_len * ecc_frost_ristretto255_sha512_COMMITMENTSIZE);
+  };
+  Module.ecc_frost_ristretto255_sha512_binding_factor_for_participant = (binding_factor, binding_factor_list, binding_factor_list_len, identifier) => {
+    const ptr_binding_factor = mput(binding_factor, ecc_frost_ristretto255_sha512_SCALARSIZE);
+    const ptr_binding_factor_list = mput(binding_factor_list, binding_factor_list_len * ecc_frost_ristretto255_sha512_BINDINGFACTORSIZE);
+    const ptr_identifier = mput(identifier, ecc_frost_ristretto255_sha512_SCALARSIZE);
+    const fun_ret = _ecc_frost_ristretto255_sha512_binding_factor_for_participant(ptr_binding_factor, ptr_binding_factor_list, binding_factor_list_len, ptr_identifier);
+    mget(binding_factor, ptr_binding_factor, ecc_frost_ristretto255_sha512_SCALARSIZE);
+    mfree(ptr_binding_factor, ecc_frost_ristretto255_sha512_SCALARSIZE);
+    mfree(ptr_binding_factor_list, binding_factor_list_len * ecc_frost_ristretto255_sha512_BINDINGFACTORSIZE);
+    mfree(ptr_identifier, ecc_frost_ristretto255_sha512_SCALARSIZE);
+    return fun_ret;
+  };
+  Module.ecc_frost_ristretto255_sha512_compute_binding_factors = (binding_factor_list, commitment_list, commitment_list_len, msg, msg_len) => {
+    const ptr_binding_factor_list = mput(binding_factor_list, commitment_list_len * ecc_frost_ristretto255_sha512_BINDINGFACTORSIZE);
+    const ptr_commitment_list = mput(commitment_list, commitment_list_len * ecc_frost_ristretto255_sha512_COMMITMENTSIZE);
+    const ptr_msg = mput(msg, msg_len);
+    _ecc_frost_ristretto255_sha512_compute_binding_factors(ptr_binding_factor_list, ptr_commitment_list, commitment_list_len, ptr_msg, msg_len);
+    mget(binding_factor_list, ptr_binding_factor_list, commitment_list_len * ecc_frost_ristretto255_sha512_BINDINGFACTORSIZE);
+    mfree(ptr_binding_factor_list, commitment_list_len * ecc_frost_ristretto255_sha512_BINDINGFACTORSIZE);
+    mfree(ptr_commitment_list, commitment_list_len * ecc_frost_ristretto255_sha512_COMMITMENTSIZE);
+    mfree(ptr_msg, msg_len);
+  };
+  Module.ecc_frost_ristretto255_sha512_compute_group_commitment = (group_comm, commitment_list, commitment_list_len, binding_factor_list, binding_factor_list_len) => {
+    const ptr_group_comm = mput(group_comm, ecc_frost_ristretto255_sha512_ELEMENTSIZE);
+    const ptr_commitment_list = mput(commitment_list, commitment_list_len * ecc_frost_ristretto255_sha512_COMMITMENTSIZE);
+    const ptr_binding_factor_list = mput(binding_factor_list, ecc_frost_ristretto255_sha512_BINDINGFACTORSIZE);
+    _ecc_frost_ristretto255_sha512_compute_group_commitment(ptr_group_comm, ptr_commitment_list, commitment_list_len, ptr_binding_factor_list, binding_factor_list_len);
+    mget(group_comm, ptr_group_comm, ecc_frost_ristretto255_sha512_ELEMENTSIZE);
+    mfree(ptr_group_comm, ecc_frost_ristretto255_sha512_ELEMENTSIZE);
+    mfree(ptr_commitment_list, commitment_list_len * ecc_frost_ristretto255_sha512_COMMITMENTSIZE);
+    mfree(ptr_binding_factor_list, ecc_frost_ristretto255_sha512_BINDINGFACTORSIZE);
+  };
+  Module.ecc_frost_ristretto255_sha512_compute_challenge = (challenge, group_commitment, group_public_key, msg, msg_len) => {
+    const ptr_challenge = mput(challenge, ecc_frost_ristretto255_sha512_SCALARSIZE);
+    const ptr_group_commitment = mput(group_commitment, ecc_frost_ristretto255_sha512_ELEMENTSIZE);
+    const ptr_group_public_key = mput(group_public_key, ecc_frost_ristretto255_sha512_PUBLICKEYSIZE);
+    const ptr_msg = mput(msg, msg_len);
+    _ecc_frost_ristretto255_sha512_compute_challenge(ptr_challenge, ptr_group_commitment, ptr_group_public_key, ptr_msg, msg_len);
+    mget(challenge, ptr_challenge, ecc_frost_ristretto255_sha512_SCALARSIZE);
+    mfree(ptr_challenge, ecc_frost_ristretto255_sha512_SCALARSIZE);
+    mfree(ptr_group_commitment, ecc_frost_ristretto255_sha512_ELEMENTSIZE);
+    mfree(ptr_group_public_key, ecc_frost_ristretto255_sha512_PUBLICKEYSIZE);
+    mfree(ptr_msg, msg_len);
+  };
+  Module.ecc_frost_ristretto255_sha512_commit_with_randomness = (nonce, comm, sk_i, hiding_nonce_randomness, binding_nonce_randomness) => {
+    const ptr_nonce = mput(nonce, ecc_frost_ristretto255_sha512_NONCEPAIRSIZE);
+    const ptr_comm = mput(comm, ecc_frost_ristretto255_sha512_NONCECOMMITMENTPAIRSIZE);
+    const ptr_sk_i = mput(sk_i, ecc_frost_ristretto255_sha512_SCALARSIZE);
+    const ptr_hiding_nonce_randomness = mput(hiding_nonce_randomness, 32);
+    const ptr_binding_nonce_randomness = mput(binding_nonce_randomness, 32);
+    _ecc_frost_ristretto255_sha512_commit_with_randomness(ptr_nonce, ptr_comm, ptr_sk_i, ptr_hiding_nonce_randomness, ptr_binding_nonce_randomness);
+    mget(nonce, ptr_nonce, ecc_frost_ristretto255_sha512_NONCEPAIRSIZE);
+    mget(comm, ptr_comm, ecc_frost_ristretto255_sha512_NONCECOMMITMENTPAIRSIZE);
+    mfree(ptr_nonce, ecc_frost_ristretto255_sha512_NONCEPAIRSIZE);
+    mfree(ptr_comm, ecc_frost_ristretto255_sha512_NONCECOMMITMENTPAIRSIZE);
+    mfree(ptr_sk_i, ecc_frost_ristretto255_sha512_SCALARSIZE);
+    mfree(ptr_hiding_nonce_randomness, 32);
+    mfree(ptr_binding_nonce_randomness, 32);
+  };
+  Module.ecc_frost_ristretto255_sha512_commit = (nonce, comm, sk_i) => {
+    const ptr_nonce = mput(nonce, ecc_frost_ristretto255_sha512_NONCEPAIRSIZE);
+    const ptr_comm = mput(comm, ecc_frost_ristretto255_sha512_NONCECOMMITMENTPAIRSIZE);
+    const ptr_sk_i = mput(sk_i, ecc_frost_ristretto255_sha512_SCALARSIZE);
+    _ecc_frost_ristretto255_sha512_commit(ptr_nonce, ptr_comm, ptr_sk_i);
+    mget(nonce, ptr_nonce, ecc_frost_ristretto255_sha512_NONCEPAIRSIZE);
+    mget(comm, ptr_comm, ecc_frost_ristretto255_sha512_NONCECOMMITMENTPAIRSIZE);
+    mfree(ptr_nonce, ecc_frost_ristretto255_sha512_NONCEPAIRSIZE);
+    mfree(ptr_comm, ecc_frost_ristretto255_sha512_NONCECOMMITMENTPAIRSIZE);
+    mfree(ptr_sk_i, ecc_frost_ristretto255_sha512_SCALARSIZE);
+  };
+  Module.ecc_frost_ristretto255_sha512_sign = (sig_share, identifier, sk_i, group_public_key, nonce_i, msg, msg_len, commitment_list, commitment_list_len) => {
+    const ptr_sig_share = mput(sig_share, ecc_frost_ristretto255_sha512_SCALARSIZE);
+    const ptr_identifier = mput(identifier, ecc_frost_ristretto255_sha512_SCALARSIZE);
+    const ptr_sk_i = mput(sk_i, ecc_frost_ristretto255_sha512_SECRETKEYSIZE);
+    const ptr_group_public_key = mput(group_public_key, ecc_frost_ristretto255_sha512_PUBLICKEYSIZE);
+    const ptr_nonce_i = mput(nonce_i, ecc_frost_ristretto255_sha512_NONCEPAIRSIZE);
+    const ptr_msg = mput(msg, msg_len);
+    const ptr_commitment_list = mput(commitment_list, commitment_list_len * ecc_frost_ristretto255_sha512_COMMITMENTSIZE);
+    _ecc_frost_ristretto255_sha512_sign(ptr_sig_share, ptr_identifier, ptr_sk_i, ptr_group_public_key, ptr_nonce_i, ptr_msg, msg_len, ptr_commitment_list, commitment_list_len);
+    mget(sig_share, ptr_sig_share, ecc_frost_ristretto255_sha512_SCALARSIZE);
+    mfree(ptr_sig_share, ecc_frost_ristretto255_sha512_SCALARSIZE);
+    mfree(ptr_identifier, ecc_frost_ristretto255_sha512_SCALARSIZE);
+    mfree(ptr_sk_i, ecc_frost_ristretto255_sha512_SECRETKEYSIZE);
+    mfree(ptr_group_public_key, ecc_frost_ristretto255_sha512_PUBLICKEYSIZE);
+    mfree(ptr_nonce_i, ecc_frost_ristretto255_sha512_NONCEPAIRSIZE);
+    mfree(ptr_msg, msg_len);
+    mfree(ptr_commitment_list, commitment_list_len * ecc_frost_ristretto255_sha512_COMMITMENTSIZE);
+  };
+  Module.ecc_frost_ristretto255_sha512_aggregate = (signature, commitment_list, commitment_list_len, msg, msg_len, sig_shares, sig_shares_len) => {
+    const ptr_signature = mput(signature, ecc_frost_ristretto255_sha512_SIGNATURESIZE);
+    const ptr_commitment_list = mput(commitment_list, commitment_list_len * ecc_frost_ristretto255_sha512_PUBLICKEYSIZE);
+    const ptr_msg = mput(msg, msg_len);
+    const ptr_sig_shares = mput(sig_shares, sig_shares_len * ecc_frost_ristretto255_sha512_SCALARSIZE);
+    _ecc_frost_ristretto255_sha512_aggregate(ptr_signature, ptr_commitment_list, commitment_list_len, ptr_msg, msg_len, ptr_sig_shares, sig_shares_len);
+    mget(signature, ptr_signature, ecc_frost_ristretto255_sha512_SIGNATURESIZE);
+    mfree(ptr_signature, ecc_frost_ristretto255_sha512_SIGNATURESIZE);
+    mfree(ptr_commitment_list, commitment_list_len * ecc_frost_ristretto255_sha512_PUBLICKEYSIZE);
+    mfree(ptr_msg, msg_len);
+    mfree(ptr_sig_shares, sig_shares_len * ecc_frost_ristretto255_sha512_SCALARSIZE);
+  };
+  Module.ecc_frost_ristretto255_sha512_verify_signature_share = (identifier, public_key_share_i, comm_i, sig_share_i, commitment_list, commitment_list_len, group_public_key, msg, msg_len) => {
+    const ptr_identifier = mput(identifier, ecc_frost_ristretto255_sha512_SCALARSIZE);
+    const ptr_public_key_share_i = mput(public_key_share_i, ecc_frost_ristretto255_sha512_PUBLICKEYSIZE);
+    const ptr_comm_i = mput(comm_i, ecc_frost_ristretto255_sha512_NONCECOMMITMENTPAIRSIZE);
+    const ptr_sig_share_i = mput(sig_share_i, ecc_frost_ristretto255_sha512_SCALARSIZE);
+    const ptr_commitment_list = mput(commitment_list, commitment_list_len * ecc_frost_ristretto255_sha512_COMMITMENTSIZE);
+    const ptr_group_public_key = mput(group_public_key, ecc_frost_ristretto255_sha512_PUBLICKEYSIZE);
+    const ptr_msg = mput(msg, msg_len);
+    const fun_ret = _ecc_frost_ristretto255_sha512_verify_signature_share(ptr_identifier, ptr_public_key_share_i, ptr_comm_i, ptr_sig_share_i, ptr_commitment_list, commitment_list_len, ptr_group_public_key, ptr_msg, msg_len);
+    mfree(ptr_identifier, ecc_frost_ristretto255_sha512_SCALARSIZE);
+    mfree(ptr_public_key_share_i, ecc_frost_ristretto255_sha512_PUBLICKEYSIZE);
+    mfree(ptr_comm_i, ecc_frost_ristretto255_sha512_NONCECOMMITMENTPAIRSIZE);
+    mfree(ptr_sig_share_i, ecc_frost_ristretto255_sha512_SCALARSIZE);
+    mfree(ptr_commitment_list, commitment_list_len * ecc_frost_ristretto255_sha512_COMMITMENTSIZE);
+    mfree(ptr_group_public_key, ecc_frost_ristretto255_sha512_PUBLICKEYSIZE);
+    mfree(ptr_msg, msg_len);
+    return fun_ret;
+  };
+  Module.ecc_frost_ristretto255_sha512_H1 = (h1, m, m_len) => {
+    const ptr_h1 = mput(h1, ecc_frost_ristretto255_sha512_SCALARSIZE);
+    const ptr_m = mput(m, m_len);
+    _ecc_frost_ristretto255_sha512_H1(ptr_h1, ptr_m, m_len);
+    mget(h1, ptr_h1, ecc_frost_ristretto255_sha512_SCALARSIZE);
+    mfree(ptr_h1, ecc_frost_ristretto255_sha512_SCALARSIZE);
+    mfree(ptr_m, m_len);
+  };
+  Module.ecc_frost_ristretto255_sha512_H1_2 = (h1, m1, m1_len, m2, m2_len) => {
+    const ptr_h1 = mput(h1, ecc_frost_ristretto255_sha512_SCALARSIZE);
+    const ptr_m1 = mput(m1, m1_len);
+    const ptr_m2 = mput(m2, m2_len);
+    _ecc_frost_ristretto255_sha512_H1_2(ptr_h1, ptr_m1, m1_len, ptr_m2, m2_len);
+    mget(h1, ptr_h1, ecc_frost_ristretto255_sha512_SCALARSIZE);
+    mfree(ptr_h1, ecc_frost_ristretto255_sha512_SCALARSIZE);
+    mfree(ptr_m1, m1_len);
+    mfree(ptr_m2, m2_len);
+  };
+  Module.ecc_frost_ristretto255_sha512_H2 = (h2, m, m_len) => {
+    const ptr_h2 = mput(h2, ecc_frost_ristretto255_sha512_SCALARSIZE);
+    const ptr_m = mput(m, m_len);
+    _ecc_frost_ristretto255_sha512_H2(ptr_h2, ptr_m, m_len);
+    mget(h2, ptr_h2, ecc_frost_ristretto255_sha512_SCALARSIZE);
+    mfree(ptr_h2, ecc_frost_ristretto255_sha512_SCALARSIZE);
+    mfree(ptr_m, m_len);
+  };
+  Module.ecc_frost_ristretto255_sha512_H2_3 = (h2, m1, m1_len, m2, m2_len, m3, m3_len) => {
+    const ptr_h2 = mput(h2, ecc_frost_ristretto255_sha512_SCALARSIZE);
+    const ptr_m1 = mput(m1, m1_len);
+    const ptr_m2 = mput(m2, m2_len);
+    const ptr_m3 = mput(m3, m3_len);
+    _ecc_frost_ristretto255_sha512_H2_3(ptr_h2, ptr_m1, m1_len, ptr_m2, m2_len, ptr_m3, m3_len);
+    mget(h2, ptr_h2, ecc_frost_ristretto255_sha512_SCALARSIZE);
+    mfree(ptr_h2, ecc_frost_ristretto255_sha512_SCALARSIZE);
+    mfree(ptr_m1, m1_len);
+    mfree(ptr_m2, m2_len);
+    mfree(ptr_m3, m3_len);
+  };
+  Module.ecc_frost_ristretto255_sha512_H3 = (h3, m, m_len) => {
+    const ptr_h3 = mput(h3, ecc_frost_ristretto255_sha512_SCALARSIZE);
+    const ptr_m = mput(m, m_len);
+    _ecc_frost_ristretto255_sha512_H3(ptr_h3, ptr_m, m_len);
+    mget(h3, ptr_h3, ecc_frost_ristretto255_sha512_SCALARSIZE);
+    mfree(ptr_h3, ecc_frost_ristretto255_sha512_SCALARSIZE);
+    mfree(ptr_m, m_len);
+  };
+  Module.ecc_frost_ristretto255_sha512_H3_2 = (h3, m1, m1_len, m2, m2_len) => {
+    const ptr_h3 = mput(h3, ecc_frost_ristretto255_sha512_SCALARSIZE);
+    const ptr_m1 = mput(m1, m1_len);
+    const ptr_m2 = mput(m2, m2_len);
+    _ecc_frost_ristretto255_sha512_H3_2(ptr_h3, ptr_m1, m1_len, ptr_m2, m2_len);
+    mget(h3, ptr_h3, ecc_frost_ristretto255_sha512_SCALARSIZE);
+    mfree(ptr_h3, ecc_frost_ristretto255_sha512_SCALARSIZE);
+    mfree(ptr_m1, m1_len);
+    mfree(ptr_m2, m2_len);
+  };
+  Module.ecc_frost_ristretto255_sha512_H4 = (h4, m, m_len) => {
+    const ptr_h4 = mput(h4, 64);
+    const ptr_m = mput(m, m_len);
+    _ecc_frost_ristretto255_sha512_H4(ptr_h4, ptr_m, m_len);
+    mget(h4, ptr_h4, 64);
+    mfree(ptr_h4, 64);
+    mfree(ptr_m, m_len);
+  };
+  Module.ecc_frost_ristretto255_sha512_H5 = (h5, m, m_len) => {
+    const ptr_h5 = mput(h5, 64);
+    const ptr_m = mput(m, m_len);
+    _ecc_frost_ristretto255_sha512_H5(ptr_h5, ptr_m, m_len);
+    mget(h5, ptr_h5, 64);
+    mfree(ptr_h5, 64);
+    mfree(ptr_m, m_len);
+  };
+  Module.ecc_frost_ristretto255_sha512_prime_order_sign = (signature, msg, msg_len, SK) => {
+    const ptr_signature = mput(signature, ecc_frost_ristretto255_sha512_SIGNATURESIZE);
+    const ptr_msg = mput(msg, msg_len);
+    const ptr_SK = mput(SK, ecc_frost_ristretto255_sha512_SECRETKEYSIZE);
+    _ecc_frost_ristretto255_sha512_prime_order_sign(ptr_signature, ptr_msg, msg_len, ptr_SK);
+    mget(signature, ptr_signature, ecc_frost_ristretto255_sha512_SIGNATURESIZE);
+    mfree(ptr_signature, ecc_frost_ristretto255_sha512_SIGNATURESIZE);
+    mfree(ptr_msg, msg_len);
+    mfree(ptr_SK, ecc_frost_ristretto255_sha512_SECRETKEYSIZE);
+  };
+  Module.ecc_frost_ristretto255_sha512_prime_order_verify = (msg, msg_len, signature, PK) => {
+    const ptr_msg = mput(msg, msg_len);
+    const ptr_signature = mput(signature, ecc_frost_ristretto255_sha512_SIGNATURESIZE);
+    const ptr_PK = mput(PK, ecc_frost_ristretto255_sha512_PUBLICKEYSIZE);
+    const fun_ret = _ecc_frost_ristretto255_sha512_prime_order_verify(ptr_msg, msg_len, ptr_signature, ptr_PK);
+    mfree(ptr_msg, msg_len);
+    mfree(ptr_signature, ecc_frost_ristretto255_sha512_SIGNATURESIZE);
+    mfree(ptr_PK, ecc_frost_ristretto255_sha512_PUBLICKEYSIZE);
+    return fun_ret;
+  };
+  Module.ecc_frost_ristretto255_sha512_trusted_dealer_keygen_with_coefficients = (participant_private_keys, group_public_key, vss_commitment, polynomial_coefficients, secret_key, n, t, coefficients) => {
+    const ptr_participant_private_keys = mput(participant_private_keys, n * ecc_frost_ristretto255_sha512_POINTSIZE);
+    const ptr_group_public_key = mput(group_public_key, ecc_frost_ristretto255_sha512_ELEMENTSIZE);
+    const ptr_vss_commitment = mput(vss_commitment, t * ecc_frost_ristretto255_sha512_ELEMENTSIZE);
+    const ptr_polynomial_coefficients = mput(polynomial_coefficients, t * ecc_frost_ristretto255_sha512_SCALARSIZE);
+    const ptr_secret_key = mput(secret_key, ecc_frost_ristretto255_sha512_SCALARSIZE);
+    const ptr_coefficients = mput(coefficients, (t - 1) * ecc_frost_ristretto255_sha512_SCALARSIZE);
+    _ecc_frost_ristretto255_sha512_trusted_dealer_keygen_with_coefficients(ptr_participant_private_keys, ptr_group_public_key, ptr_vss_commitment, ptr_polynomial_coefficients, ptr_secret_key, n, t, ptr_coefficients);
+    mget(participant_private_keys, ptr_participant_private_keys, n * ecc_frost_ristretto255_sha512_POINTSIZE);
+    mget(group_public_key, ptr_group_public_key, ecc_frost_ristretto255_sha512_ELEMENTSIZE);
+    mget(vss_commitment, ptr_vss_commitment, t * ecc_frost_ristretto255_sha512_ELEMENTSIZE);
+    mget(polynomial_coefficients, ptr_polynomial_coefficients, t * ecc_frost_ristretto255_sha512_SCALARSIZE);
+    mfree(ptr_participant_private_keys, n * ecc_frost_ristretto255_sha512_POINTSIZE);
+    mfree(ptr_group_public_key, ecc_frost_ristretto255_sha512_ELEMENTSIZE);
+    mfree(ptr_vss_commitment, t * ecc_frost_ristretto255_sha512_ELEMENTSIZE);
+    mfree(ptr_polynomial_coefficients, t * ecc_frost_ristretto255_sha512_SCALARSIZE);
+    mfree(ptr_secret_key, ecc_frost_ristretto255_sha512_SCALARSIZE);
+    mfree(ptr_coefficients, (t - 1) * ecc_frost_ristretto255_sha512_SCALARSIZE);
+  };
+  Module.ecc_frost_ristretto255_sha512_secret_share_shard = (secret_key_shares, polynomial_coefficients, s, coefficients, n, t) => {
+    const ptr_secret_key_shares = mput(secret_key_shares, n * ecc_frost_ristretto255_sha512_POINTSIZE);
+    const ptr_polynomial_coefficients = mput(polynomial_coefficients, t * ecc_frost_ristretto255_sha512_SCALARSIZE);
+    const ptr_s = mput(s, ecc_frost_ristretto255_sha512_SCALARSIZE);
+    const ptr_coefficients = mput(coefficients, (t - 1) * ecc_frost_ristretto255_sha512_SCALARSIZE);
+    const fun_ret = _ecc_frost_ristretto255_sha512_secret_share_shard(ptr_secret_key_shares, ptr_polynomial_coefficients, ptr_s, ptr_coefficients, n, t);
+    mget(secret_key_shares, ptr_secret_key_shares, n * ecc_frost_ristretto255_sha512_POINTSIZE);
+    mget(polynomial_coefficients, ptr_polynomial_coefficients, t * ecc_frost_ristretto255_sha512_SCALARSIZE);
+    mfree(ptr_secret_key_shares, n * ecc_frost_ristretto255_sha512_POINTSIZE);
+    mfree(ptr_polynomial_coefficients, t * ecc_frost_ristretto255_sha512_SCALARSIZE);
+    mfree(ptr_s, ecc_frost_ristretto255_sha512_SCALARSIZE);
+    mfree(ptr_coefficients, (t - 1) * ecc_frost_ristretto255_sha512_SCALARSIZE);
+    return fun_ret;
+  };
+  Module.ecc_frost_ristretto255_sha512_secret_share_combine = (s, shares, shares_len) => {
+    const ptr_s = mput(s, ecc_frost_ristretto255_sha512_SCALARSIZE);
+    const ptr_shares = mput(shares, shares_len * ecc_frost_ristretto255_sha512_POINTSIZE);
+    const fun_ret = _ecc_frost_ristretto255_sha512_secret_share_combine(ptr_s, ptr_shares, shares_len);
+    mget(s, ptr_s, ecc_frost_ristretto255_sha512_SCALARSIZE);
+    mfree(ptr_s, ecc_frost_ristretto255_sha512_SCALARSIZE);
+    mfree(ptr_shares, shares_len * ecc_frost_ristretto255_sha512_POINTSIZE);
+    return fun_ret;
+  };
+  Module.ecc_frost_ristretto255_sha512_polynomial_evaluate = (value, x, coeffs, coeffs_len) => {
+    const ptr_value = mput(value, ecc_frost_ristretto255_sha512_SCALARSIZE);
+    const ptr_x = mput(x, ecc_frost_ristretto255_sha512_SCALARSIZE);
+    const ptr_coeffs = mput(coeffs, coeffs_len * ecc_frost_ristretto255_sha512_SCALARSIZE);
+    _ecc_frost_ristretto255_sha512_polynomial_evaluate(ptr_value, ptr_x, ptr_coeffs, coeffs_len);
+    mget(value, ptr_value, ecc_frost_ristretto255_sha512_SCALARSIZE);
+    mfree(ptr_value, ecc_frost_ristretto255_sha512_SCALARSIZE);
+    mfree(ptr_x, ecc_frost_ristretto255_sha512_SCALARSIZE);
+    mfree(ptr_coeffs, coeffs_len * ecc_frost_ristretto255_sha512_SCALARSIZE);
+  };
+  Module.ecc_frost_ristretto255_sha512_polynomial_interpolate_constant = (f_zero, points, points_len) => {
+    const ptr_f_zero = mput(f_zero, ecc_frost_ristretto255_sha512_SCALARSIZE);
+    const ptr_points = mput(points, points_len * ecc_frost_ristretto255_sha512_POINTSIZE);
+    _ecc_frost_ristretto255_sha512_polynomial_interpolate_constant(ptr_f_zero, ptr_points, points_len);
+    mget(f_zero, ptr_f_zero, ecc_frost_ristretto255_sha512_SCALARSIZE);
+    mfree(ptr_f_zero, ecc_frost_ristretto255_sha512_SCALARSIZE);
+    mfree(ptr_points, points_len * ecc_frost_ristretto255_sha512_POINTSIZE);
+  };
+  Module.ecc_frost_ristretto255_sha512_vss_commit = (vss_commitment, coeffs, coeffs_len) => {
+    const ptr_vss_commitment = mput(vss_commitment, coeffs_len * ecc_frost_ristretto255_sha512_ELEMENTSIZE);
+    const ptr_coeffs = mput(coeffs, coeffs_len * ecc_frost_ristretto255_sha512_SCALARSIZE);
+    _ecc_frost_ristretto255_sha512_vss_commit(ptr_vss_commitment, ptr_coeffs, coeffs_len);
+    mget(vss_commitment, ptr_vss_commitment, coeffs_len * ecc_frost_ristretto255_sha512_ELEMENTSIZE);
+    mfree(ptr_vss_commitment, coeffs_len * ecc_frost_ristretto255_sha512_ELEMENTSIZE);
+    mfree(ptr_coeffs, coeffs_len * ecc_frost_ristretto255_sha512_SCALARSIZE);
+  };
+  Module.ecc_frost_ristretto255_sha512_vss_verify = (share_i, vss_commitment, t) => {
+    const ptr_share_i = mput(share_i, ecc_frost_ristretto255_sha512_POINTSIZE);
+    const ptr_vss_commitment = mput(vss_commitment, t * ecc_frost_ristretto255_sha512_ELEMENTSIZE);
+    const fun_ret = _ecc_frost_ristretto255_sha512_vss_verify(ptr_share_i, ptr_vss_commitment, t);
+    mfree(ptr_share_i, ecc_frost_ristretto255_sha512_POINTSIZE);
+    mfree(ptr_vss_commitment, t * ecc_frost_ristretto255_sha512_ELEMENTSIZE);
+    return fun_ret;
+  };
+  Module.ecc_frost_ristretto255_sha512_derive_group_info = (PK, participant_public_keys, n, t, vss_commitment) => {
+    const ptr_PK = mput(PK, ecc_frost_ristretto255_sha512_ELEMENTSIZE);
+    const ptr_participant_public_keys = mput(participant_public_keys, n * ecc_frost_ristretto255_sha512_ELEMENTSIZE);
+    const ptr_vss_commitment = mput(vss_commitment, t * ecc_frost_ristretto255_sha512_ELEMENTSIZE);
+    _ecc_frost_ristretto255_sha512_derive_group_info(ptr_PK, ptr_participant_public_keys, n, t, ptr_vss_commitment);
+    mget(PK, ptr_PK, ecc_frost_ristretto255_sha512_ELEMENTSIZE);
+    mget(participant_public_keys, ptr_participant_public_keys, n * ecc_frost_ristretto255_sha512_ELEMENTSIZE);
+    mfree(ptr_PK, ecc_frost_ristretto255_sha512_ELEMENTSIZE);
+    mfree(ptr_participant_public_keys, n * ecc_frost_ristretto255_sha512_ELEMENTSIZE);
+    mfree(ptr_vss_commitment, t * ecc_frost_ristretto255_sha512_ELEMENTSIZE);
+  };
+  const ecc_pre_schema1_MESSAGESIZE = 576;
+  Module.ecc_pre_schema1_MESSAGESIZE = ecc_pre_schema1_MESSAGESIZE;
+  const ecc_pre_schema1_SEEDSIZE = 32;
+  Module.ecc_pre_schema1_SEEDSIZE = ecc_pre_schema1_SEEDSIZE;
+  const ecc_pre_schema1_PUBLICKEYSIZE = 48;
+  Module.ecc_pre_schema1_PUBLICKEYSIZE = ecc_pre_schema1_PUBLICKEYSIZE;
+  const ecc_pre_schema1_PRIVATEKEYSIZE = 32;
+  Module.ecc_pre_schema1_PRIVATEKEYSIZE = ecc_pre_schema1_PRIVATEKEYSIZE;
+  const ecc_pre_schema1_SIGNINGPUBLICKEYSIZE = 32;
+  Module.ecc_pre_schema1_SIGNINGPUBLICKEYSIZE = ecc_pre_schema1_SIGNINGPUBLICKEYSIZE;
+  const ecc_pre_schema1_SIGNINGPRIVATEKEYSIZE = 64;
+  Module.ecc_pre_schema1_SIGNINGPRIVATEKEYSIZE = ecc_pre_schema1_SIGNINGPRIVATEKEYSIZE;
+  const ecc_pre_schema1_SIGNATURESIZE = 64;
+  Module.ecc_pre_schema1_SIGNATURESIZE = ecc_pre_schema1_SIGNATURESIZE;
+  const ecc_pre_schema1_CIPHERTEXTLEVEL1SIZE = 752;
+  Module.ecc_pre_schema1_CIPHERTEXTLEVEL1SIZE = ecc_pre_schema1_CIPHERTEXTLEVEL1SIZE;
+  const ecc_pre_schema1_CIPHERTEXTLEVEL2SIZE = 2096;
+  Module.ecc_pre_schema1_CIPHERTEXTLEVEL2SIZE = ecc_pre_schema1_CIPHERTEXTLEVEL2SIZE;
+  const ecc_pre_schema1_REKEYSIZE = 816;
+  Module.ecc_pre_schema1_REKEYSIZE = ecc_pre_schema1_REKEYSIZE;
+  Module.ecc_pre_schema1_MessageGen = (m) => {
+    const ptr_m = mput(m, ecc_pre_schema1_MESSAGESIZE);
+    _ecc_pre_schema1_MessageGen(ptr_m);
+    mget(m, ptr_m, ecc_pre_schema1_MESSAGESIZE);
+    mfree(ptr_m, ecc_pre_schema1_MESSAGESIZE);
+  };
+  Module.ecc_pre_schema1_DeriveKey = (pk, sk, seed) => {
+    const ptr_pk = mput(pk, ecc_pre_schema1_PUBLICKEYSIZE);
+    const ptr_sk = mput(sk, ecc_pre_schema1_PRIVATEKEYSIZE);
+    const ptr_seed = mput(seed, ecc_pre_schema1_SEEDSIZE);
+    _ecc_pre_schema1_DeriveKey(ptr_pk, ptr_sk, ptr_seed);
+    mget(pk, ptr_pk, ecc_pre_schema1_PUBLICKEYSIZE);
+    mget(sk, ptr_sk, ecc_pre_schema1_PRIVATEKEYSIZE);
+    mfree(ptr_pk, ecc_pre_schema1_PUBLICKEYSIZE);
+    mfree(ptr_sk, ecc_pre_schema1_PRIVATEKEYSIZE);
+    mfree(ptr_seed, ecc_pre_schema1_SEEDSIZE);
+  };
+  Module.ecc_pre_schema1_KeyGen = (pk, sk) => {
+    const ptr_pk = mput(pk, ecc_pre_schema1_PUBLICKEYSIZE);
+    const ptr_sk = mput(sk, ecc_pre_schema1_PRIVATEKEYSIZE);
+    _ecc_pre_schema1_KeyGen(ptr_pk, ptr_sk);
+    mget(pk, ptr_pk, ecc_pre_schema1_PUBLICKEYSIZE);
+    mget(sk, ptr_sk, ecc_pre_schema1_PRIVATEKEYSIZE);
+    mfree(ptr_pk, ecc_pre_schema1_PUBLICKEYSIZE);
+    mfree(ptr_sk, ecc_pre_schema1_PRIVATEKEYSIZE);
+  };
+  Module.ecc_pre_schema1_DeriveSigningKey = (spk, ssk, seed) => {
+    const ptr_spk = mput(spk, ecc_pre_schema1_SIGNINGPUBLICKEYSIZE);
+    const ptr_ssk = mput(ssk, ecc_pre_schema1_SIGNINGPRIVATEKEYSIZE);
+    const ptr_seed = mput(seed, ecc_pre_schema1_SEEDSIZE);
+    _ecc_pre_schema1_DeriveSigningKey(ptr_spk, ptr_ssk, ptr_seed);
+    mget(spk, ptr_spk, ecc_pre_schema1_SIGNINGPUBLICKEYSIZE);
+    mget(ssk, ptr_ssk, ecc_pre_schema1_SIGNINGPRIVATEKEYSIZE);
+    mfree(ptr_spk, ecc_pre_schema1_SIGNINGPUBLICKEYSIZE);
+    mfree(ptr_ssk, ecc_pre_schema1_SIGNINGPRIVATEKEYSIZE);
+    mfree(ptr_seed, ecc_pre_schema1_SEEDSIZE);
+  };
+  Module.ecc_pre_schema1_SigningKeyGen = (spk, ssk) => {
+    const ptr_spk = mput(spk, ecc_pre_schema1_SIGNINGPUBLICKEYSIZE);
+    const ptr_ssk = mput(ssk, ecc_pre_schema1_SIGNINGPRIVATEKEYSIZE);
+    _ecc_pre_schema1_SigningKeyGen(ptr_spk, ptr_ssk);
+    mget(spk, ptr_spk, ecc_pre_schema1_SIGNINGPUBLICKEYSIZE);
+    mget(ssk, ptr_ssk, ecc_pre_schema1_SIGNINGPRIVATEKEYSIZE);
+    mfree(ptr_spk, ecc_pre_schema1_SIGNINGPUBLICKEYSIZE);
+    mfree(ptr_ssk, ecc_pre_schema1_SIGNINGPRIVATEKEYSIZE);
+  };
+  Module.ecc_pre_schema1_EncryptWithSeed = (C_j_raw, m, pk_j, spk_i, ssk_i, seed) => {
+    const ptr_C_j_raw = mput(C_j_raw, ecc_pre_schema1_CIPHERTEXTLEVEL1SIZE);
+    const ptr_m = mput(m, ecc_pre_schema1_MESSAGESIZE);
+    const ptr_pk_j = mput(pk_j, ecc_pre_schema1_PUBLICKEYSIZE);
+    const ptr_spk_i = mput(spk_i, ecc_pre_schema1_SIGNINGPUBLICKEYSIZE);
+    const ptr_ssk_i = mput(ssk_i, ecc_pre_schema1_SIGNINGPRIVATEKEYSIZE);
+    const ptr_seed = mput(seed, ecc_pre_schema1_SEEDSIZE);
+    _ecc_pre_schema1_EncryptWithSeed(ptr_C_j_raw, ptr_m, ptr_pk_j, ptr_spk_i, ptr_ssk_i, ptr_seed);
+    mget(C_j_raw, ptr_C_j_raw, ecc_pre_schema1_CIPHERTEXTLEVEL1SIZE);
+    mfree(ptr_C_j_raw, ecc_pre_schema1_CIPHERTEXTLEVEL1SIZE);
+    mfree(ptr_m, ecc_pre_schema1_MESSAGESIZE);
+    mfree(ptr_pk_j, ecc_pre_schema1_PUBLICKEYSIZE);
+    mfree(ptr_spk_i, ecc_pre_schema1_SIGNINGPUBLICKEYSIZE);
+    mfree(ptr_ssk_i, ecc_pre_schema1_SIGNINGPRIVATEKEYSIZE);
+    mfree(ptr_seed, ecc_pre_schema1_SEEDSIZE);
+  };
+  Module.ecc_pre_schema1_Encrypt = (C_j_raw, m, pk_j, spk_i, ssk_i) => {
+    const ptr_C_j_raw = mput(C_j_raw, ecc_pre_schema1_CIPHERTEXTLEVEL1SIZE);
+    const ptr_m = mput(m, ecc_pre_schema1_MESSAGESIZE);
+    const ptr_pk_j = mput(pk_j, ecc_pre_schema1_PUBLICKEYSIZE);
+    const ptr_spk_i = mput(spk_i, ecc_pre_schema1_SIGNINGPUBLICKEYSIZE);
+    const ptr_ssk_i = mput(ssk_i, ecc_pre_schema1_SIGNINGPRIVATEKEYSIZE);
+    _ecc_pre_schema1_Encrypt(ptr_C_j_raw, ptr_m, ptr_pk_j, ptr_spk_i, ptr_ssk_i);
+    mget(C_j_raw, ptr_C_j_raw, ecc_pre_schema1_CIPHERTEXTLEVEL1SIZE);
+    mfree(ptr_C_j_raw, ecc_pre_schema1_CIPHERTEXTLEVEL1SIZE);
+    mfree(ptr_m, ecc_pre_schema1_MESSAGESIZE);
+    mfree(ptr_pk_j, ecc_pre_schema1_PUBLICKEYSIZE);
+    mfree(ptr_spk_i, ecc_pre_schema1_SIGNINGPUBLICKEYSIZE);
+    mfree(ptr_ssk_i, ecc_pre_schema1_SIGNINGPRIVATEKEYSIZE);
+  };
+  Module.ecc_pre_schema1_ReKeyGen = (tk_i_j_raw, sk_i, pk_j, spk_i, ssk_i) => {
+    const ptr_tk_i_j_raw = mput(tk_i_j_raw, ecc_pre_schema1_REKEYSIZE);
+    const ptr_sk_i = mput(sk_i, ecc_pre_schema1_PRIVATEKEYSIZE);
+    const ptr_pk_j = mput(pk_j, ecc_pre_schema1_PUBLICKEYSIZE);
+    const ptr_spk_i = mput(spk_i, ecc_pre_schema1_SIGNINGPUBLICKEYSIZE);
+    const ptr_ssk_i = mput(ssk_i, ecc_pre_schema1_SIGNINGPRIVATEKEYSIZE);
+    _ecc_pre_schema1_ReKeyGen(ptr_tk_i_j_raw, ptr_sk_i, ptr_pk_j, ptr_spk_i, ptr_ssk_i);
+    mget(tk_i_j_raw, ptr_tk_i_j_raw, ecc_pre_schema1_REKEYSIZE);
+    mfree(ptr_tk_i_j_raw, ecc_pre_schema1_REKEYSIZE);
+    mfree(ptr_sk_i, ecc_pre_schema1_PRIVATEKEYSIZE);
+    mfree(ptr_pk_j, ecc_pre_schema1_PUBLICKEYSIZE);
+    mfree(ptr_spk_i, ecc_pre_schema1_SIGNINGPUBLICKEYSIZE);
+    mfree(ptr_ssk_i, ecc_pre_schema1_SIGNINGPRIVATEKEYSIZE);
+  };
+  Module.ecc_pre_schema1_ReEncrypt = (C_j_raw, C_i_raw, tk_i_j_raw, spk_i, pk_j, spk, ssk) => {
+    const ptr_C_j_raw = mput(C_j_raw, ecc_pre_schema1_CIPHERTEXTLEVEL2SIZE);
+    const ptr_C_i_raw = mput(C_i_raw, ecc_pre_schema1_CIPHERTEXTLEVEL1SIZE);
+    const ptr_tk_i_j_raw = mput(tk_i_j_raw, ecc_pre_schema1_REKEYSIZE);
+    const ptr_spk_i = mput(spk_i, ecc_pre_schema1_SIGNINGPUBLICKEYSIZE);
+    const ptr_pk_j = mput(pk_j, ecc_pre_schema1_PUBLICKEYSIZE);
+    const ptr_spk = mput(spk, ecc_pre_schema1_SIGNINGPUBLICKEYSIZE);
+    const ptr_ssk = mput(ssk, ecc_pre_schema1_SIGNINGPRIVATEKEYSIZE);
+    const fun_ret = _ecc_pre_schema1_ReEncrypt(ptr_C_j_raw, ptr_C_i_raw, ptr_tk_i_j_raw, ptr_spk_i, ptr_pk_j, ptr_spk, ptr_ssk);
+    mget(C_j_raw, ptr_C_j_raw, ecc_pre_schema1_CIPHERTEXTLEVEL2SIZE);
+    mfree(ptr_C_j_raw, ecc_pre_schema1_CIPHERTEXTLEVEL2SIZE);
+    mfree(ptr_C_i_raw, ecc_pre_schema1_CIPHERTEXTLEVEL1SIZE);
+    mfree(ptr_tk_i_j_raw, ecc_pre_schema1_REKEYSIZE);
+    mfree(ptr_spk_i, ecc_pre_schema1_SIGNINGPUBLICKEYSIZE);
+    mfree(ptr_pk_j, ecc_pre_schema1_PUBLICKEYSIZE);
+    mfree(ptr_spk, ecc_pre_schema1_SIGNINGPUBLICKEYSIZE);
+    mfree(ptr_ssk, ecc_pre_schema1_SIGNINGPRIVATEKEYSIZE);
+    return fun_ret;
+  };
+  Module.ecc_pre_schema1_DecryptLevel1 = (m, C_i_raw, sk_i, spk_i) => {
+    const ptr_m = mput(m, ecc_pre_schema1_MESSAGESIZE);
+    const ptr_C_i_raw = mput(C_i_raw, ecc_pre_schema1_CIPHERTEXTLEVEL1SIZE);
+    const ptr_sk_i = mput(sk_i, ecc_pre_schema1_PRIVATEKEYSIZE);
+    const ptr_spk_i = mput(spk_i, ecc_pre_schema1_SIGNINGPUBLICKEYSIZE);
+    const fun_ret = _ecc_pre_schema1_DecryptLevel1(ptr_m, ptr_C_i_raw, ptr_sk_i, ptr_spk_i);
+    mget(m, ptr_m, ecc_pre_schema1_MESSAGESIZE);
+    mfree(ptr_m, ecc_pre_schema1_MESSAGESIZE);
+    mfree(ptr_C_i_raw, ecc_pre_schema1_CIPHERTEXTLEVEL1SIZE);
+    mfree(ptr_sk_i, ecc_pre_schema1_PRIVATEKEYSIZE);
+    mfree(ptr_spk_i, ecc_pre_schema1_SIGNINGPUBLICKEYSIZE);
+    return fun_ret;
+  };
+  Module.ecc_pre_schema1_DecryptLevel2 = (m, C_j_raw, sk_j, spk) => {
+    const ptr_m = mput(m, ecc_pre_schema1_MESSAGESIZE);
+    const ptr_C_j_raw = mput(C_j_raw, ecc_pre_schema1_CIPHERTEXTLEVEL2SIZE);
+    const ptr_sk_j = mput(sk_j, ecc_pre_schema1_PRIVATEKEYSIZE);
+    const ptr_spk = mput(spk, ecc_pre_schema1_SIGNINGPUBLICKEYSIZE);
+    const fun_ret = _ecc_pre_schema1_DecryptLevel2(ptr_m, ptr_C_j_raw, ptr_sk_j, ptr_spk);
+    mget(m, ptr_m, ecc_pre_schema1_MESSAGESIZE);
+    mfree(ptr_m, ecc_pre_schema1_MESSAGESIZE);
+    mfree(ptr_C_j_raw, ecc_pre_schema1_CIPHERTEXTLEVEL2SIZE);
+    mfree(ptr_sk_j, ecc_pre_schema1_PRIVATEKEYSIZE);
+    mfree(ptr_spk, ecc_pre_schema1_SIGNINGPUBLICKEYSIZE);
+    return fun_ret;
+  };
+  return libecc_module2.ready;
+};
+const libecc_promise = libecc_module();
+libecc_promise.then((module2) => {
+});
+async function pre_schema1_MessageGen() {
+  const libecc = await libecc_module();
+  let m = new Uint8Array(libecc.ecc_pre_schema1_MESSAGESIZE);
+  await libecc.ecc_pre_schema1_MessageGen(m);
+  return m;
+}
+async function pre_schema1_KeyGen() {
+  const libecc = await libecc_module();
+  let pk = new Uint8Array(libecc.ecc_pre_schema1_PUBLICKEYSIZE);
+  let sk = new Uint8Array(libecc.ecc_pre_schema1_PRIVATEKEYSIZE);
+  await libecc.ecc_pre_schema1_KeyGen(pk, sk);
+  return { pk, sk };
+}
+async function pre_schema1_SigningKeyGen() {
+  const libecc = await libecc_module();
+  let spk = new Uint8Array(libecc.ecc_pre_schema1_SIGNINGPUBLICKEYSIZE);
+  let ssk = new Uint8Array(libecc.ecc_pre_schema1_SIGNINGPRIVATEKEYSIZE);
+  await libecc.ecc_pre_schema1_SigningKeyGen(spk, ssk);
+  return { spk, ssk };
+}
+async function pre_schema1_Encrypt(m, pk_j, signing_i) {
+  const libecc = await libecc_module();
+  let C_j_raw = new Uint8Array(libecc.ecc_pre_schema1_CIPHERTEXTLEVEL1SIZE);
+  await libecc.ecc_pre_schema1_Encrypt(
+    C_j_raw,
+    m,
+    pk_j,
+    signing_i.spk,
+    signing_i.ssk
+  );
+  return C_j_raw;
+}
+async function pre_schema1_ReKeyGen(sk_i, pk_j, signing_i) {
+  const libecc = await libecc_module();
+  let tk_i_j_raw = new Uint8Array(libecc.ecc_pre_schema1_REKEYSIZE);
+  await libecc.ecc_pre_schema1_ReKeyGen(
+    tk_i_j_raw,
+    sk_i,
+    pk_j,
+    signing_i.spk,
+    signing_i.ssk
+  );
+  return tk_i_j_raw;
+}
+async function pre_schema1_DecryptLevel1(C_i_raw, sk_i, spk_i) {
+  const libecc = await libecc_module();
+  let m = new Uint8Array(libecc.ecc_pre_schema1_MESSAGESIZE);
+  const r = await libecc.ecc_pre_schema1_DecryptLevel1(
+    m,
+    C_i_raw,
+    sk_i,
+    spk_i
+  );
+  return r === 0 ? m : null;
+}
+async function pre_schema1_DecryptLevel2(C_j_raw, sk_j, spk) {
+  const libecc = await libecc_module();
+  let m = new Uint8Array(libecc.ecc_pre_schema1_MESSAGESIZE);
+  const r = await libecc.ecc_pre_schema1_DecryptLevel2(
+    m,
+    C_j_raw,
+    sk_j,
+    spk
+  );
+  return r === 0 ? m : null;
+}
+const keyFilePath = GlobalValueManager$1.keyPath;
+class KeyManager {
+  keys;
+  signingKeys;
+  checkInit() {
+    if (!this.keys || !this.signingKeys) {
+      throw new Error("Keys are not initialized");
+    }
+  }
+  /**
+   * Restore the keys and store to file.
+   * @param {*} param0
+   */
+  restoreKeys({ pk, sk, spk, ssk }) {
+    const keysStr = `${pk}
+${sk}
+${spk}
+${ssk}`;
+    fs.writeFileSync(keyFilePath, keysStr);
+    this.keys = {
+      pk: new Uint8Array(Buffer.from(pk, "base64")),
+      sk: new Uint8Array(Buffer.from(sk, "base64"))
+    };
+    this.signingKeys = {
+      spk: new Uint8Array(Buffer.from(spk, "base64")),
+      ssk: new Uint8Array(Buffer.from(ssk, "base64"))
+    };
+    if (this.keys.pk.length !== 48 || this.keys.sk.length !== 32 || this.signingKeys.spk.length !== 32 || this.signingKeys.ssk.length !== 64) {
+      throw new Error("Keys are not in correct format");
+    }
+  }
+  /**
+   * Initialize the keys from file, or create keys and store to file.
+   * @returns
+   */
+  async initKeys() {
+    if (this.keys && this.signingKeys) {
+      return;
+    }
+    logger.info("Initializing keys...");
+    try {
+      const content = (await promises.readFile(keyFilePath, "utf-8")).split("\n");
+      this.keys = {
+        pk: new Uint8Array(Buffer.from(content[0], "base64")),
+        sk: new Uint8Array(Buffer.from(content[1], "base64"))
+      };
+      this.signingKeys = {
+        spk: new Uint8Array(Buffer.from(content[2], "base64")),
+        ssk: new Uint8Array(Buffer.from(content[3], "base64"))
+      };
+    } catch (error) {
+      if (error.code === "ENOENT") {
+        logger.info("Keys not found. Creating keys...");
+        this.keys = await pre_schema1_KeyGen();
+        this.signingKeys = await pre_schema1_SigningKeyGen();
+        if (!this.keys || !this.signingKeys) throw new Error("Failed to generate keys");
+        const keysStr = `${Buffer.from(this.keys.pk).toString("base64")}
+${Buffer.from(this.keys.sk).toString("base64")}
+${Buffer.from(this.signingKeys.spk).toString("base64")}
+${Buffer.from(this.signingKeys.ssk).toString("base64")}`;
+        await promises.writeFile(keyFilePath, keysStr);
+      } else {
+        throw error;
+      }
+    }
+    if (this.keys.pk.length !== 48 || this.keys.sk.length !== 32 || this.signingKeys.spk.length !== 32 || this.signingKeys.ssk.length !== 64) {
+      throw new Error("Keys are not in correct format");
+    }
+    logger.info("Keys initialized.");
+  }
+  /**
+   * Encrypt the message with the public key.
+   * @param {string} message
+   * @returns {Promise<string>} encrypted cipher
+   */
+  async encrypt(message) {
+    this.checkInit();
+    logger.info("Encrypting message...");
+    const cipher = await pre_schema1_Encrypt(message, this.keys.pk, this.signingKeys);
+    if (cipher === null) throw new Error("Failed to encrypt message");
+    logger.debug(`cipher: ${cipher}`);
+    logger.info("Message encrypted.");
+    return {
+      cipher: Buffer.from(cipher).toString("base64"),
+      spk: Buffer.from(this.signingKeys.spk).toString("base64")
+    };
+  }
+  /**
+   * Decrypt the cipher with the private key.
+   * @param {string} cipher
+   * @param {string} spk
+   * @param {boolean} proxied proxied by server or not, default as false
+   * @returns {Promise<string | Uint8Array>} decrypted message
+   */
+  async decrypt(cipher, spk, proxied = false, toArray = false) {
+    this.checkInit();
+    logger.debug(`cipher: ${cipher}`);
+    logger.debug(`spk: ${spk}`);
+    logger.info("Decrypting message...");
+    const cipherArray = new Uint8Array(Buffer.from(cipher, "base64"));
+    const spkArray = new Uint8Array(Buffer.from(spk, "base64"));
+    let messageArray;
+    if (proxied) {
+      messageArray = await pre_schema1_DecryptLevel2(cipherArray, this.keys.sk, spkArray);
+    } else {
+      messageArray = await pre_schema1_DecryptLevel1(cipherArray, this.keys.sk, spkArray);
+    }
+    if (messageArray === null) throw new Error("Failed to decrypt cipher");
+    logger.info("Message decrypted.");
+    if (toArray) {
+      return messageArray;
+    }
+    const message = Buffer.from(messageArray).toString("base64");
+    logger.debug(`decrypted message: ${message}`);
+    return message;
+  }
+  /**
+   * Generate reencryption key based on requester's public key.
+   * @param {string} requesterPublicKey
+   * @param {string} spk
+   * @returns {Promise<string>} rekey
+   */
+  async rekeyGen(requesterPublicKey, spk) {
+    this.checkInit();
+    logger.info("Generating rekey...");
+    const reqPublicKeyArray = new Uint8Array(Buffer.from(requesterPublicKey, "base64"));
+    const rekeyArray = await pre_schema1_ReKeyGen(this.keys.sk, reqPublicKeyArray, this.signingKeys);
+    if (rekeyArray === null) throw new Error("Failed to generate rekey");
+    const rekey = Buffer.from(rekeyArray).toString("base64");
+    logger.debug(`rekey: ${rekey}`);
+    logger.info("Rekey generated.");
+    return rekey;
+  }
+  /**
+   * Generate a random message and its corresponding cipher.
+   * @returns {Promise<{ messageArray: Uint8Array, message: string, cipher: string, spk: string }>}
+   */
+  async randCipher() {
+    this.checkInit();
+    const messageArray = await pre_schema1_MessageGen();
+    const cipher = await pre_schema1_Encrypt(messageArray, this.keys.pk, this.signingKeys);
+    if (cipher === null) throw new Error("Failed to encrypt message");
+    return {
+      messageArray,
+      cipher: Buffer.from(cipher).toString("base64"),
+      spk: Buffer.from(this.signingKeys.spk).toString("base64")
+    };
+  }
+  /**
+   * get public key as strings
+   * @returns {string} public key
+   */
+  getPublicKeyString() {
+    this.checkInit();
+    return Buffer.from(this.keys.pk).toString("base64");
+  }
+  /**
+   * Get keys
+   * @returns 
+   */
+  getKeys() {
+    this.checkInit();
+    return this.keys;
+  }
+  /**
+   * Get signing keys
+   * @returns 
+   */
+  getSigningKeys() {
+    this.checkInit();
+    return this.signingKeys;
+  }
+  /**
+   * Get the serialized keys
+   * @returns
+   */
+  getKeyStrings() {
+    this.checkInit();
+    return {
+      pk: Buffer.from(this.keys.pk).toString("base64"),
+      sk: Buffer.from(this.keys.sk).toString("base64"),
+      spk: Buffer.from(this.signingKeys.spk).toString("base64"),
+      ssk: Buffer.from(this.signingKeys.ssk).toString("base64")
+    };
+  }
+}
+class RequestManager {
+  keyManager;
+  /**
+   *
+   * @param {KeyManager} keyManager
+   */
+  constructor(keyManager2) {
+    this.keyManager = keyManager2;
+    socket.on("rekey-ask", async (pk, cb) => {
+      const rekey = await keyManager2.rekeyGen(pk);
+      cb(rekey);
+    });
+    socket.on("new-request", () => {
+      logger.info("New request coming");
+      this.getRequestedListProcess();
+    });
+    socket.on("new-response", () => {
+      logger.info("New response coming");
+      this.getRequestListProcess();
+    });
+  }
+  /**
+   * Ask to request certain file.
+   * @param {*} requestInfo
+   */
+  requestFileProcess(requestInfo) {
+    logger.info(`Asking to request file ${requestInfo.fileId}...`);
+    socket.emit("request-file", requestInfo, (response) => {
+      const { errorMsg } = response;
+      if (errorMsg) {
+        logger.error(`Failed to request file ${requestInfo.fileId}: ${errorMsg}`);
+        GlobalValueManager$1.sendNotice("Failed to request file", "error");
+      } else {
+        logger.info(`Success to request file ${requestInfo.fileId}`);
+        this.getRequestListProcess();
+        GlobalValueManager$1.sendNotice("Success to request file", "success");
+      }
+    });
+  }
+  /**
+   * Ask to get all request list (client is requester)
+   */
+  getRequestListProcess() {
+    logger.info("Getting request list...");
+    socket.emit("get-request-list", (response) => {
+      const { requests, errorMsg } = response;
+      if (errorMsg) {
+        logger.error(`Failed to get request list: ${errorMsg}`);
+        GlobalValueManager$1.sendNotice("Failed to get request list", "error");
+      } else {
+        logger.info(`Success to get request list`);
+        GlobalValueManager$1.mainWindow?.webContents.send("request-list-res", requests);
+      }
+    });
+  }
+  /**
+   * Ask to get all requested list (client is file owner.)
+   */
+  getRequestedListProcess() {
+    socket.emit("get-requested-list", (response) => {
+      const { requests, errorMsg } = response;
+      logger.info("Getting requested list...");
+      if (errorMsg) {
+        logger.error(`Failed to get requested list: ${errorMsg}`);
+        GlobalValueManager$1.sendNotice("Failed to get requested list", "error");
+      } else {
+        logger.info(`Success to get requested list`);
+        this.autoReplyProcess(requests);
+        GlobalValueManager$1.mainWindow?.webContents.send("requested-list-res", requests);
+      }
+    });
+  }
+  /**
+   * Auto reply to requests based on the set whitelist and blacklist.
+   * @param {*} result
+   */
+  async autoReplyProcess(result) {
+    let changed = false;
+    const resultList = JSON.parse(result);
+    for (const item of resultList) {
+      if (item.agreed === null || item.agreed === void 0) {
+        console.log("item not responded");
+        console.log(item.requester);
+        if (GlobalValueManager$1.userListConfig.blackList.includes(item.requester)) {
+          changed = true;
+          await this.respondRequestProcess(
+            {
+              requestId: item.requestId,
+              agreed: false,
+              description: "",
+              pk: item.pk,
+              spk: item.spk
+            },
+            false
+          );
+        } else if (GlobalValueManager$1.userListConfig.whiteList.includes(item.requester)) {
+          changed = true;
+          await this.respondRequestProcess(
+            {
+              requestId: item.requestId,
+              agreed: true,
+              description: "",
+              pk: item.pk,
+              spk: item.spk
+            },
+            false
+          );
+        }
+      }
+    }
+    if (changed) {
+      this.getRequestedListProcess();
+    }
+  }
+  /**
+   * Ask to delete request.
+   * @param {*} requestId
+   */
+  deleteRequestProcess(requestId) {
+    logger.info(`Deleting request for ${requestId}...`);
+    socket.emit("delete-request", { requestId }, (response) => {
+      const { errorMsg } = response;
+      if (errorMsg) {
+        logger.error(`Failed to delete request for ${requestId}: ${errorMsg}`);
+        GlobalValueManager$1.sendNotice("Failed to delete request", "error");
+      } else {
+        logger.info(`Success to delete request for ${requestId}`);
+        this.getRequestListProcess();
+        GlobalValueManager$1.sendNotice("Success to delete request", "success");
+      }
+    });
+  }
+  /**
+   * Ask to respond to request.
+   * @param {*} responseInfo
+   * @param {*} refresh
+   * @returns
+   */
+  async respondRequestProcess(responseInfo, refresh = true) {
+    logger.info(`Respond request for ${responseInfo.requestId}...`);
+    let rekey = null;
+    if (responseInfo.agreed) {
+      try {
+        rekey = await this.keyManager.rekeyGen(responseInfo.pk, responseInfo.spk);
+      } catch (error) {
+        logger.error(`Failed to generate rekey: ${error}`);
+        GlobalValueManager$1.sendNotice("Failed to respond request", "error");
+        return;
+      }
+    }
+    delete responseInfo.pk;
+    delete responseInfo.spk;
+    return new Promise((resolve, reject) => {
+      socket.emit("respond-request", { ...responseInfo, rekey }, (response) => {
+        const { errorMsg } = response;
+        if (errorMsg) {
+          logger.error(`Failed to respond request for ${responseInfo.requestId}: ${errorMsg}`);
+          GlobalValueManager$1.sendNotice("Failed to respond request", "error");
+          resolve();
+        } else {
+          logger.info(`Success to respond request for ${responseInfo.requestId}`);
+          if (refresh) {
+            this.getRequestedListProcess();
+          }
+          GlobalValueManager$1.sendNotice("Success to respond request", "success");
+          resolve();
+        }
+      });
+    });
+  }
+}
+const BLOCK_RANGE_LIMIT = GlobalValueManager$1.blockchain.blockRangeLimit;
+function uuidToBigInt(uuidString) {
+  const uuidRegex = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
+  if (!uuidRegex.test(uuidString)) {
+    throw new Error(`Invalid UUID string format: ${uuidString}`);
+  }
+  const hexString = uuidString.replace(/-/g, "");
+  return BigInt("0x" + hexString);
+}
+function bigIntToUuid(uuidBigInt) {
+  const max128BitBigInt = (1n << 128n) - 1n;
+  if (uuidBigInt < 0n || uuidBigInt > max128BitBigInt) {
+    throw new Error(`BigInt ${uuidBigInt} is out of the valid range for a 128-bit UUID.`);
+  }
+  let hexString = uuidBigInt.toString(16);
+  hexString = hexString.padStart(32, "0");
+  return [
+    hexString.substring(0, 8),
+    hexString.substring(8, 12),
+    hexString.substring(12, 16),
+    hexString.substring(16, 20),
+    hexString.substring(20, 32)
+  ].join("-");
+}
+class BlockchainManager {
+  wallet;
+  provider;
+  contract;
+  /**
+   * Connect to blockchain and smart contract.
+   */
+  constructor() {
+    try {
+      const url = GlobalValueManager$1.blockchain.jsonRpcUrl;
+      const abi = GlobalValueManager$1.blockchain.abi;
+      const contractAddr = GlobalValueManager$1.blockchain.contractAddr;
+      this.provider = new ethers.JsonRpcProvider(url);
+      this.wallet = this.readOrCreateWallet(
+        GlobalValueManager$1.blockchain.walletKeyPath,
+        this.provider
+      );
+      this.contract = new ethers.Contract(contractAddr, abi, this.wallet);
+      logger.info(`Blockchain Manager initialized with wallet address: ${this.wallet.address}.`);
+    } catch (error) {
+      logger.error(error);
+    }
+  }
+  /**
+   * Restore the wallet with the provided private key
+   * @param {string} privateKey
+   */
+  restoreWallet(privateKey) {
+    fs.writeFileSync(GlobalValueManager$1.blockchain.walletKeyPath, privateKey);
+    this.wallet = new ethers.Wallet(privateKey, this.provider);
+    this.contract = this.contract.connect(this.wallet);
+  }
+  /**
+   * Reads the wallet key and create wallet from path.
+   * If key file not found, create a random wallet and store the key in key file.
+   * @param {string} filepath The file path to the wallet key.
+   * @param {JsonRpcProvider} provider The provider of connected blockchain.
+   * @returns A wallet connect to the provider.
+   */
+  readOrCreateWallet(filepath, provider) {
+    try {
+      const key = fs.readFileSync(filepath, "utf-8").trim();
+      return new ethers.Wallet(key, provider);
+    } catch (error) {
+      if (error.code == "ENOENT") {
+        logger.info("wallet key file not found. creating wallet key file.");
+        const wallet = ethers.Wallet.createRandom(provider);
+        fs.writeFileSync(filepath, wallet.privateKey);
+        return wallet;
+      } else {
+        throw error;
+      }
+    }
+  }
+  // async printContractOwner() {
+  //   logger.info(`The owner of contract is ${await this.contract.owner()}`)
+  // }
+  // Error should be handled by the layer above
+  /**
+   * Upload file hash and metadata to blockchain
+   * @param {string | BigInt} fileId UUID of the file
+   * @param {string | BigInt} fileHash sha256 hash of the file
+   * @param {string} metadata file metadata in JSON format
+   * @throws Any error occurred.
+   */
+  async uploadFileInfo(fileId, fileHash, metadata) {
+    if (!GlobalValueManager$1.blockchain.enabled) return;
+    const bFileId = uuidToBigInt(fileId);
+    const bFileHash = BigInt(fileHash);
+    const tx = await this.contract.uploadFile(bFileId, bFileHash, metadata);
+    await tx.wait();
+    logger.debug(
+      `upload fileInfo with bfileId: ${bFileId}, bfileHash: ${bFileHash}, metadata: ${metadata}`
+    );
+    logger.info(`fileInfo of Id ${fileId} uploaded to blockchain successfully`);
+  }
+  /**
+   * Get hash and metadata of a file.
+   * @param {string} fileId UUID of the file.
+   * @param {number} blockNumber the block number where the event is at.
+   * @param {string | undefined} fileOwnerAddr Blockchain address of the file owner. Leave blank to use this client's address.
+   * @returns Latest event arguments or null if not found.
+   * @throws Any error occurred.
+   */
+  async getFileInfo(fileId, blockNumber, fileOwnerAddr) {
+    if (!GlobalValueManager$1.blockchain.enabled) return null;
+    if (!fileOwnerAddr) fileOwnerAddr = this.wallet.address;
+    const events = await this.contract.queryFilter(
+      this.contract.filters.FileUploaded(uuidToBigInt(fileId), fileOwnerAddr),
+      blockNumber,
+      blockNumber
+    );
+    if (events.length > 0) {
+      logger.info(`Retrived fileInfo for fileId ${fileId}.`);
+      const eventArgs = events[events.length - 1].args;
+      return {
+        fileId: bigIntToUuid(eventArgs.fileId),
+        fileHash: BigInt(eventArgs.fileHash),
+        metadata: String(eventArgs.metadata),
+        fileOwnerAddr: String(eventArgs.fileOwner),
+        timestamp: BigInt(eventArgs.timestamp)
+      };
+    }
+    logger.info(`FileInfo not found for fileId ${fileId}.`);
+    return null;
+  }
+  // /**
+  //  * Get file hash and metadata of a reencrypted file.
+  //  * @param {string} fileId UUID of the file.
+  //  * @param {string | undefined} fileOwnerAddr Blockchain address of the reencrypted file owner. Leave blank to use this client's address.
+  //  * @returns Latest event arguments or null if not found.
+  //  * @throws Any error occurred.
+  //  */
+  // async getReencryptFileInfo(fileId, fileOwnerAddr) {
+  //   if (!fileOwnerAddr) fileOwnerAddr = this.wallet.address
+  //   const events = await this.contract.queryFilter(
+  //     this.contract.filters.ReencryptFileUploaded(uuidToBigInt(fileId), fileOwnerAddr)
+  //   )
+  //   logger.info(`retrived reencrypt fileInfo for fileId ${fileId}`)
+  //   if (events.length == 0) {
+  //     return null
+  //   } else {
+  //     const eventArgs = events[events.length - 1].args
+  //     return {
+  //       fileId: bigIntToUuid(eventArgs.fileId),
+  //       fileHash: BigInt(eventArgs.fileHash),
+  //       metadata: String(eventArgs.metadata),
+  //       uploaderAddr: String(eventArgs.uploader),
+  //       fileOwnerAddr: String(eventArgs.fileOwner),
+  //       timestamp: BigInt(eventArgs.timestamp)
+  //     }
+  //   }
+  // }
+  /**
+   * Get verification information of a file.
+   * @param {string} fileId UUID of the file.
+   * @param {number} blockNumber the block number where the event is at.
+   * @param {string  | undefined} fileOwnerAddr blockchain address of the file owner. Leave blank to use this client's address.
+   * @returns Latest event arguments or null if not found.
+   * @throws Any error occurred.
+   */
+  async getFileVerification(fileId, blockNumber, fileOwnerAddr) {
+    if (!GlobalValueManager$1.blockchain.enabled) return null;
+    if (!fileOwnerAddr) fileOwnerAddr = this.wallet.address;
+    const events = await this.contract.queryFilter(
+      this.contract.filters.FileVerified(uuidToBigInt(fileId), fileOwnerAddr),
+      blockNumber,
+      blockNumber
+    );
+    if (events.length > 0) {
+      logger.info(`Retrieved file verification info for fileId ${fileId}.`);
+      const eventArgs = events[events.length - 1].args;
+      return {
+        fileId: bigIntToUuid(eventArgs.fileId),
+        fileOwnerAddr: String(eventArgs.fileOwner),
+        verificationInfo: String(eventArgs.verificationInfo),
+        verifierAddr: String(eventArgs.verifier),
+        timestamp: BigInt(eventArgs.timestamp)
+      };
+    }
+    logger.info(`File verification info not found for fileId ${fileId}.`);
+    return null;
+  }
+  /**
+   * Get authentication records of a file.
+   * @param {string} fileId UUID of the file.
+   * @param {string | undefined} requestorAddr Blockchain address of the requestor. Leave blank to use this client's address
+   * @returns Latest event arguments or null if not found.
+   * @throws Any error occurred.
+   */
+  async getFileAuthRecord(fileId, requestorAddr) {
+    if (!GlobalValueManager$1.blockchain.enabled) return null;
+    if (!requestorAddr) requestorAddr = this.wallet.address;
+    const latestBlock = await this.provider.getBlockNumber();
+    let toBlock = latestBlock;
+    while (toBlock > 0) {
+      const fromBlock = Math.max(0, toBlock - BLOCK_RANGE_LIMIT);
+      const events = await this.contract.queryFilter(
+        this.contract.filters.FileAuthorizationAdded(uuidToBigInt(fileId), requestorAddr),
+        fromBlock,
+        toBlock
+      );
+      logger.debug(`Retriving file auth record from block ${fromBlock} to block ${toBlock}.`);
+      if (events.length > 0) {
+        logger.info(`Retrieved file auth record for fileId ${fileId}.`);
+        const eventArgs = events[events.length - 1].args;
+        return {
+          fileId: bigIntToUuid(eventArgs.fileId),
+          requestorAddr: String(eventArgs.requestor),
+          authorizerAddr: String(eventArgs.authorizer),
+          authorizationInfo: String(eventArgs.authorizationInfo),
+          verifierAddr: String(eventArgs.verifier),
+          timestamp: BigInt(eventArgs.timestamp)
+        };
+      }
+      toBlock = fromBlock - 1;
+    }
+    logger.info(`File auth record not found for fileId ${fileId}`);
+    return null;
+  }
+}
+class FileUploadCoordinator {
+  #resolveReadyPromise;
+  /**
+   * Initialize
+   * @param {BlockchainManager} blockchainManager
+   * @param {string} metadata
+   */
+  constructor(blockchainManager2, metadata) {
+    this.blockchainManager = blockchainManager2;
+    this.uploadFinished = false;
+    this.hashFinished = false;
+    this.uploadInstantiated = false;
+    this.metadata = metadata;
+    this.readyPromise = new Promise((resolve) => {
+      this.#resolveReadyPromise = resolve;
+    });
+  }
+  /**
+   * Called when the file is uploaded to the server successfully.
+   * Will remove the temporate encrypted file.
+   * @param {string} fileId
+   * @param {string} tempEncryptedFilePath
+   */
+  finishUpload(fileId, tempEncryptedFilePath) {
+    this.uploadFinished = true;
+    this.fileId = fileId;
+    try {
+      fs.unlinkSync(tempEncryptedFilePath);
+    } catch (error) {
+      logger.error(error);
+    }
+    this.#checkReady();
+  }
+  /**
+   * Called when hash calculation is finished.
+   * @param {string} digest sha256 hash in hex format
+   */
+  finishHash(digest) {
+    this.hashFinished = true;
+    this.digest = digest;
+    this.#checkReady();
+  }
+  /**
+   * Check if both upload and hash calculation have finished.
+   */
+  #checkReady() {
+    if (this.uploadFinished && this.hashFinished && !this.uploadInstantiated) {
+      this.uploadInstantiated = true;
+      this.#resolveReadyPromise();
+    }
+  }
+  /**
+   * Upload file info to blockchain. Will throw error.
+   */
+  async uploadToBlockchainWhenReady() {
+    await this.readyPromise;
+    await this.blockchainManager.uploadFileInfo(this.fileId, this.digest, this.metadata);
+  }
+}
+const uploadFileProcessHttps = async (tempEncryptedFilePath, originalFileName, fileId, fileUploadCoordinator) => {
+  return new Promise((resolve, reject) => {
+    const readStream = fs.createReadStream(tempEncryptedFilePath);
+    const form = new FormData();
+    form.append("file", readStream, path$1.basename(originalFileName));
+    const request = electron.net.request({
+      method: "POST",
+      url: `${GlobalValueManager$1.httpsUrl}/upload`,
+      headers: { ...form.getHeaders(), socketid: socket.id, fileid: fileId }
+      // TODO: maybe change to other one-time token (remember is case insensitive)
+    });
+    request.chunkedEncoding = true;
+    form.pipe(request);
+    request.on("response", (response) => {
+      logger.info(`STATUS: ${response.statusCode}`);
+      response.on("data", (chunk) => {
+        logger.debug(`BODY: ${chunk}`);
+      });
+      response.on("end", () => {
+        if (response.statusCode === 200) {
+          fileUploadCoordinator.finishUpload(fileId, tempEncryptedFilePath);
+          resolve();
+        } else {
+          reject(
+            new Error(
+              `Https received status code ${response.statusCode} and status message ${response.statusMessage}.`
+            )
+          );
+        }
+      });
+    });
+    request.on("error", (error) => {
+      reject(error);
+    });
+    form.on("error", (error) => {
+      reject(error);
+    });
+  });
+};
+const downloadFileProcessHttps = (fileId, writeStream, filePath) => {
+  return new Promise((resolve, reject) => {
+    const request = electron.net.request({
+      method: "GET",
+      url: `${GlobalValueManager$1.httpsUrl}/download`,
+      headers: { socketid: socket.id, fileid: fileId }
+      // TODO: maybe change to other one-time token (remember is case insensitive)
+    });
+    request.end();
+    request.on("response", (response) => {
+      logger.info(`STATUS: ${response.statusCode}`);
+      response.on("data", (chunk) => {
+        if (response.statusCode === 200) {
+          writeStream.write(chunk);
+        } else {
+          logger.info(`BODY: ${chunk}`);
+        }
+      });
+      response.on("end", () => {
+        logger.info("No more data in response.");
+        writeStream.end();
+        if (response.statusCode === 200) {
+          resolve();
+        } else {
+          reject(
+            new Error(
+              `Https received status code ${response.statusCode} and status message ${response.statusMessage}.`
+            )
+          );
+        }
+      });
+    });
+    request.on("error", (error) => {
+      logger.error(`ERROR: ${error.message}`);
+      reject(error);
+    });
+  });
+};
+const createPipeProgress = (options, logger2) => {
+  options = options || {};
+  if (!options.total) {
+    throw new Error("total is required");
+  }
+  let current = 0;
+  const progress = new node_stream.PassThrough(options);
+  progress.on("data", (chunk) => {
+    current += chunk.length;
+    logger2.info(`Progress: ${current}/${options.total}`);
+  });
+  progress.on("end", () => {
+    logger2.info(`Pipe progress ended.`);
+  });
+  return progress;
+};
+const uploadFileProcessFtps = async (tempEncryptedFilePath, originalFileName, uploadId, fileUploadCoordinator) => {
+  const client = new basicFtp.Client();
+  client.ftp.verbose = true;
+  try {
+    let response = await client.access({
+      host: GlobalValueManager$1.serverConfig.host,
+      port: GlobalValueManager$1.serverConfig.port.ftps,
+      user: socket.id,
+      password: uploadId,
+      secure: true,
+      // TODO: remove insecure option in production
+      // secureOptions: { rejectUnauthorized: process.env.NODE_ENV !== 'production' ? false : true }
+      secureOptions: { rejectUnauthorized: false }
+    });
+    logger.info(`ftp upload access response: ${response.message}`);
+    response = await client.uploadFrom(tempEncryptedFilePath, originalFileName);
+    logger.info(`ftp upload response: ${response.message}`);
+    logger.info(`upload with ftps succeeded`);
+    fileUploadCoordinator.finishUpload(uploadId, tempEncryptedFilePath);
+  } finally {
+    client.close();
+  }
+};
+const downloadFileProcessFtps = async (uuid, writeStream, filePath) => {
+  const client = new basicFtp.Client();
+  try {
+    let response = await client.access({
+      host: GlobalValueManager$1.serverConfig.host,
+      port: GlobalValueManager$1.serverConfig.port.ftps,
+      user: socket.id,
+      secure: true,
+      // TODO: remove insecure option in production
+      // secureOptions: { rejectUnauthorized: process.env.NODE_ENV !== 'production' ? false : true }
+      secureOptions: { rejectUnauthorized: false }
+    });
+    logger.info(`ftp download access response: ${response.message}`);
+    response = await client.downloadTo(writeStream, uuid);
+    logger.info(`ftp download response: ${response.message}`);
+    logger.info(`download with ftps succeeded.`);
+  } finally {
+    client.close();
+  }
+};
+class AESModule {
+  keyManager;
+  /**
+   *
+   * @param {KeyManager} keyManager
+   */
+  constructor(keyManager2) {
+    this.keyManager = keyManager2;
+  }
+  /**
+   * Encrypt the readstream with random AES key, and encrypt the AES key with user public key.
+   * @param {*} readstream
+   * @returns
+   */
+  async encrypt(readstream) {
+    const { messageArray, cipher, spk } = await this.keyManager.randCipher();
+    const key = messageArray.buffer.slice(0, 32);
+    const iv = messageArray.buffer.slice(32, 48);
+    const streamCipher = crypto.createCipheriv("aes-256-cbc", key, iv);
+    const encryptedStream = stream.Readable.from(readstream.pipe(streamCipher));
+    return {
+      cipher,
+      spk,
+      encryptedStream
+    };
+  }
+  /**
+   *  Decrypt the encrypted AES key with user's public key and create a decipher stream with the AES key.
+   * @param {string} cipher
+   * @param {string} spk
+   * @param {boolean} proxied
+   * @returns crypto.Decipher
+   */
+  async decrypt(cipher, spk, proxied = false) {
+    const message = await this.keyManager.decrypt(cipher, spk, proxied, true);
+    const streamDecipher = crypto.createDecipheriv(
+      "aes-256-cbc",
+      message.buffer.slice(0, 32),
+      message.buffer.slice(32, 48)
+    );
+    return streamDecipher;
+  }
+  /**
+   * Create a hash for the cipher stream with callback.
+   * @param {Stream} cipherStream the stream to hash
+   * @param {(digest:string)=>void | Promise<void>} callback the callback to call with digest
+   */
+  makeHash(cipherStream, callback) {
+    const hash = crypto.createHash("sha256");
+    cipherStream.pipe(hash);
+    hash.on("finish", async () => {
+      logger.info(`Finish hash calculation.`);
+      try {
+        const digest = "0x" + hash.digest("hex");
+        await callback(digest);
+      } catch (error) {
+        logger.error(error);
+      }
+    });
+  }
+  /**
+   * Create a hash for the cipher stream with promise.
+   * @param {Stream} cipherStream the stream to hash
+   * @returns {Promise<string>} the stream to hash
+   */
+  // makeHashPromise(cipherStream) {
+  //   return new Promise((resolve, reject) => {
+  //     const hash = crypto.createHash('sha256')
+  //     cipherStream.pipe(hash)
+  //     hash.on('finish', () => {
+  //       logger.info(`Finish hash calculation.`)
+  //       // const digest = '0x' + hash.digest('hex')
+  //       const digest = '0x12345'
+  //       resolve(digest)
+  //     })
+  //     hash.on('error', (err) => {
+  //       reject(err)
+  //     })
+  //     // Test hash error
+  //     // hash.emit('error', new Error('Test hash error.'))
+  //   })
+  // }
+  // secure-cloud-storage-client/src/main/AESModule.js
+  makeHashPromise(cipherStream) {
+    return new Promise((resolve, reject) => {
+      const hash = crypto.createHash("sha256");
+      cipherStream.pipe(hash);
+      hash.on("finish", () => {
+        logger.info(`Finish hash calculation.`);
+        const digest = "0x" + hash.digest("hex");
+        resolve(digest);
+      });
+      hash.on("error", (err) => {
+        reject(err);
+      });
+    });
+  }
+}
+function bigIntToHex(hashBigInt, maxLength = 0) {
+  return "0x" + hashBigInt.toString(16).padStart(maxLength, "0");
+}
+async function deriveAESKeyIvFromBuffer(baseMaterial) {
+  const baseKey = await crypto$1.subtle.importKey("raw", baseMaterial, "HKDF", false, ["deriveBits"]);
+  const derivedBits = await crypto$1.subtle.deriveBits(
+    {
+      name: "HKDF",
+      hash: "sha-256",
+      info: new Uint8Array(),
+      salt: new Uint8Array()
+    },
+    baseKey,
+    48 * 8
+  );
+  const key = derivedBits.slice(0, 32);
+  const iv = derivedBits.slice(32, 48);
+  return { key, iv };
+}
+const TryAgainMsg = "Please try again.";
+const ContactManagerOrTryAgainMsg = "Please contact the manager or try again.";
+const CheckDiskSizePermissionTryAgainMsg = "Please check disk size or permission and try again.";
+const CheckLogForDetailMsg = "Please check log for details.";
+const UnexpectedErrorMsg = "Unexpected error.";
+const { Client } = ssh2;
+const uploadFileProcessSftp = async (tempEncryptedFilePath, originalFileName, fileId, fileUploadCoordinator) => {
+  logger.info(`SFTP connect host=${GlobalValueManager$1.serverConfig.host} port=${GlobalValueManager$1.serverConfig.port.sftp} socket.id=${socket.id} fileId=${fileId}`);
+  return new Promise((resolve, reject) => {
+    const conn = new Client();
+    GlobalValueManager$1.serverConfig.host;
+    GlobalValueManager$1.serverConfig.port.sftp;
+    const socketId = socket?.id;
+    if (!socketId) return reject(new Error("socket.id is empty (socket not connected?)"));
+    const remoteName = path$1.basename(originalFileName);
+    conn.on("ready", () => {
+      logger.info("Sftp client ready.");
+      conn.sftp((err, sftp) => {
+        if (err) return reject(err);
+        const rs = fs.createReadStream(tempEncryptedFilePath);
+        const ws = sftp.createWriteStream(remoteName, { flags: "w" });
+        rs.on("error", (e) => {
+          try {
+            conn.end();
+          } catch {
+          }
+          reject(e);
+        });
+        ws.on("error", (e) => {
+          try {
+            conn.end();
+          } catch {
+          }
+          reject(e);
+        });
+        ws.on("close", () => {
+          logger.info("Upload with sftp succeeded.");
+          conn.end();
+          fileUploadCoordinator.finishUpload(fileId, tempEncryptedFilePath);
+          resolve();
+        });
+        rs.pipe(ws);
+      });
+    }).on("error", (err) => {
+      reject(err);
+    }).connect({
+      host: GlobalValueManager$1.serverConfig.host,
+      port: GlobalValueManager$1.serverConfig.port.sftp,
+      // 確認是 7001
+      username: socket.id,
+      password: fileId,
+      // 不要用本機 agent/key
+      agent: void 0,
+      tryKeyboard: false,
+      authHandler: (methodsLeft, partialSuccess, cb) => cb("password"),
+      readyTimeout: 15e3
+    });
+  });
+};
+const downloadFileProcessSftp = async (fileId, writeStream, filePath) => {
+  return new Promise((resolve, reject) => {
+    const conn = new Client();
+    GlobalValueManager$1.serverConfig.host;
+    GlobalValueManager$1.serverConfig.port.sftp;
+    const socketId = socket?.id;
+    if (!socketId) return reject(new Error("socket.id is empty (socket not connected?)"));
+    conn.on("ready", () => {
+      logger.info("Sftp client ready.");
+      conn.sftp((err, sftp) => {
+        if (err) return reject(err);
+        const remoteName = "download";
+        const rs = sftp.createReadStream(remoteName);
+        rs.on("error", (e) => {
+          try {
+            conn.end();
+          } catch {
+          }
+          reject(e);
+        });
+        writeStream.on("error", (e) => {
+          try {
+            conn.end();
+          } catch {
+          }
+          reject(e);
+        });
+        rs.on("close", () => {
+          logger.info("Download with sftp succeeded.");
+          conn.end();
+          resolve();
+        });
+        rs.pipe(writeStream);
+      });
+    }).on("error", (err) => reject(err)).connect({
+      host: GlobalValueManager$1.serverConfig.host,
+      port: GlobalValueManager$1.serverConfig.port.sftp,
+      // 確認是 7001
+      username: socket.id,
+      password: fileId,
+      // 不要用本機 agent/key
+      agent: void 0,
+      tryKeyboard: false,
+      authHandler: (methodsLeft, partialSuccess, cb) => cb("password"),
+      readyTimeout: 15e3
+    });
+  });
+};
+process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
+class ABSEManager {
+  keyManager;
+  /**
+   *
+   * @param {KeyManager} keyManager
+   */
+  constructor(keyManager2) {
+    this.keyManager = keyManager2;
+  }
+  /**
+   * Initialize mcl and get public parameter and search key from trusted authority
+   */
+  async init() {
+    try {
+      await mcl__namespace.init(mcl__namespace.BLS12_381);
+      await this.getPP();
+      await this.getKey();
+    } catch (error) {
+      logger.error(error);
+    }
+  }
+  /**
+   * Tries to get public parameter from trusted authority.
+   * @returns public parameters
+   */
+  async getPP() {
+    if (this.pp) return this.pp;
+    try {
+      const fetchUrl = `${GlobalValueManager$1.trustedAuthority.url}/pp`;
+      logger.info(`fetching ${fetchUrl} for public parameters.`);
+      const response = await fetch(fetchUrl);
+      if (!response.ok) {
+        logger.warn(`Cannot get public parameter from trusted authority`, { response });
+        return null;
+      }
+      logger.info(`Successfully fetched public parameters for ABSE.`);
+      const pp = await response.json();
+      this.pp = {
+        g1: mcl__namespace.deserializeHexStrToG1(pp.g1),
+        g2: mcl__namespace.deserializeHexStrToG2(pp.g2),
+        eggalpha: mcl__namespace.deserializeHexStrToGT(pp.eggalpha),
+        h: mcl__namespace.deserializeHexStrToG1(pp.h),
+        h_i: new Array(pp.h_i.length),
+        U: pp.U
+      };
+      for (let i = 0; i < pp.h_i.length; i++) {
+        this.pp.h_i[i] = mcl__namespace.deserializeHexStrToG1(pp.h_i[i]);
+      }
+      return this.pp;
+    } catch (error) {
+      logger.error(error);
+      return null;
+    }
+  }
+  /**
+   * Tries to get search key from trusted authority.
+   * @returns {Promise<{SK: {sk1: mcl.G2, sk2: mcl.G2, sk3: mcl.G2, sky: mcl.G2}, y: Array<0|1>}>|undefined} the search key
+   */
+  async getKey() {
+    const globalAttrs = (await this.getPP()).U;
+    return new Promise((resolve, reject) => {
+      function getSearchKeyError(error) {
+        if (error.stack) {
+          logger.error(error);
+        } else {
+          logger.error(`Get search key failed because of following error: ${error}`);
+        }
+        GlobalValueManager$1.sendNotice("Failed to get search key", "error");
+        socket2.close();
+        reject(new Error("Cannot get search key."));
+      }
+      if (this.SK && this.y) {
+        resolve({ SK: this.SK, y: this.y });
+        return;
+      }
+      const socket2 = io(GlobalValueManager$1.trustedAuthority.url, {
+        rejectUnauthorized: false
+      });
+      socket2.on("connect", () => {
+        try {
+          logger.info("Asking to get search key...");
+          socket2.emit(
+            "auth",
+            { publicKey: this.keyManager.getPublicKeyString() },
+            async ({ errorMsg, cipher, spk }) => {
+              if (errorMsg) {
+                getSearchKeyError(errorMsg);
+                return;
+              }
+              logger.info(`Responding auth to trusted authority.`);
+              const decryptedValue = await this.keyManager.decrypt(cipher, spk);
+              socket2.emit("auth-res", { decryptedValue, y: null }, ({ errorMsg: errorMsg2, SK, y }) => {
+                try {
+                  if (errorMsg2) {
+                    getSearchKeyError(errorMsg2);
+                    return;
+                  }
+                  if (SK) {
+                    this.SK = {
+                      sk1: mcl__namespace.deserializeHexStrToG2(SK.sk1),
+                      sk2: mcl__namespace.deserializeHexStrToG2(SK.sk2),
+                      sk3: mcl__namespace.deserializeHexStrToG2(SK.sk3),
+                      sky: mcl__namespace.deserializeHexStrToG2(SK.sky)
+                    };
+                    this.y = y;
+                    const attrsText = [];
+                    for (let i = 0; i < y.length - 1; i++) {
+                      if (y[i] == 1) attrsText.push(globalAttrs[i]);
+                    }
+                    logger.info(
+                      `Successfully get search key with attributes ${attrsText.join(" ")}.`
+                    );
+                    socket2.close();
+                    resolve({ SK: this.SK, y: this.y });
+                    return;
+                  } else {
+                    getSearchKeyError("Trusted authority respond with empty object");
+                    return;
+                  }
+                } catch (error) {
+                  getSearchKeyError(error);
+                }
+              });
+            }
+          );
+        } catch (error) {
+          getSearchKeyError(error);
+        }
+      });
+    });
+  }
+  /**
+   * Create an encrypted index for a tag list and attribute list.
+   * @param {Array<string>} W the tag list
+   * @param {Array<string>} P the attribute list
+   * @returns the encrypted file index
+   */
+  async Enc(W, P) {
+    const pp = await this.getPP();
+    const x = new Array(pp.U.length + 1);
+    let sum = new mcl__namespace.Fr();
+    let i;
+    for (i = 0; i < pp.U.length; i++) {
+      const xi = new mcl__namespace.Fr();
+      if (P.includes(pp.U[i])) {
+        xi.setByCSPRNG();
+        sum = mcl__namespace.add(sum, xi);
+      }
+      x[i] = xi;
+    }
+    x[i] = mcl__namespace.neg(sum);
+    sum = new mcl__namespace.Fr();
+    for (i = 0; i < x.length; i++) {
+      sum = mcl__namespace.add(sum, x[i]);
+    }
+    assert(sum.isZero());
+    const t = new mcl__namespace.Fr();
+    t.setByCSPRNG();
+    const ctStar = mcl__namespace.mul(pp.h, t).serializeToHexStr();
+    const eggat = mcl__namespace.pow(pp.eggalpha, t);
+    const ctw = new Array(W.length);
+    for (i = 0; i < W.length; i++) {
+      const wHash = mcl__namespace.hashToFr(W[i]);
+      const P2 = mcl__namespace.pairing(mcl__namespace.mul(pp.g1, wHash), mcl__namespace.mul(pp.g2, t));
+      ctw[i] = mcl__namespace.mul(eggat, P2).serializeToHexStr();
+    }
+    const ct = new Array(pp.h_i.length);
+    for (i = 0; i < pp.h_i.length; i++) {
+      ct[i] = mcl__namespace.add(mcl__namespace.mul(pp.h_i[i], t), mcl__namespace.mul(pp.g1, x[i])).serializeToHexStr();
+    }
+    const CTw = { ctStar, ctw, ct };
+    return CTw;
+  }
+  /**
+   * Create a search trapdoor with the search key and tag list to search for.
+   * @param {Array<string>} WPrime the tag list to search for
+   * @returns the search trapdoor
+   */
+  async Trapdoor(WPrime) {
+    const { SK, y } = await this.getKey();
+    let sum = new mcl__namespace.Fr();
+    const dPrime = new mcl__namespace.Fr();
+    dPrime.setInt(WPrime.length);
+    for (const w of WPrime) {
+      sum = mcl__namespace.add(sum, mcl__namespace.hashToFr(w));
+    }
+    const T0 = mcl__namespace.mul(SK.sk2, sum);
+    const TStar = mcl__namespace.add(mcl__namespace.mul(SK.sk1, dPrime), T0).serializeToHexStr();
+    const T = new Array(y.length);
+    const zero = new mcl__namespace.Fr();
+    zero.setInt(0);
+    for (let i = 0; i < y.length; i++) {
+      if (y[i] == 1) {
+        T[i] = SK.sk3.serializeToHexStr();
+      } else {
+        T[i] = mcl__namespace.mul(SK.sk3, zero).serializeToHexStr();
+      }
+    }
+    const TK = { TStar, T, sky: SK.sky.serializeToHexStr(), dPrime: WPrime.length };
+    return TK;
+  }
+  parseTK(serializedTK) {
+    const TK = {
+      TStar: mcl__namespace.deserializeHexStrToG2(serializedTK.TStar),
+      T: new Array(serializedTK.T.length),
+      sky: mcl__namespace.deserializeHexStrToG2(serializedTK.sky),
+      dPrime: serializedTK.dPrime
+    };
+    for (let i = 0; i < serializedTK.T.length; i++) {
+      TK.T[i] = mcl__namespace.deserializeHexStrToG2(serializedTK.T[i]);
+    }
+    return TK;
+  }
+  /**
+   * A testing function to make sure the created TK and file index matches
+   * @param {*} serializedTK
+   * @param {*} files
+   * @returns
+   */
+  async Search(serializedTK, files) {
+    try {
+      const TK = this.parseTK(serializedTK);
+      assert(TK.dPrime > 0);
+      const result = new Array();
+      const dPrimeFr = new mcl__namespace.Fr();
+      dPrimeFr.setInt(TK.dPrime);
+      logger.debug(`Total of ${files.length} files are indexed.`);
+      files.forEach(async (file) => {
+        const ctStar = mcl__namespace.deserializeHexStrToG1(file.ctStar);
+        const ctw = file.ctw.map((entry) => mcl__namespace.deserializeHexStrToGT(entry));
+        if (ctw.length < TK.dPrime) return;
+        const ct = file.ct.map((entry) => mcl__namespace.deserializeHexStrToG1(entry));
+        const eCtStarSky = mcl__namespace.pairing(ctStar, TK.sky);
+        assert(ct.length == TK.T.length);
+        assert(ct.length >= 1);
+        let prod = mcl__namespace.pairing(ct[0], TK.T[0]);
+        for (let i = 1; i < ct.length; i++) {
+          const paired = mcl__namespace.pairing(ct[i], TK.T[i]);
+          prod = mcl__namespace.mul(prod, paired);
+        }
+        const B = mcl__namespace.mul(eCtStarSky, prod);
+        const D = mcl__namespace.div(mcl__namespace.pairing(ctStar, TK.TStar), mcl__namespace.pow(B, dPrimeFr));
+        const backtrack = (currentProd, startIndex, depth) => {
+          if (depth == TK.dPrime) {
+            return D.isEqual(currentProd);
+          }
+          for (let i = startIndex; i < ctw.length - (TK.dPrime - depth) + 1; i++) {
+            let newProd;
+            if (depth == 0) newProd = ctw[i];
+            else newProd = mcl__namespace.mul(currentProd, ctw[i]);
+            if (backtrack(newProd, i + 1, depth + 1)) return true;
+          }
+        };
+        if (backtrack(0, 0, 0)) {
+          result.push(file.fileid);
+        }
+      });
+      return result;
+    } catch (error) {
+      logger.error(error);
+      return [];
+    }
+  }
+}
+class DatabaseManager {
+  keyManager;
+  /**
+   *
+   * @param {KeyManager} keyManager
+   */
+  constructor(keyManager2) {
+    this.keyManager = keyManager2;
+    this.init();
+  }
+  /**
+   * Initialize database scheme and statements
+   */
+  init() {
+    this.db = Database(GlobalValueManager$1.dbPath);
+    this.db.prepare(
+      `CREATE TABLE IF NOT EXISTS tag_table (
+        fileid TEXT not null,
+        tag TEXT not null,
+        PRIMARY KEY (fileid, tag)
+        );`
+    ).run();
+    this.insertTag = this.db.prepare(`INSERT INTO tag_table (fileid, tag) VALUES (?, ?);`);
+    this.getTags = this.db.prepare(`SELECT tag FROM tag_table WHERE fileid = ?;`);
+    this.deleteTags = this.db.prepare(`DELETE FROM tag_table WHERE fileid = ?;`);
+    this.db.prepare(
+      `CREATE TABLE IF NOT EXISTS attr_table (
+        fileid TEXT not null,
+        attrid INTEGER not null,
+        PRIMARY KEY (fileid, attrid)
+        );`
+    ).run();
+    this.insertAttrId = this.db.prepare(`INSERT INTO attr_table (fileid, attrid) VALUES (?, ?);`);
+    this.getAttrIds = this.db.prepare(`SELECT attrid FROM attr_table WHERE fileid = ?;`);
+    this.deleteAttrId = this.db.prepare(`DELETE FROM attr_table WHERE fileid = ?;`);
+  }
+  /**
+   * Get tags of file
+   * @param {string} fileId
+   * @returns {Array<string>} tags
+   */
+  getTagsOfFile(fileId) {
+    return this.getTags.all(fileId);
+  }
+  /**
+   * Get attribute Ids of file
+   * @param {string} fileId
+   * @returns {Array<string>} attribute Ids
+   */
+  getAttrIdsOfFile(fileId) {
+    return this.getAttrIds.all(fileId);
+  }
+  /**
+   * Store tags and attribute Ids into database
+   * @param {string} fileId
+   * @param {Array<string>} tags
+   * @param {Array<number>} attrIds
+   */
+  storeTagAttr(fileId, tags, attrIds) {
+    this.deleteTags.run(fileId);
+    this.deleteAttrId.run(fileId);
+    for (const tag of tags) {
+      this.insertTag.run(fileId, tag);
+    }
+    for (const attrId of attrIds) {
+      this.insertAttrId.run(fileId, attrId);
+    }
+  }
+  /**
+   * Encrypt the database and store on server.
+   */
+  async encryptToServer() {
+    try {
+      this.db.close();
+      const sk = this.keyManager.getKeys().sk;
+      const { key, iv } = await deriveAESKeyIvFromBuffer(sk);
+      const cipher = crypto$1.createCipheriv("aes-256-cbc", key, iv);
+      const fileStream = fs.createReadStream(GlobalValueManager$1.dbPath);
+      fileStream.pipe(cipher);
+      logger.info("Upload encrypted database to server.");
+      const form = new FormData();
+      form.append("file", cipher, path$1.basename(GlobalValueManager$1.dbPath));
+      const request = electron.net.request({
+        method: "POST",
+        url: `${GlobalValueManager$1.httpsUrl}/uploadDb`,
+        headers: {
+          ...form.getHeaders(),
+          socketid: socket.id
+        }
+      });
+      request.chunkedEncoding = true;
+      form.pipe(request);
+      return new Promise((resolve, reject) => {
+        request.on("response", (response) => {
+          logger.info(`STATUS: ${response.statusCode}`);
+          response.on("data", (chunk) => {
+            logger.debug(`BODY: ${chunk}`);
+          });
+          response.on("end", () => {
+            if (response.statusCode === 200) {
+              logger.info("Succesfully upload encrypted database to server.");
+            } else {
+              logger.error(
+                `Https received status code ${response.statusCode} and status message ${response.statusMessage}.`
+              );
+            }
+          });
+          resolve();
+        });
+        request.on("error", (error) => {
+          logger.error(error);
+          resolve();
+        });
+        form.on("error", (error) => {
+          logger.error(error);
+          resolve();
+        });
+      });
+    } catch (error) {
+      logger.error(error);
+    }
+  }
+  /**
+   * Retrieve encrypted database and recover from server
+   * @returns
+   */
+  async recoverFromServer() {
+    try {
+      this.db.close();
+      const sk = this.keyManager.getKeys().sk;
+      const { key, iv } = await deriveAESKeyIvFromBuffer(sk);
+      const decipher = crypto$1.createDecipheriv("aes-256-cbc", key, iv);
+      const fileStream = fs.createWriteStream(GlobalValueManager$1.dbPath);
+      decipher.pipe(fileStream);
+      const request = electron.net.request({
+        method: "GET",
+        url: `${GlobalValueManager$1.httpsUrl}/downloadDb`,
+        headers: { socketid: socket.id }
+      });
+      request.end();
+      request.on("response", (response) => {
+        logger.info(`STATUS: ${response.statusCode}`);
+        response.on("data", (chunk) => {
+          if (response.statusCode === 200) {
+            decipher.write(chunk);
+          } else {
+            logger.info(`BODY: ${chunk}`);
+          }
+        });
+        response.on("end", () => {
+          logger.info("No more data in response.");
+          decipher.end();
+          if (response.statusCode !== 200) {
+            logger.error(
+              `Https received status code ${response.statusCode} and status message ${response.statusMessage}.`
+            );
+          }
+        });
+      });
+      request.on("error", (error) => {
+        logger.error(`ERROR: ${error.message}`);
+        decipher.end();
+      });
+      return new Promise((resolve, reject) => {
+        fileStream.on("finish", () => {
+          logger.info("Database successfully recovered");
+          resolve();
+        });
+        fileStream.on("error", (err) => {
+          reject(err);
+        });
+        decipher.on("error", (err) => {
+          reject(err);
+        });
+      });
+    } catch (error) {
+      logger.error(error);
+    }
+  }
+}
+class FileManager {
+  aesModule;
+  blockchainManager;
+  uploadQueue;
+  /**
+   * @param {AESModule} aesModule
+   * @param {BlockchainManager} blockchainManager
+   * @param {ABSEManager} abseManager
+   * @param {DatabaseManager} databaseManager
+   * @param {number} queueConcurrency
+   */
+  constructor(aesModule2, blockchainManager2, abseManager2, databaseManager2, queueConcurrency = 1) {
+    this.aesModule = aesModule2;
+    this.blockchainManager = blockchainManager2;
+    this.abseManager = abseManager2;
+    this.databaseManager = databaseManager2;
+    this.uploadQueue = cq().limit({ concurrency: queueConcurrency }).process(this.#uploadProcess.bind(this));
+    socket.on("upload-file-res", (response) => {
+      if (response.errorMsg) {
+        logger.error(
+          `Failed to upload file ${response.fileId}: ${response.errorMsg}. Upload aborted.`
+        );
+        this.#sendUploadErrorNotice(response.errorMsg);
+      } else {
+        GlobalValueManager$1.sendNotice(`Success to upload file ${response.fileId}`, "success");
+        this.getFileListProcess(GlobalValueManager$1.curFolderId);
+      }
+    });
+    socket.on("partial-search-files", (response) => {
+      const { files } = response;
+      GlobalValueManager$1.mainWindow?.webContents.send("partial-search-files", files);
+    });
+  }
+  /**
+   * Send upload error notice to renderer
+   * @param {String} errorMsg
+   * @param {String} treatmentMsg
+   * @example this.#sendUploadErrorNotice('File encryption failed.', TryAgainMsg)
+   */
+  #sendUploadErrorNotice(errorMsg, treatmentMsg = TryAgainMsg) {
+    GlobalValueManager$1.sendNotice(`Failed to upload file: ${errorMsg} ${treatmentMsg}`, "error");
+  }
+  /**
+   * Send download error notice to renderer
+   * @param {String} errorMsg
+   * @param {String} treatmentMsg
+   * @example this.#sendDownloadErrorNotice('File decryption failed.', TryAgainMsg)
+   */
+  #sendDownloadErrorNotice(errorMsg, treatmentMsg = TryAgainMsg) {
+    GlobalValueManager$1.sendNotice(`Failed to download file: ${errorMsg} ${treatmentMsg}`, "error");
+  }
+  // can return promise, but not needed
+  /**
+   * The process of actually uploading the file.
+   * @param {{ filePath: string, parentFolderId: string }} info
+   * @returns
+   */
+  async #uploadProcess({ filePath, parentFolderId }) {
+    let cipher = null;
+    let spk = null;
+    let encryptedStream = null;
+    let fileStream = null;
+    const originalFileName = path$1.basename(filePath);
+    try {
+      fileStream = fs.createReadStream(filePath);
+      logger.info("Encrypting file...");
+      ({ cipher, spk, encryptedStream } = await this.aesModule.encrypt(fileStream));
+      encryptedStream.on("error", (err) => {
+        logger.error(err);
+        this.#sendUploadErrorNotice("File encryption failed.");
+      });
+    } catch (error) {
+      logger.error(`Failed to create stream or encrypt file: ${error}. Upload aborted.`);
+      this.#sendUploadErrorNotice(
+        "File stream creation failed.",
+        "Please check if file exists and try again."
+      );
+      return;
+    }
+    logger.info("Sending key and iv to server...");
+    socket.emit("upload-file-pre", { cipher, spk, parentFolderId }, async (response) => {
+      const { errorMsg, fileId } = response;
+      if (errorMsg) {
+        logger.error(`Failed to upload file: ${errorMsg}. Upload aborted.`);
+        this.#sendUploadErrorNotice(errorMsg);
+        return;
+      }
+      const tempEncryptedFilePath = path$1.resolve(GlobalValueManager$1.tempPath, fileId);
+      const writeStream = fs.createWriteStream(tempEncryptedFilePath);
+      const fileUploadCoordinator = new FileUploadCoordinator(
+        this.blockchainManager,
+        JSON.stringify({ filename: originalFileName })
+      );
+      this.aesModule.makeHashPromise(encryptedStream).then((digest) => {
+        fileUploadCoordinator.finishHash(digest);
+      }).catch((error) => {
+        logger.error(error);
+        this.#sendUploadErrorNotice("File hash calculation failed.");
+      });
+      writeStream.on("close", async () => {
+        logger.info(`Encrypted file finished writing.`, { tempEncryptedFilePath });
+        const protocol = GlobalValueManager$1.serverConfig.protocol;
+        logger.info(`Uploading file ${path$1.basename(filePath)} with protocol ${protocol}`);
+        try {
+          switch (protocol) {
+            case "https":
+              await uploadFileProcessHttps(
+                tempEncryptedFilePath,
+                originalFileName,
+                fileId,
+                fileUploadCoordinator
+              );
+              break;
+            case "ftps":
+              await uploadFileProcessFtps(
+                tempEncryptedFilePath,
+                originalFileName,
+                fileId,
+                fileUploadCoordinator
+              );
+              break;
+            case "sftp":
+              await uploadFileProcessSftp(
+                tempEncryptedFilePath,
+                originalFileName,
+                fileId,
+                fileUploadCoordinator
+              );
+              break;
+            default:
+              logger.error("Invalid file protocol");
+              this.#sendUploadErrorNotice("Invalid file protocol.");
+              return;
+          }
+        } catch (error) {
+          logger.error(error);
+          this.#sendUploadErrorNotice(`Upload with ${protocol} failed.`, CheckLogForDetailMsg);
+          return;
+        }
+        try {
+          await fileUploadCoordinator.uploadToBlockchainWhenReady();
+          GlobalValueManager$1.sendNotice(
+            "File and info uploaded to server and blockchain.",
+            "normal"
+          );
+        } catch (error) {
+          logger.error(error);
+          this.#sendUploadErrorNotice("Blockchain upload failed.", ContactManagerOrTryAgainMsg);
+        }
+      });
+      writeStream.on("error", (error) => {
+        logger.error(error);
+        this.#sendUploadErrorNotice(
+          "Encrypted file failed to write.",
+          CheckDiskSizePermissionTryAgainMsg
+        );
+      });
+      encryptedStream.pipe(writeStream);
+    });
+  }
+  /**
+   * Browse and select files to upload, and push to an upload queue for concurrent upload process.
+   * @param {string} parentFolderId
+   */
+  async uploadFileProcess(parentFolderId) {
+    logger.info("Browsing file...");
+    const { filePaths } = await electron.dialog.showOpenDialog({
+      properties: ["openFile", "multiSelections"]
+    });
+    if (filePaths.length > 0) {
+      for (const filePath of filePaths) {
+        this.uploadQueue({ filePath, parentFolderId });
+      }
+    } else {
+      GlobalValueManager$1.sendNotice("File upload canceled.", "error");
+    }
+  }
+  /**
+   * Get the file list under current folder.
+   * @param {string} parentFolderId
+   */
+  getFileListProcess(parentFolderId) {
+    logger.info(`Getting file list for ${parentFolderId || "home"}...`);
+    socket.emit("get-file-list", { parentFolderId }, async (response) => {
+      try {
+        const { files, folders, errorMsg } = response;
+        if (errorMsg) {
+          logger.error(`Failed to get file list: ${errorMsg}`);
+          GlobalValueManager$1.sendNotice("Failed to get file list", "error");
+        } else {
+          logger.info("Sucess to get file list");
+          const globalAttrs = (await this.abseManager.getPP())?.U || [];
+          const filesObj = JSON.parse(files);
+          filesObj.forEach((file) => {
+            file.tags = this.databaseManager.getTagsOfFile(file.id).map((row) => row.tag);
+            file.attrs = this.databaseManager.getAttrIdsOfFile(file.id).map((row) => globalAttrs.at(row.attrid));
+            logger.debug(`attrs for file ${file.id}`, { attrs: file.attrs });
+          });
+          GlobalValueManager$1.mainWindow?.webContents.send("file-list-res", {
+            files: filesObj,
+            folders
+          });
+        }
+      } catch (error) {
+        logger.error(error);
+        GlobalValueManager$1.sendNotice("Failed to get file list", "error");
+      }
+    });
+  }
+  /**
+   * Ask the server to download file.
+   * @param {string} fileId the file to download
+   */
+  downloadFileProcess(fileId) {
+    logger.info(`Asking for file ${fileId}...`);
+    socket.emit("download-file-pre", { fileId }, async (response) => {
+      try {
+        if (response.errorMsg) {
+          logger.error(`Failed to download file: ${response.errorMsg}`);
+          this.#sendDownloadErrorNotice(response.errorMsg, ContactManagerOrTryAgainMsg);
+          return;
+        }
+        if (!response.fileInfo) {
+          logger.error(`File ${fileId} not found`);
+          this.#sendDownloadErrorNotice("File not found", ContactManagerOrTryAgainMsg);
+          return;
+        }
+        try {
+          const blockchainVerification = await this.blockchainManager.getFileVerification(
+            fileId,
+            response.fileInfo.verifyblocknumber
+          );
+          if (!blockchainVerification || blockchainVerification.verificationInfo != "success") {
+            logger.error(`File ${fileId} not verified.`);
+            this.#sendDownloadErrorNotice(
+              "File not verified on blockchain.",
+              ContactManagerOrTryAgainMsg
+            );
+            return;
+          }
+        } catch (error) {
+          logger.error(error);
+          this.#sendDownloadErrorNotice(
+            "Failed to get file verification from blockchain.",
+            ContactManagerOrTryAgainMsg
+          );
+          return;
+        }
+        logger.info(`File ${fileId} is verified.`);
+        const proxied = response.fileInfo.ownerId !== response.fileInfo.originOwnerId;
+        let blockchainFileInfo = null;
+        try {
+          blockchainFileInfo = await this.blockchainManager.getFileInfo(
+            fileId,
+            response.fileInfo.infoblocknumber
+          );
+          logger.debug(blockchainFileInfo);
+          if (!blockchainFileInfo) {
+            logger.error(`File ${fileId} info not on blockchain.`);
+            this.#sendDownloadErrorNotice(
+              "File info not on blockchain.",
+              ContactManagerOrTryAgainMsg
+            );
+            return;
+          }
+        } catch (error) {
+          logger.error(error);
+          this.#sendDownloadErrorNotice(
+            "Failed to get file info from blockchain.",
+            ContactManagerOrTryAgainMsg
+          );
+          return;
+        }
+        const { id, name, cipher, spk, size } = response.fileInfo;
+        this.downloadFileProcess2(id, name, cipher, spk, size, proxied, blockchainFileInfo);
+      } catch (error) {
+        logger.error(error);
+        this.#sendDownloadErrorNotice("Unexpected error.", ContactManagerOrTryAgainMsg);
+      }
+    });
+  }
+  /**
+   * The second dowload process for actually downloading the file.
+   * @param {*} fileId
+   * @param {*} filename
+   * @param {*} cipher
+   * @param {*} spk
+   * @param {*} size
+   * @param {*} proxied
+   * @param {*} blockchainFileInfo
+   * @returns
+   */
+  async downloadFileProcess2(fileId, filename, cipher, spk, size, proxied, blockchainFileInfo) {
+    try {
+      const { filePath, canceled } = await electron.dialog.showSaveDialog({
+        defaultPath: filename,
+        properties: ["showOverwriteConfirmation", "createDirectory"]
+      });
+      if (canceled) {
+        logger.info("Download canceled.");
+        GlobalValueManager$1.sendNotice("Download canceled.", "error");
+        return;
+      }
+      let writeStream;
+      try {
+        writeStream = fs.createWriteStream(filePath);
+      } catch (error) {
+        logger.error(error);
+        this.#sendDownloadErrorNotice(
+          "Failed to create write stream.",
+          CheckDiskSizePermissionTryAgainMsg
+        );
+      }
+      let writeCompleteResolve, writeCompleteReject;
+      const writeCompletePromise = new Promise((resolve, reject) => {
+        writeCompleteResolve = resolve;
+        writeCompleteReject = reject;
+      });
+      writeStream.on("error", (err) => {
+        logger.error(`Failed to write file ${filename}: ${err}. Download aborted.`);
+        this.#sendDownloadErrorNotice("Failed to write file.", CheckDiskSizePermissionTryAgainMsg);
+        try {
+          fs.unlinkSync(filePath);
+        } catch (error) {
+          if (error.code !== "ENOENT") {
+            logger.error(error);
+          }
+        } finally {
+          writeCompleteReject();
+        }
+      });
+      writeStream.on("finish", () => {
+        logger.info(`Downloaded file ${filename} to ${filePath}`);
+        GlobalValueManager$1.sendNotice("File downloaded. Verifying hash...", "normal");
+        writeCompleteResolve();
+      });
+      const decipher = await this.aesModule.decrypt(cipher, spk, proxied);
+      decipher.on("error", (err) => {
+        logger.error(err);
+        this.#sendDownloadErrorNotice(
+          "Failed to decrypt file. The file could be corrupted or modified.",
+          ContactManagerOrTryAgainMsg
+        );
+        try {
+          fs.unlinkSync(filePath);
+        } catch (error) {
+          if (error.code !== "ENOENT") {
+            logger.error(error);
+          }
+        }
+      });
+      logger.info(
+        `Downloading file ${fileId} with protocol ${GlobalValueManager$1.serverConfig.protocol}...`
+      );
+      const pipeProgress = createPipeProgress({ total: size }, logger);
+      const hashPromise = this.aesModule.makeHashPromise(pipeProgress);
+      pipeProgress.pipe(decipher);
+      decipher.pipe(writeStream);
+      const protocol = GlobalValueManager$1.serverConfig.protocol;
+      try {
+        logger.info(`Downloading file ${fileId} with protocol ${protocol}`);
+        switch (protocol) {
+          case "https":
+            await downloadFileProcessHttps(fileId, pipeProgress, filePath);
+            break;
+          case "ftps":
+            await downloadFileProcessFtps(fileId, pipeProgress, filePath);
+            break;
+          case "sftp":
+            await downloadFileProcessSftp(fileId, pipeProgress, filePath);
+            break;
+          default:
+            logger.error("Invalid file protocol");
+            this.#sendDownloadErrorNotice("Invalid file protocol.");
+            break;
+        }
+        await writeCompletePromise;
+      } catch (error) {
+        logger.error(error);
+        this.#sendDownloadErrorNotice(`Download with ${protocol} failed.`, CheckLogForDetailMsg);
+        return;
+      }
+      try {
+        const fileHash = await hashPromise;
+        const blockchainHash = bigIntToHex(blockchainFileInfo.fileHash, 64);
+        if (fileHash !== blockchainHash) {
+          try {
+            logger.debug("File Hash different", {
+              fileHash,
+              blockchainHash
+            });
+            logger.error(`File hash did not meet for file ${fileId}`);
+            this.#sendDownloadErrorNotice(
+              "File hash did not meet. The file could be modified.",
+              ContactManagerOrTryAgainMsg
+            );
+            socket.emit("download-file-hash-error", {
+              fileId,
+              fileHash,
+              blockchainHash
+            });
+          } catch (error1) {
+            logger.error(error1);
+          } finally {
+            try {
+              await promises.unlink(filePath);
+            } catch (error2) {
+              if (error2.code !== "ENOENT") {
+                logger.error(error2);
+              }
+            }
+          }
+          return;
+        }
+        logger.info(`File hash verified for file ${fileId}.`);
+        GlobalValueManager$1.sendNotice("Success to download file", "success");
+      } catch (error) {
+        logger.error(error);
+        this.#sendDownloadErrorNotice("File hash calculation failed.");
+      }
+    } catch (error) {
+      logger.error(`Failed to download file: ${error}. Download aborted.`);
+      this.#sendDownloadErrorNotice("Unexpected error.", ContactManagerOrTryAgainMsg);
+    }
+  }
+  /**
+   * Ask to delete a file on server.
+   * @param {string} fileId
+   */
+  deleteFileProcess(fileId) {
+    logger.info(`Asking to delete file ${fileId}...`);
+    socket.emit("delete-file", { fileId }, (response) => {
+      const { errorMsg } = response;
+      if (errorMsg) {
+        logger.error(`Failed to delete file ${fileId}: ${errorMsg}`);
+        GlobalValueManager$1.sendNotice("Failed to delete file", "error");
+      } else {
+        logger.info(`Success to delete file ${fileId}`);
+        GlobalValueManager$1.sendNotice("Success to delete file", "success");
+        this.getFileListProcess(GlobalValueManager$1.curFolderId);
+      }
+    });
+  }
+  /**
+   * Ask to add a folder.
+   * @param {*} parentFolderId
+   * @param {*} folderName
+   */
+  addFolderProcess(parentFolderId, folderName) {
+    logger.info(`Asking to add folder ${folderName}...`);
+    socket.emit("add-folder", { parentFolderId, folderName }, (response) => {
+      const { errorMsg } = response;
+      if (errorMsg) {
+        logger.error(`Failed to add folder ${folderName}: ${errorMsg}`);
+        GlobalValueManager$1.sendNotice("Failed to add folder", "error");
+      } else {
+        logger.info(`Success to add folder ${folderName}`);
+        GlobalValueManager$1.sendNotice("Success to add folder", "success");
+        this.getFileListProcess(GlobalValueManager$1.curFolderId);
+      }
+    });
+  }
+  /**
+   * Ask to delete a folder
+   * @param {*} folderId
+   */
+  deleteFolderProcess(folderId) {
+    logger.info(`Asking to delete folder ${folderId}...`);
+    socket.emit("delete-folder", { folderId }, (response) => {
+      const { errorMsg } = response;
+      if (errorMsg) {
+        logger.error(`Failed to delete folder: ${errorMsg}`);
+        GlobalValueManager$1.sendNotice("Failed to delete folder", "error");
+      } else {
+        logger.info(`Success to delete folder ${folderId}`);
+        GlobalValueManager$1.sendNotice("Success to delete folder", "success");
+        this.getFileListProcess(GlobalValueManager$1.curFolderId);
+      }
+    });
+  }
+  /**
+   * Ask to get all folders. Used for selecting destination for moving files.
+   * @returns
+   */
+  getAllFoldersProcess() {
+    logger.info("Asking for all folders...");
+    return new Promise((resolve) => {
+      socket.emit("get-all-folders", (response) => {
+        const { folders, errorMsg } = response;
+        if (errorMsg) {
+          logger.error(`Failed to get all folders: ${errorMsg}`);
+          GlobalValueManager$1.sendNotice("Failed to get all folders", "error");
+          resolve(null);
+        } else {
+          resolve(folders);
+        }
+      });
+    });
+  }
+  /**
+   * Ask to move file to a certain folder.
+   * @param {*} fileId
+   * @param {*} targetFolderId
+   */
+  moveFileProcess(fileId, targetFolderId) {
+    logger.info(`Asking to move file ${fileId} to ${targetFolderId}...`);
+    socket.emit("move-file", { fileId, targetFolderId }, (response) => {
+      const { errorMsg } = response;
+      if (errorMsg) {
+        logger.error(`Failed to move file ${fileId} to ${targetFolderId}: ${errorMsg}`);
+        GlobalValueManager$1.sendNotice("Failed to move file", "error");
+      } else {
+        logger.info(`Moved file ${fileId} to ${targetFolderId}`);
+        GlobalValueManager$1.sendNotice("Success to move file", "success");
+        this.getFileListProcess(GlobalValueManager$1.curFolderId);
+      }
+    });
+  }
+  /**
+   * Ask to get all public files. Should not be called.
+   * @returns
+   */
+  getAllPublicFilesProcess() {
+    logger.info("Asking for all public files...");
+    return new Promise((resolve) => {
+      socket.emit("get-public-files", (response) => {
+        const { files, errorMsg } = response;
+        if (errorMsg) {
+          logger.error(`Failed to get all public files: ${errorMsg}`);
+          GlobalValueManager$1.sendNotice("Failed to get all public files", "error");
+          resolve(null);
+        } else {
+          resolve(files);
+        }
+      });
+    });
+  }
+  /**
+   * Ask to search files with the provided tags.
+   * @param {*} param0
+   * @returns
+   */
+  // async searchFilesProcess({ tags }) {
+  //   logger.info(`Searching with tags ${tags}`)
+  //   try {
+  //     tags = tags.filter((tag) => tag != '').slice(0, 5)
+  //     // Calculate the trapdoor
+  //     let TK = this.TK
+  //     if (!TK) TK = await this.abseManager.Trapdoor(tags)
+  //     // const TK = await this.abseManager.Trapdoor(tags)
+  //     return new Promise((resolve, reject) => {
+  //       console.log('tags=', tags.join(','))
+  //       console.log('TStar head=', TK.TStar?.slice(0, 12))
+  //       console.log('sky head=', TK.sky?.slice(0, 12))
+  //       const nonZeroIdx = TK.T?.map((x,i)=> x !== '0'.repeat(x.length) ? i : -1).filter(i=>i>=0)
+  //       console.log('nonZeroIdx=', nonZeroIdx)
+  //       socket.emit('search-files', { TK, tags }, (response) => {
+  //         logger.debug(`Server respond search`, response)
+  //         const { errorMsg, files } = response
+  //         if (errorMsg) {
+  //           logger.error(`Failed to search files: ${errorMsg}`)
+  //           GlobalValueManager.sendNotice(`Failed to search file: ${errorMsg}`, 'error')
+  //           reject(errorMsg)
+  //         } else {
+  //           resolve(files)
+  //         }
+  //       })
+  //     })
+  //   } catch (error) {
+  //     logger.error(error)
+  //     GlobalValueManager.sendNotice(
+  //       'Failed to search file because of trapdoor calculation',
+  //       'error'
+  //     )
+  //   }
+  // }
+  //   async searchFilesProcess({ tags }) {
+  //   logger.info(`Searching with tags ${tags}`)
+  //   try {
+  //     tags = tags.filter((tag) => tag != '').slice(0, 5)
+  //     // ✅ 每個 tag 各自做 trapdoor => OR 搜尋
+  //     const TKs = []
+  //     for (const tag of tags) {
+  //       const tk = await this.abseManager.Trapdoor([tag]) // 注意：這裡只放單一 tag
+  //       TKs.push(tk)
+  //     }
+  //     return new Promise((resolve, reject) => {
+  //       logger.info('Search payload', { tags, TKsCount: TKs.length })
+  //       socket.emit('search-files', { TKs, tags }, (response) => {
+  //         const { errorMsg, files } = response
+  //         if (errorMsg) {
+  //           logger.error(`Failed to search files: ${errorMsg}`)
+  //           GlobalValueManager.sendNotice(`Failed to search file: ${errorMsg}`, 'error')
+  //           reject(errorMsg)
+  //         } else {
+  //           resolve(files)
+  //         }
+  //       })
+  //     })
+  //   } catch (error) {
+  //     logger.error(error)
+  //     GlobalValueManager.sendNotice('Failed to search file because of trapdoor calculation', 'error')
+  //   }
+  // }
+  async searchFilesProcess({ tags }) {
+    logger.info(`Searching with tags ${tags}`);
+    try {
+      tags = tags.filter((t) => t != null && t !== "").map((t) => t.trim().normalize("NFC")).filter((t) => t.length > 0).slice(0, 5);
+      const TK = await this.abseManager.Trapdoor(tags);
+      return new Promise((resolve, reject) => {
+        logger.info("Search payload", { tags });
+        socket.emit("search-files", { TK, tags }, (response) => {
+          const { errorMsg, files } = response;
+          if (errorMsg) {
+            logger.error(`Failed to search files: ${errorMsg}`);
+            GlobalValueManager$1.sendNotice(`Failed to search file: ${errorMsg}`, "error");
+            reject(errorMsg);
+          } else {
+            resolve(files);
+          }
+        });
+      });
+    } catch (error) {
+      logger.error(error);
+      GlobalValueManager$1.sendNotice("Failed to search file because of trapdoor calculation", "error");
+    }
+  }
+  /**
+   * Ask to update file description, permission, attribute and tags.
+   * @param {*} param0
+   */
+  async updateFileDescPermProcess({ fileId, desc, perm, selectedAttrs, tags }) {
+    const actionStr = `update file ${fileId} description, permission and index`;
+    try {
+      tags = tags.filter((tag) => tag != "").slice(0, 5);
+      const globalAttrs = (await this.abseManager.getPP()).U;
+      selectedAttrs = selectedAttrs.filter((attr) => globalAttrs.includes(attr));
+      let CTw = null;
+      if (perm == 1 && tags.length > 0) {
+        CTw = await this.abseManager.Enc(tags, selectedAttrs);
+        logger.debug(`Selected tags: ${tags}, selected attrs: ${selectedAttrs}`);
+      }
+      logger.info(`Asking to ${actionStr}...`);
+      socket.emit(
+        "update-file-desc-perm",
+        { fileId, description: desc, permission: perm, CTw },
+        (response) => {
+          const { errorMsg } = response;
+          if (errorMsg) {
+            logger.error(`Failed to ${actionStr}: ${errorMsg}`);
+            GlobalValueManager$1.sendNotice(`Failed to ${actionStr}`, "error");
+          } else {
+            const attrIds = selectedAttrs.map((attr) => globalAttrs.indexOf(attr));
+            logger.debug(`store attrids`, { attrIds });
+            this.databaseManager.storeTagAttr(fileId, tags, attrIds);
+            logger.info(`Success to ${actionStr}`);
+            GlobalValueManager$1.sendNotice(`Success to ${actionStr}`, "success");
+            this.getFileListProcess(GlobalValueManager$1.curFolderId);
+          }
+        }
+      );
+    } catch (error) {
+      logger.error(error);
+      GlobalValueManager$1.sendNotice(`Failed to ${actionStr}`, "error");
+    }
+  }
+}
+const algorithm = "aes-256-cbc";
+async function encryptDataShareKey(sk, dataStr) {
+  const { key, iv } = await deriveAESKeyIvFromBuffer(new TextEncoder().encode(sk));
+  const cipher = crypto.createCipheriv(algorithm, key, iv);
+  let encrypted = cipher.update(dataStr, "utf8", "hex");
+  encrypted += cipher.final("hex");
+  const secret = Buffer.from(encrypted);
+  const shares = sss.split(secret, { shares: 10, threshold: 2 });
+  return shares;
+}
+async function recoverDataShareKey(sk, shares) {
+  const { key, iv } = await deriveAESKeyIvFromBuffer(new TextEncoder().encode(sk));
+  const recovered = sss.combine(shares).toString();
+  try {
+    const decipher = crypto.createDecipheriv(algorithm, key, iv);
+    let decryptedStr = decipher.update(recovered, "hex", "utf8");
+    decryptedStr += decipher.final("utf8");
+    return decryptedStr;
+  } catch (error) {
+    logger.error(error);
+    return null;
+  }
+}
+class LoginManager {
+  blockchainManager;
+  fileManager;
+  keyManager;
+  requestManager;
+  /**
+   * @param {BlockchainManager} blockchainManager
+   * @param {FileManager} fileManager
+   * @param {KeyManager} keyManager
+   * @param {RequestManager} requestManager
+   * @param {DatabaseManager} databaseManager
+   */
+  constructor(blockchainManager2, fileManager2, keyManager2, requestManager2, databaseManager2) {
+    this.blockchainManager = blockchainManager2;
+    this.fileManager = fileManager2;
+    this.keyManager = keyManager2;
+    this.requestManager = requestManager2;
+    this.databaseManager = databaseManager2;
+    GlobalValueManager$1.loginManager = this;
+  }
+  /**
+   * Respond to server's authentication request.
+   * @param {*} cipher
+   * @param {*} spk
+   * @returns the user info
+   */
+  async respondToAuth(cipher, spk) {
+    logger.info("Getting login response from server. Decrypting auth key...");
+    return new Promise((resolve, reject) => {
+      this.keyManager.decrypt(cipher, spk).then((decryptedValue) => {
+        logger.debug(`decryptedValue: ${decryptedValue}`);
+        logger.info("Finish decrypting. Sending response back to server");
+        socket.emit("auth-res", { decryptedValue }, ({ errorMsg, userInfo }) => {
+          if (errorMsg) {
+            logger.error(`Authentication response failed because of following error: ${errorMsg}`);
+            GlobalValueManager$1.userInfo = {};
+            GlobalValueManager$1.loggedIn = false;
+            reject(new Error(errorMsg));
+            return;
+          }
+          if (userInfo) {
+            logger.info("Login succeeded");
+            GlobalValueManager$1.userInfo = userInfo;
+            GlobalValueManager$1.loggedIn = true;
+          }
+          resolve(userInfo);
+        });
+      }).catch((error) => {
+        logger.error(error);
+        reject(new Error(UnexpectedErrorMsg));
+      });
+    });
+  }
+  /**
+   * Asks to login to server.
+   * @returns the user info
+   */
+  async login() {
+    return new Promise((resolve, reject) => {
+      try {
+        const publicKey = this.keyManager.getPublicKeyString();
+        logger.info("Asking to login...");
+        socket.emit("login", { publicKey }, async ({ errorMsg, cipher, spk }) => {
+          if (errorMsg) {
+            logger.error(`login failed because of following error: ${errorMsg}`);
+            reject(new Error(errorMsg));
+            return;
+          }
+          try {
+            const result = await this.respondToAuth(cipher, spk);
+            resolve(result);
+          } catch (error2) {
+            reject(error2);
+          }
+        });
+      } catch (error) {
+        logger.error(`login failed because of following error: ${error}`);
+        reject(new Error(UnexpectedErrorMsg));
+      }
+    });
+  }
+  /**
+   * Asks to register to server.
+   * @param {*} param0
+   * @returns
+   */
+  async register({ name, email }) {
+    return new Promise((resolve, reject) => {
+      try {
+        const publicKey = this.keyManager.getPublicKeyString();
+        logger.info("Asking to register...");
+        socket.emit(
+          "register",
+          { publicKey, blockchainAddress: this.blockchainManager.wallet.address, name, email },
+          async (response) => {
+            if (response.errorMsg) {
+              logger.error(`Register failed because of following error: ${response.errorMsg}`);
+              reject(new Error(response.errorMsg));
+              return;
+            }
+            try {
+              const result = await this.respondToAuth(response.cipher, response.spk);
+              resolve(result);
+            } catch (error2) {
+              reject(error2);
+            }
+          }
+        );
+      } catch (error) {
+        logger.error(`Register failed because of following error: ${error}`);
+        reject(new Error(UnexpectedErrorMsg));
+      }
+    });
+  }
+  /**
+   * Asks to share secret keys (user private keys, wallet keys) which is encrypted by the extra key.
+   * @param {*} param0
+   * @returns
+   */
+  async shareSecret({ extraKey }) {
+    try {
+      const secretKeys = {
+        walletKey: this.blockchainManager.wallet.privateKey,
+        preKeys: this.keyManager.getKeyStrings()
+      };
+      logger.info("Generating secret shares...");
+      const shares = await encryptDataShareKey(extraKey, JSON.stringify(secretKeys));
+      const sharesStr = [];
+      for (const share of shares) {
+        sharesStr.push(share.toString("base64"));
+      }
+      return new Promise((resolve, reject) => {
+        logger.info("Asking to share secret keys.");
+        socket.emit("secret-share", { shares: sharesStr }, (response) => {
+          if (response.errorMsg) {
+            logger.error(`Secret share failed because of following error: ${response.errorMsg}`);
+            reject(new Error(response.errorMsg));
+            return;
+          }
+          resolve();
+        });
+      });
+    } catch (error) {
+      logger.error(error);
+      throw new Error(UnexpectedErrorMsg);
+    }
+  }
+  /**
+   * Ask to recover user's secret with the registered email
+   * @param {*} param0
+   * @returns
+   */
+  async recoverSecret({ email }) {
+    return new Promise((resolve, reject) => {
+      try {
+        logger.info("Asking to recover secret.");
+        socket.emit("secret-recover", { email }, (response) => {
+          if (response.errorMsg) {
+            logger.error(`Secret recover failed because of following error: ${response.errorMsg}`);
+            reject(new Error(response.errorMsg));
+            return;
+          }
+          resolve();
+        });
+      } catch (error) {
+        logger.error(error);
+        reject(new Error(UnexpectedErrorMsg));
+      }
+    });
+  }
+  /**
+   * Called when user input email auth code.
+   * @param {*} param0
+   * @returns
+   */
+  async onEmailAuth({ emailAuth, purpose }) {
+    return new Promise((resolve, reject) => {
+      try {
+        logger.info("Asking to respond to email auth");
+        socket.emit("email-auth-res", { emailAuth }, async (response) => {
+          if (response.errorMsg) {
+            logger.error(
+              `Email authentication failed because of following error: ${response.errorMsg}`
+            );
+            reject(new Error(response.errorMsg));
+            return;
+          }
+          if (response.shares) {
+            const deserializedShares = [];
+            for (const share of response.shares) {
+              deserializedShares.push(Buffer.from(share, "base64"));
+            }
+            this.shares = deserializedShares;
+            resolve({ purpose: "recover" });
+          } else if (response.userId) {
+            await this.login();
+            this.fileManager.getFileListProcess(null);
+            resolve({ userId: response.userId });
+          }
+        });
+      } catch (error) {
+        logger.error(error);
+        reject(new Error(UnexpectedErrorMsg));
+      }
+    });
+  }
+  /**
+   * Called when user entered extra key for secret recover.
+   * Will decrypt the retrieved secret shares and restore secret keys.
+   * @param {*} param0
+   * @returns
+   */
+  async onRecoverExtraKey({ extraKey }) {
+    try {
+      const decryptedStr = await recoverDataShareKey(extraKey, this.shares);
+      if (!decryptedStr) {
+        logger.info("Secret key recover failed.");
+        throw new Error(
+          "Secret keys could not be recovered because not enough shares were retrieved or extra key is wrong."
+        );
+      }
+      const secretKeys = JSON.parse(decryptedStr);
+      this.blockchainManager.restoreWallet(secretKeys.walletKey);
+      this.keyManager.restoreKeys(secretKeys.preKeys);
+      logger.info("Secret key recovered");
+      await this.login();
+      await this.databaseManager.recoverFromServer();
+      this.fileManager.getFileListProcess(null);
+    } catch (error) {
+      logger.error(error);
+      fs$1.unlinkSync(GlobalValueManager$1.dbPath);
+      throw new Error(UnexpectedErrorMsg);
+    } finally {
+      this.databaseManager.init();
+    }
+  }
+}
+const keyManager = new KeyManager();
+keyManager.initKeys();
+const requestManager = new RequestManager(keyManager);
+const aesModule = new AESModule(keyManager);
+const blockchainManager = new BlockchainManager();
+const abseManager = new ABSEManager(keyManager);
+abseManager.init();
+const databaseManager = new DatabaseManager(keyManager);
+const fileManager = new FileManager(aesModule, blockchainManager, abseManager, databaseManager);
+const loginManager = new LoginManager(
+  blockchainManager,
+  fileManager,
+  keyManager,
+  requestManager,
+  databaseManager
+);
+function createWindow() {
+  const mainWindow = new electron.BrowserWindow({
+    width: 1024,
+    height: 768,
+    show: false,
+    autoHideMenuBar: true,
+    ...process.platform === "linux" ? { icon } : {},
+    webPreferences: {
+      preload: path$1.join(__dirname, "../preload/index.js"),
+      sandbox: false
+    }
+  });
+  GlobalValueManager$1.mainWindow = mainWindow;
+  mainWindow.setBackgroundColor("#fff");
+  mainWindow.on("ready-to-show", async () => {
+    mainWindow.show();
+    let pp;
+    try {
+      pp = await abseManager.getPP();
+    } catch (error) {
+      logger.error(error);
+    }
+    try {
+      await loginManager.login();
+      fileManager.getFileListProcess(null);
+    } catch (error) {
+      logger.error(error);
+      GlobalValueManager$1.sendNotice(error.message, "error");
+    }
+    GlobalValueManager$1.mainWindow?.webContents.send("request-value", {
+      seenReplies: GlobalValueManager$1.requestConfig.seenReplies,
+      seenRequests: GlobalValueManager$1.requestConfig.seenRequests
+    });
+    GlobalValueManager$1.mainWindow?.webContents.send("user-list", {
+      whiteList: GlobalValueManager$1.userListConfig.whiteList,
+      blackList: GlobalValueManager$1.userListConfig.blackList
+    });
+    GlobalValueManager$1.mainWindow?.webContents.send("global-attrs", {
+      globalAttrs: pp ? pp.U.filter((attr) => attr != "None") : []
+    });
+  });
+  mainWindow.webContents.setWindowOpenHandler((details) => {
+    electron.shell.openExternal(details.url);
+    return { action: "deny" };
+  });
+  if (utils.is.dev && process.env["ELECTRON_RENDERER_URL"]) {
+    mainWindow.loadURL(process.env["ELECTRON_RENDERER_URL"]);
+  } else {
+    mainWindow.loadFile(path$1.join(__dirname, "../renderer/index.html"));
+  }
+}
+electron.app.whenReady().then(() => {
+  utils.electronApp.setAppUserModelId("com.electron");
+  electron.app.on("browser-window-created", (_, window2) => {
+    utils.optimizer.watchWindowShortcuts(window2);
+  });
+  electron.ipcMain.on("ping", () => console.log("pong"));
+  electron.ipcMain.on("send-message", () => sendMessage("test message"));
+  electron.ipcMain.handle("login", async () => {
+    return await loginManager.login();
+  });
+  electron.ipcMain.handle("register", async (_event, registerInfo) => {
+    return await loginManager.register(registerInfo);
+  });
+  electron.ipcMain.on("upload", (_event, parentFolderId) => fileManager.uploadFileProcess(parentFolderId));
+  electron.ipcMain.on("change-cur-folder", (_event, curFolderId) => {
+    GlobalValueManager$1.curFolderId = curFolderId;
+    if (GlobalValueManager$1.loggedIn) fileManager.getFileListProcess(curFolderId);
+  });
+  electron.ipcMain.on("download", (_event, fileId) => fileManager.downloadFileProcess(fileId));
+  electron.ipcMain.on("delete", (_event, fileId) => fileManager.deleteFileProcess(fileId));
+  electron.ipcMain.on(
+    "add-folder",
+    (_event, curPath, folderName) => fileManager.addFolderProcess(curPath, folderName)
+  );
+  electron.ipcMain.on("delete-folder", (_event, folderId) => fileManager.deleteFolderProcess(folderId));
+  electron.ipcMain.on("change-protocol", () => {
+    if (process.env.FILE_PROTOCOL === "https") {
+      process.env.FILE_PROTOCOL = "ftps";
+    } else {
+      process.env.FILE_PROTOCOL = "https";
+    }
+    logger.info(`File protocol changed to ${process.env.FILE_PROTOCOL}`);
+  });
+  electron.ipcMain.on("get-request-list", () => requestManager.getRequestListProcess());
+  electron.ipcMain.on("get-requested-list", () => requestManager.getRequestedListProcess());
+  electron.ipcMain.on("delete-request", (_event, uuid) => {
+    requestManager.deleteRequestProcess(uuid);
+  });
+  electron.ipcMain.on("request-file", (_event, requestInfo) => {
+    requestManager.requestFileProcess(requestInfo);
+  });
+  electron.ipcMain.on("respond-request", (_event, responseInfo) => {
+    requestManager.respondRequestProcess(responseInfo);
+  });
+  electron.ipcMain.handle("get-folders", async () => {
+    return await fileManager.getAllFoldersProcess();
+  });
+  electron.ipcMain.on(
+    "move-file",
+    (_event, uuid, targetFolderId) => fileManager.moveFileProcess(uuid, targetFolderId)
+  );
+  electron.ipcMain.handle("get-public-files", async () => {
+    return await fileManager.getAllPublicFilesProcess();
+  });
+  electron.ipcMain.handle("search-files", async (_event, values) => {
+    return await fileManager.searchFilesProcess(values);
+  });
+  electron.ipcMain.on("update-user-config", (_event, config2) => {
+    GlobalValueManager$1.updateUser(config2);
+  });
+  electron.ipcMain.on("update-request-value", (_event, values) => {
+    GlobalValueManager$1.updateRequest(values);
+  });
+  electron.ipcMain.on("update-user-list", (_event, users) => {
+    GlobalValueManager$1.updateUserList(users);
+    requestManager.getRequestedListProcess();
+  });
+  electron.ipcMain.on("update-file-desc-perm", (_event, values) => {
+    fileManager.updateFileDescPermProcess(values);
+  });
+  electron.ipcMain.handle("share-secret", (_event, values) => {
+    return loginManager.shareSecret(values);
+  });
+  electron.ipcMain.handle("recover-secret", (_event, values) => {
+    return loginManager.recoverSecret(values);
+  });
+  electron.ipcMain.handle("email-auth", (_event, values) => {
+    return loginManager.onEmailAuth(values);
+  });
+  electron.ipcMain.handle("recover-extra-key", (_event, values) => {
+    return loginManager.onRecoverExtraKey(values);
+  });
+  createWindow();
+  electron.app.on("activate", function() {
+    if (electron.BrowserWindow.getAllWindows().length === 0) createWindow();
+  });
+});
+electron.app.on("window-all-closed", async () => {
+  await databaseManager.encryptToServer();
+  if (process.platform !== "darwin") {
+    electron.app.quit();
+  } else {
+    databaseManager.init();
+  }
+});
+electron.app.commandLine.appendSwitch("ignore-certificate-errors");
+electron.app.commandLine.appendSwitch("allow-insecure-localhost", "true");

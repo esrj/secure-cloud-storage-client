@@ -1,0 +1,11 @@
+server:
+  protocol: sftp
+  # host: 211.73.81.175
+blockchain:
+  jsonRpcUrl: 'http://211.73.81.141:8545'
+  contractAddr: '0xDF44648458B12D0851eb0f53257a4eb8e4D0389f'
+  walletKeyFilename: wallet.key
+  blockRangeLimit: 5000
+  enabled: true
+# trustedAuthority:
+  # url: '211.73.81.95:2999'
