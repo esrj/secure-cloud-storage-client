@@ -683,21 +683,50 @@ class FileManager {
   //   }
   // }
 
-  async searchFilesProcess({ tags }) {
+//   async searchFilesProcess({ tags }) {
+//   logger.info(`Searching with tags ${tags}`)
+//   try {
+//     tags = tags.filter((tag) => tag != '').slice(0, 5)
+
+//     // ✅ 每個 tag 各自做 trapdoor => OR 搜尋
+//     const TKs = []
+//     for (const tag of tags) {
+//       const tk = await this.abseManager.Trapdoor([tag]) // 注意：這裡只放單一 tag
+//       TKs.push(tk)
+//     }
+
+//     return new Promise((resolve, reject) => {
+//       logger.info('Search payload', { tags, TKsCount: TKs.length })
+//       socket.emit('search-files', { TKs, tags }, (response) => {
+//         const { errorMsg, files } = response
+//         if (errorMsg) {
+//           logger.error(`Failed to search files: ${errorMsg}`)
+//           GlobalValueManager.sendNotice(`Failed to search file: ${errorMsg}`, 'error')
+//           reject(errorMsg)
+//         } else {
+//           resolve(files)
+//         }
+//       })
+//     })
+//   } catch (error) {
+//     logger.error(error)
+//     GlobalValueManager.sendNotice('Failed to search file because of trapdoor calculation', 'error')
+//   }
+// }
+async searchFilesProcess({ tags }) {
   logger.info(`Searching with tags ${tags}`)
   try {
-    tags = tags.filter((tag) => tag != '').slice(0, 5)
+    tags = tags
+      .filter((t) => t != null && t !== '')
+      .map((t) => t.trim().normalize('NFC'))
+      .filter((t) => t.length > 0)
+      .slice(0, 5)
 
-    // ✅ 每個 tag 各自做 trapdoor => OR 搜尋
-    const TKs = []
-    for (const tag of tags) {
-      const tk = await this.abseManager.Trapdoor([tag]) // 注意：這裡只放單一 tag
-      TKs.push(tk)
-    }
+    const TK = await this.abseManager.Trapdoor(tags)
 
     return new Promise((resolve, reject) => {
-      logger.info('Search payload', { tags, TKsCount: TKs.length })
-      socket.emit('search-files', { TKs, tags }, (response) => {
+      logger.info('Search payload', { tags })
+      socket.emit('search-files', { TK, tags }, (response) => {
         const { errorMsg, files } = response
         if (errorMsg) {
           logger.error(`Failed to search files: ${errorMsg}`)
