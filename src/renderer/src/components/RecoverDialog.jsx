@@ -161,6 +161,7 @@ function RecoverDialog({ open, setOpen }) {
           <Input
             label="密碼"
             size="lg"
+            type="password"
             error={!Validators.password(extraKey).valid}
             value={extraKey}
             onChange={(e) => setExtraKey(e.target.value)}

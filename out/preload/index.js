@@ -20,6 +20,7 @@ if (process.contextIsolated) {
       onNotice: (callback) => electron.ipcRenderer.on("notice", (_event, result, level) => callback(result, level)),
       askUploadFile: (curPath) => electron.ipcRenderer.send("upload", curPath),
       askDownloadFile: (uuid) => electron.ipcRenderer.send("download", uuid),
+      askDownloadFileWithOptions: (opts) => electron.ipcRenderer.send("download-with-options", opts),
       askDeleteFile: (uuid) => electron.ipcRenderer.send("delete", uuid),
       askAddFolder: (curPath, folderName) => electron.ipcRenderer.send("add-folder", curPath, folderName),
       askDeleteFolder: (folderId) => electron.ipcRenderer.send("delete-folder", folderId),
@@ -39,6 +40,9 @@ if (process.contextIsolated) {
       updateRequestValue: (values) => electron.ipcRenderer.send("update-request-value", values),
       updateUserList: (users) => electron.ipcRenderer.send("update-user-list", users),
       updateFileDescPerm: (values) => electron.ipcRenderer.send("update-file-desc-perm", values),
+      // Post-upload batch settings
+      onUploadBatchDone: (callback) => electron.ipcRenderer.on("upload-batch-done", (_event, result) => callback(result)),
+      askBatchUpdateFileDescPerm: (values) => electron.ipcRenderer.invoke("batch-update-file-desc-perm", values),
       // Requests
       askRequestFile: (requestInfo) => electron.ipcRenderer.send("request-file", requestInfo),
       askRequestList: () => electron.ipcRenderer.send("get-request-list"),

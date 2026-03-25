@@ -40,6 +40,24 @@ class AESModule {
   }
 
   /**
+   * Decrypt an encrypted buffer directly (non-streaming, for watermark post-processing).
+   * @param {Buffer} encryptedBuffer
+   * @param {string} cipher  Encrypted AES key
+   * @param {string} spk     Signing public key
+   * @param {boolean} proxied
+   * @returns {Promise<Buffer>} Decrypted content
+   */
+  async decryptBuffer(encryptedBuffer, cipher, spk, proxied = false) {
+    const message = await this.keyManager.decrypt(cipher, spk, proxied, true)
+    const decipher = crypto.createDecipheriv(
+      'aes-256-cbc',
+      message.buffer.slice(0, 32),
+      message.buffer.slice(32, 48)
+    )
+    return Buffer.concat([decipher.update(encryptedBuffer), decipher.final()])
+  }
+
+  /**
    *  Decrypt the encrypted AES key with user's public key and create a decipher stream with the AES key.
    * @param {string} cipher
    * @param {string} spk

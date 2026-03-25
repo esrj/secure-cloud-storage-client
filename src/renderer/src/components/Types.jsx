@@ -5,7 +5,8 @@ export const PageType = Object.freeze({
   public: 'public',
   file: 'file',
   reply: 'reply',
-  request: 'request'
+  request: 'request',
+  watermarkDetect: 'watermarkDetect'
 })
 
 export const ResponseType = Object.freeze({

@@ -16,6 +16,7 @@ import RequestDialog from './RequestDialog'
 import FileDetailDialog from './FileDetailDialog'
 import DeleteDialog from './DeleteDialog'
 import MoveDialog from './MoveDialog'
+import DownloadOptionsDialog from './DownloadOptionsDialog'
 
 function FileOptionMenu({
   fileData,
@@ -30,10 +31,7 @@ function FileOptionMenu({
   const [detailOpen, setDetailOpen] = useState(false)
   const [deleteOpen, setDeleteOpen] = useState(false)
   const [moveOpen, setMoveOpen] = useState(false)
-
-  function downloadHandler() {
-    window.electronAPI.askDownloadFile(fileData.fileId)
-  }
+  const [downloadOpen, setDownloadOpen] = useState(false)
 
   return (
     <Menu placement="left">
@@ -50,7 +48,7 @@ function FileOptionMenu({
           </MenuItem>
         )}
         {haveDownload && (
-          <MenuItem onClick={() => downloadHandler()} className="flex flex-row items-center">
+          <MenuItem onClick={() => setDownloadOpen(true)} className="flex flex-row items-center">
             <ArrowDownTrayIcon className="size-5" />
             <Typography className="ml-2 font-bold">下載</Typography>
           </MenuItem>
@@ -90,6 +88,13 @@ function FileOptionMenu({
         />
       )}
       {haveMove && <MoveDialog open={moveOpen} setOpen={setMoveOpen} fileData={fileData} />}
+      {haveDownload && (
+        <DownloadOptionsDialog
+          open={downloadOpen}
+          onClose={() => setDownloadOpen(false)}
+          fileData={fileData}
+        />
+      )}
     </Menu>
   )
 }

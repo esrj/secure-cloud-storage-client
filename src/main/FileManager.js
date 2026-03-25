@@ -5,7 +5,14 @@
 import { dialog } from 'electron'
 import { socket } from './MessageManager'
 import { createReadStream, createWriteStream, unlinkSync } from 'node:fs'
-import { unlink } from 'node:fs/promises'
+import { PassThrough } from 'node:stream'
+import { unlink, readFile, writeFile } from 'node:fs/promises'
+import {
+  applyVisibleWatermark,
+  applyInvisibleWatermark,
+  getMimeFromFilename,
+  isWatermarkSupported
+} from './WatermarkProcessor'
 import { logger } from './Logger'
 import { uploadFileProcessHttps, downloadFileProcessHttps } from './HttpsFileProcess'
 import { uploadFileProcessFtps, downloadFileProcessFtps } from './FtpsFileProcess'
@@ -31,6 +38,7 @@ class FileManager {
   aesModule
   blockchainManager
   uploadQueue
+  #uploadBatch = { expected: 0, fileIds: [] }
   /**
    * @param {AESModule} aesModule
    * @param {BlockchainManager} blockchainManager
@@ -38,7 +46,7 @@ class FileManager {
    * @param {DatabaseManager} databaseManager
    * @param {number} queueConcurrency
    */
-  constructor(aesModule, blockchainManager, abseManager, databaseManager, queueConcurrency = 1) {
+  constructor(aesModule, blockchainManager, abseManager, databaseManager, queueConcurrency = 3) {
     this.aesModule = aesModule
     this.blockchainManager = blockchainManager
     this.abseManager = abseManager
@@ -46,6 +54,12 @@ class FileManager {
     this.uploadQueue = cq()
       .limit({ concurrency: queueConcurrency })
       .process(this.#uploadProcess.bind(this))
+    // Blockchain transactions must be serialized to avoid nonce collisions
+    this.blockchainQueue = cq()
+      .limit({ concurrency: 1 })
+      .process(async ({ coordinator }) => {
+        await coordinator.uploadToBlockchainWhenReady()
+      })
 
     /**
      * A message from server when upload verification finished.
@@ -58,8 +72,12 @@ class FileManager {
         this.#sendUploadErrorNotice(response.errorMsg)
       } else {
         GlobalValueManager.sendNotice(`Success to upload file ${response.fileId}`, 'success')
+        this.#uploadBatch.fileIds.push(response.fileId)
         this.getFileListProcess(GlobalValueManager.curFolderId)
       }
+      // Decrement regardless of success/failure, then check if whole batch is done
+      this.#uploadBatch.expected = Math.max(0, this.#uploadBatch.expected - 1)
+      this.#checkUploadBatchDone()
     })
 
     /**
@@ -92,11 +110,23 @@ class FileManager {
     GlobalValueManager.sendNotice(`Failed to download file: ${errorMsg} ${treatmentMsg}`, 'error')
   }
 
-  // can return promise, but not needed
+  /**
+   * Check if all files in the current upload batch have received a response.
+   * If so, notify the renderer to open the post-upload settings dialog.
+   */
+  #checkUploadBatchDone() {
+    if (this.#uploadBatch.expected === 0 && this.#uploadBatch.fileIds.length > 0) {
+      GlobalValueManager.mainWindow?.webContents.send('upload-batch-done', {
+        fileIds: [...this.#uploadBatch.fileIds]
+      })
+      this.#uploadBatch = { expected: 0, fileIds: [] }
+    }
+  }
+
   /**
    * The process of actually uploading the file.
+   * Properly awaits each stage so concurrent-queue concurrency control works correctly.
    * @param {{ filePath: string, parentFolderId: string }} info
-   * @returns
    */
   async #uploadProcess({ filePath, parentFolderId }) {
     let cipher = null
@@ -104,10 +134,10 @@ class FileManager {
     let encryptedStream = null
     let fileStream = null
     const originalFileName = basename(filePath)
-    // Read the file from disk and create an encrypt stream of the file.
+
+    // Step 1: Read the file and create an encrypted stream
     try {
       fileStream = createReadStream(filePath)
-      // throw new Error('Test filestream creation error.') // Test for file stream creation error
       logger.info('Encrypting file...')
       ;({ cipher, spk, encryptedStream } = await this.aesModule.encrypt(fileStream))
       encryptedStream.on('error', (err) => {
@@ -122,103 +152,111 @@ class FileManager {
       )
       return
     }
-    // Pre-upload the file by sending the encrypted AES key, and get the generated fileId
+
+    // Step 2: Pre-upload — send encrypted AES key to server and get fileId
     logger.info('Sending key and iv to server...')
-    socket.emit('upload-file-pre', { cipher, spk, parentFolderId }, async (response) => {
-      const { errorMsg, fileId } = response
-      if (errorMsg) {
-        logger.error(`Failed to upload file: ${errorMsg}. Upload aborted.`)
-        this.#sendUploadErrorNotice(errorMsg)
-        return
-      }
-
-      // Store the encrypted file to disk with name <fileId>
-      const tempEncryptedFilePath = resolve(GlobalValueManager.tempPath, fileId)
-      const writeStream = createWriteStream(tempEncryptedFilePath)
-      // Coordinator to make sure upload to blockchain only after hash is created and file is uploaded to server.
-      const fileUploadCoordinator = new FileUploadCoordinator(
-        this.blockchainManager,
-        JSON.stringify({ filename: originalFileName })
-      )
-      this.aesModule
-        .makeHashPromise(encryptedStream)
-        .then((digest) => {
-          fileUploadCoordinator.finishHash(digest)
+    let fileId
+    try {
+      fileId = await new Promise((resolve, reject) => {
+        socket.emit('upload-file-pre', { cipher, spk, parentFolderId }, (response) => {
+          if (response.errorMsg) reject(new Error(response.errorMsg))
+          else resolve(response.fileId)
         })
-        .catch((error) => {
-          logger.error(error)
-          this.#sendUploadErrorNotice('File hash calculation failed.')
-        })
-      // When the encrypted filestream successfully got written on disk, read it and actually uplaod to server.
-      writeStream.on('close', async () => {
-        logger.info(`Encrypted file finished writing.`, { tempEncryptedFilePath })
-        const protocol = GlobalValueManager.serverConfig.protocol
-        logger.info(`Uploading file ${basename(filePath)} with protocol ${protocol}`)
-
-        // Actually uploading file by the selected protocol
-        try {
-          switch (protocol) {
-            case 'https':
-              await uploadFileProcessHttps(
-                tempEncryptedFilePath,
-                originalFileName,
-                fileId,
-                fileUploadCoordinator
-              )
-              break
-            case 'ftps':
-              await uploadFileProcessFtps(
-                tempEncryptedFilePath,
-                originalFileName,
-                fileId,
-                fileUploadCoordinator
-              )
-              break
-            case 'sftp':
-              await uploadFileProcessSftp(
-                tempEncryptedFilePath,
-                originalFileName,
-                fileId,
-                fileUploadCoordinator
-              )
-              break
-            default:
-              logger.error('Invalid file protocol')
-              this.#sendUploadErrorNotice('Invalid file protocol.')
-              return
-          }
-        } catch (error) {
-          logger.error(error)
-          this.#sendUploadErrorNotice(`Upload with ${protocol} failed.`, CheckLogForDetailMsg)
-          return
-        }
-        // Upload file info to blockchain
-        try {
-          await fileUploadCoordinator.uploadToBlockchainWhenReady()
-          GlobalValueManager.sendNotice(
-            'File and info uploaded to server and blockchain.',
-            'normal'
-          )
-        } catch (error) {
-          logger.error(error)
-          this.#sendUploadErrorNotice('Blockchain upload failed.', ContactManagerOrTryAgainMsg)
-        }
-
-        // this.getFileListProcess(GlobalValueManager.curFolderId)
       })
-      writeStream.on('error', (error) => {
+    } catch (error) {
+      logger.error(`Failed to pre-upload: ${error.message}. Upload aborted.`)
+      this.#sendUploadErrorNotice(error.message)
+      return
+    }
+
+    // Step 3: Set up tee — split encryptedStream into hash stream and write stream
+    const tempEncryptedFilePath = resolve(GlobalValueManager.tempPath, fileId)
+    const writeStream = createWriteStream(tempEncryptedFilePath)
+    const fileUploadCoordinator = new FileUploadCoordinator(
+      this.blockchainManager,
+      JSON.stringify({ filename: originalFileName })
+    )
+    const hashPassThrough = new PassThrough()
+    const writePassThrough = new PassThrough()
+    encryptedStream.pipe(hashPassThrough)
+    encryptedStream.pipe(writePassThrough)
+
+    // Hash calculation runs concurrently with disk write
+    this.aesModule
+      .makeHashPromise(hashPassThrough)
+      .then((digest) => {
+        fileUploadCoordinator.finishHash(digest)
+      })
+      .catch((error) => {
         logger.error(error)
-        this.#sendUploadErrorNotice(
-          'Encrypted file failed to write.',
-          CheckDiskSizePermissionTryAgainMsg
-        )
+        this.#sendUploadErrorNotice('File hash calculation failed.')
       })
 
-      // Start write process
-      encryptedStream.pipe(writeStream)
+    // Step 4: Write to disk then upload to server (awaited)
+    try {
+      await new Promise((resolve, reject) => {
+        writeStream.on('close', async () => {
+          logger.info(`Encrypted file finished writing.`, { tempEncryptedFilePath })
+          const protocol = GlobalValueManager.serverConfig.protocol
+          logger.info(`Uploading file ${basename(filePath)} with protocol ${protocol}`)
+          try {
+            switch (protocol) {
+              case 'https':
+                await uploadFileProcessHttps(
+                  tempEncryptedFilePath,
+                  originalFileName,
+                  fileId,
+                  fileUploadCoordinator
+                )
+                break
+              case 'ftps':
+                await uploadFileProcessFtps(
+                  tempEncryptedFilePath,
+                  originalFileName,
+                  fileId,
+                  fileUploadCoordinator
+                )
+                break
+              case 'sftp':
+                await uploadFileProcessSftp(
+                  tempEncryptedFilePath,
+                  originalFileName,
+                  fileId,
+                  fileUploadCoordinator
+                )
+                break
+              default:
+                throw new Error('Invalid file protocol')
+            }
+            resolve()
+          } catch (err) {
+            reject(err)
+          }
+        })
+        writeStream.on('error', (error) => {
+          logger.error(error)
+          this.#sendUploadErrorNotice(
+            'Encrypted file failed to write.',
+            CheckDiskSizePermissionTryAgainMsg
+          )
+          reject(error)
+        })
+        writePassThrough.pipe(writeStream)
+      })
+    } catch (error) {
+      logger.error(error)
+      this.#sendUploadErrorNotice(
+        `Upload with ${GlobalValueManager.serverConfig.protocol} failed.`,
+        CheckLogForDetailMsg
+      )
+      return
+    }
 
-      // Test write encryption file error
-      // writeStream.emit('error')
+    // Step 5: Enqueue blockchain upload to serialized queue (non-blocking for upload slots)
+    // blockchainQueue has concurrency: 1 to prevent Ethereum nonce collisions
+    this.blockchainQueue({ coordinator: fileUploadCoordinator }).catch((error) => {
+      logger.error(error)
+      this.#sendUploadErrorNotice('Blockchain upload failed.', ContactManagerOrTryAgainMsg)
     })
   }
 
@@ -232,6 +270,8 @@ class FileManager {
       properties: ['openFile', 'multiSelections']
     })
     if (filePaths.length > 0) {
+      // Reset batch tracker for this upload session
+      this.#uploadBatch = { expected: filePaths.length, fileIds: [] }
       for (const filePath of filePaths) {
         this.uploadQueue({ filePath, parentFolderId })
       }
@@ -524,6 +564,265 @@ class FileManager {
   }
 
   /**
+   * Download a file with options (original or watermark).
+   * Called by the IPC handler for 'download-with-options'.
+   * @param {{ fileId: string, mode: 'original'|'watermark', watermarkOptions: object|null }} opts
+   */
+  downloadFileWithOptionsProcess({ fileId, mode, watermarkOptions }) {
+    if (mode !== 'watermark') {
+      // Original download: reuse existing flow
+      this.downloadFileProcess(fileId)
+      return
+    }
+    this.#downloadWithWatermark(fileId, watermarkOptions)
+  }
+
+  /**
+   * Full watermark download flow.
+   * 1) Server logs download event + returns authenticated metadata
+   * 2) Pre-download to get file info + blockchain verify
+   * 3) Download + decrypt to temp file
+   * 4) Apply watermark
+   * 5) Save to user's chosen path
+   */
+  async #downloadWithWatermark(fileId, watermarkOptions) {
+    // Step 1: get auth metadata from server (logs the download event)
+    let watermarkMeta
+    try {
+      watermarkMeta = await new Promise((resolve, reject) => {
+        socket.emit(
+          'download-file-with-watermark',
+          {
+            fileId,
+            mode: 'watermark',
+            watermark: {
+              visible: watermarkOptions?.visible ?? true,
+              invisible: watermarkOptions?.invisible ?? false,
+              customNote: watermarkOptions?.customNote ?? '',
+              position: watermarkOptions?.position ?? 'bottomRight',
+              opacity: watermarkOptions?.opacity ?? 0.3,
+              fontSize: watermarkOptions?.fontSize ?? 14
+            }
+          },
+          (response) => {
+            if (response.errorMsg) reject(new Error(response.errorMsg))
+            else resolve(response.watermarkMeta)
+          }
+        )
+      })
+    } catch (e) {
+      logger.error(`[WM] get watermark meta failed: ${e.message}`)
+      this.#sendDownloadErrorNotice(e.message, ContactManagerOrTryAgainMsg)
+      return
+    }
+
+    // Step 2: pre-download → file info + blockchain verification
+    socket.emit('download-file-pre', { fileId }, async (response) => {
+      try {
+        if (response.errorMsg) {
+          this.#sendDownloadErrorNotice(response.errorMsg, ContactManagerOrTryAgainMsg)
+          return
+        }
+        if (!response.fileInfo) {
+          this.#sendDownloadErrorNotice('File not found', ContactManagerOrTryAgainMsg)
+          return
+        }
+
+        // Blockchain verify
+        try {
+          const bv = await this.blockchainManager.getFileVerification(
+            fileId,
+            response.fileInfo.verifyblocknumber
+          )
+          if (!bv || bv.verificationInfo !== 'success') {
+            this.#sendDownloadErrorNotice('File not verified on blockchain.', ContactManagerOrTryAgainMsg)
+            return
+          }
+        } catch (e) {
+          logger.error(e)
+          this.#sendDownloadErrorNotice('Blockchain verification failed.', ContactManagerOrTryAgainMsg)
+          return
+        }
+
+        let blockchainFileInfo = null
+        try {
+          blockchainFileInfo = await this.blockchainManager.getFileInfo(
+            fileId,
+            response.fileInfo.infoblocknumber
+          )
+          if (!blockchainFileInfo) {
+            this.#sendDownloadErrorNotice('File info not on blockchain.', ContactManagerOrTryAgainMsg)
+            return
+          }
+        } catch (e) {
+          logger.error(e)
+          this.#sendDownloadErrorNotice('Failed to get blockchain file info.', ContactManagerOrTryAgainMsg)
+          return
+        }
+
+        const { id, name, cipher, spk, size } = response.fileInfo
+        const proxied = response.fileInfo.ownerId !== response.fileInfo.originOwnerId
+        const mimeType = watermarkOptions?.mimeType ?? getMimeFromFilename(name)
+
+        // Sanity check: confirm format is still supported server-side
+        if (!isWatermarkSupported(name)) {
+          this.#sendDownloadErrorNotice(
+            `${name} 格式不支援浮水印，改以原檔下載。`
+          )
+          this.downloadFileProcess(fileId)
+          return
+        }
+
+        // Step 3: show save dialog
+        const { filePath, canceled } = await dialog.showSaveDialog({
+          defaultPath: name,
+          properties: ['showOverwriteConfirmation', 'createDirectory']
+        })
+        if (canceled) {
+          GlobalValueManager.sendNotice('Download canceled.', 'error')
+          return
+        }
+
+        // Step 4: download + decrypt to temp path
+        const tempPath = resolve(
+          GlobalValueManager.tempPath,
+          `${id}_wm_${Date.now()}`
+        )
+        try {
+          await this.#downloadDecryptToPath(id, name, cipher, spk, size, proxied, blockchainFileInfo, tempPath)
+        } catch (e) {
+          logger.error(e)
+          // cleanup will happen inside #downloadDecryptToPath on error
+          return
+        }
+
+        // Step 5: apply watermark
+        GlobalValueManager.sendNotice('Applying watermark...', 'normal')
+        try {
+          const decryptedBuffer = await readFile(tempPath)
+
+          // Build watermark text from server-authenticated metadata + optional custom note
+          const shortUid = (watermarkMeta.userId || '').slice(0, 8)
+          const shortFid = (watermarkMeta.fileId || '').slice(0, 8)
+          const ts = watermarkMeta.ts || new Date().toISOString()
+          const customNote = (watermarkOptions?.customNote || '').trim()
+          const wmText = `uid:${shortUid} | fid:${shortFid} | ${ts}${customNote ? ' | ' + customNote : ''}`
+
+          // Apply visible watermark first (if requested), then invisible on top
+          let processedBuffer = decryptedBuffer
+
+          if (watermarkOptions?.visible !== false) {
+            // Default: apply visible watermark
+            processedBuffer = await applyVisibleWatermark(processedBuffer, mimeType, {
+              text: wmText,
+              position: watermarkOptions?.position ?? 'bottomRight',
+              opacity: watermarkOptions?.opacity ?? 0.3,
+              fontSize: watermarkOptions?.fontSize ?? 14
+            })
+          }
+
+          if (watermarkOptions?.invisible === true) {
+            processedBuffer = await applyInvisibleWatermark(processedBuffer, mimeType, {
+              text: wmText
+            })
+          }
+
+          await writeFile(filePath, processedBuffer)
+          const modes = [
+            watermarkOptions?.visible !== false && '可視',
+            watermarkOptions?.invisible === true && '不可視'
+          ]
+            .filter(Boolean)
+            .join(' + ')
+          GlobalValueManager.sendNotice(`File downloaded with ${modes} watermark.`, 'success')
+        } catch (e) {
+          logger.error(e)
+          const code = e.message === 'WATERMARK_UNSUPPORTED_FORMAT' ? e.message : 'Watermark failed.'
+          this.#sendDownloadErrorNotice(code, TryAgainMsg)
+        } finally {
+          try { await unlink(tempPath) } catch (_) { /* ignore */ }
+        }
+      } catch (error) {
+        logger.error(error)
+        this.#sendDownloadErrorNotice('Unexpected error.', ContactManagerOrTryAgainMsg)
+      }
+    })
+  }
+
+  /**
+   * Download + decrypt a file to an explicit output path, then verify hash.
+   * Used by watermark flow to get decrypted file before applying watermark.
+   */
+  async #downloadDecryptToPath(fileId, filename, cipher, spk, size, proxied, blockchainFileInfo, outputPath) {
+    const writeStream = createWriteStream(outputPath)
+    let writeCompleteResolve, writeCompleteReject
+    const writeCompletePromise = new Promise((resolve, reject) => {
+      writeCompleteResolve = resolve
+      writeCompleteReject = reject
+    })
+    writeStream.on('finish', () => writeCompleteResolve())
+    writeStream.on('error', async (err) => {
+      logger.error(err)
+      try { await unlink(outputPath) } catch (_) { /* ignore */ }
+      writeCompleteReject(err)
+    })
+
+    const decipher = await this.aesModule.decrypt(cipher, spk, proxied)
+    decipher.on('error', async (err) => {
+      logger.error(err)
+      this.#sendDownloadErrorNotice('File decryption failed.', ContactManagerOrTryAgainMsg)
+      try { await unlink(outputPath) } catch (_) { /* ignore */ }
+    })
+
+    const pipeProgress = createPipeProgress({ total: size }, logger)
+    const hashPromise = this.aesModule.makeHashPromise(pipeProgress)
+    pipeProgress.pipe(decipher)
+    decipher.pipe(writeStream)
+
+    const protocol = GlobalValueManager.serverConfig.protocol
+    try {
+      switch (protocol) {
+        case 'https':
+          await downloadFileProcessHttps(fileId, pipeProgress, outputPath)
+          break
+        case 'ftps':
+          await downloadFileProcessFtps(fileId, pipeProgress, outputPath)
+          break
+        case 'sftp':
+          await downloadFileProcessSftp(fileId, pipeProgress, outputPath)
+          break
+        default:
+          throw new Error('Invalid file protocol')
+      }
+      await writeCompletePromise
+    } catch (error) {
+      logger.error(error)
+      this.#sendDownloadErrorNotice(`Download failed.`, CheckLogForDetailMsg)
+      throw error
+    }
+
+    // Verify hash
+    try {
+      const fileHash = await hashPromise
+      const blockchainHash = bigIntToHex(blockchainFileInfo.fileHash, 64)
+      if (fileHash !== blockchainHash) {
+        logger.error(`Hash mismatch for ${fileId}`)
+        this.#sendDownloadErrorNotice('File hash mismatch. File may be modified.', ContactManagerOrTryAgainMsg)
+        socket.emit('download-file-hash-error', { fileId, fileHash, blockchainHash })
+        try { await unlink(outputPath) } catch (_) { /* ignore */ }
+        throw new Error('Hash mismatch')
+      }
+      logger.info(`[WM] Hash verified for ${fileId}`)
+    } catch (error) {
+      if (error.message !== 'Hash mismatch') {
+        logger.error(error)
+        this.#sendDownloadErrorNotice('Hash verification failed.')
+      }
+      throw error
+    }
+  }
+
+  /**
    * Ask to delete a file on server.
    * @param {string} fileId
    */
@@ -742,6 +1041,95 @@ async searchFilesProcess({ tags }) {
     GlobalValueManager.sendNotice('Failed to search file because of trapdoor calculation', 'error')
   }
 }
+
+  /**
+   * Batch update permission/description/tags/attrs for multiple files at once.
+   * Computes CTw once and applies it to all fileIds in parallel.
+   * @returns {{ succeeded: string[], failed: string[] }}
+   */
+  async batchUpdateFileDescPermProcess({ fileIds, desc, perm, selectedAttrs, tags }) {
+    const succeeded = []
+    const failed = []
+    try {
+      tags = tags.filter((t) => t !== '').slice(0, 5)
+      const pp = await this.abseManager.getPP()
+      const globalAttrs = pp ? pp.U : []
+      selectedAttrs = selectedAttrs.filter((attr) => globalAttrs.includes(attr))
+      const attrIds = selectedAttrs.map((attr) => globalAttrs.indexOf(attr))
+
+      logger.debug(
+        `[batchUpdate] Starting batch update: fileIds=${JSON.stringify(fileIds)}, perm=${perm}, tags=${JSON.stringify(tags)}, selectedAttrs=${JSON.stringify(selectedAttrs)}, attrIds=${JSON.stringify(attrIds)}, desc.length=${desc?.length}`
+      )
+
+      // Compute CTw once for all files (same tags/attrs for the whole batch)
+      let CTw = null
+      if (perm == 1 && tags.length > 0) {
+        CTw = await this.abseManager.Enc(tags, selectedAttrs)
+        logger.debug(`[batchUpdate] CTw computed for tags=${JSON.stringify(tags)}`)
+      } else {
+        logger.debug(
+          `[batchUpdate] CTw skipped: perm=${perm}, tags.length=${tags.length}`
+        )
+      }
+
+      await Promise.all(
+        fileIds.map(async (fileId) => {
+          try {
+            await new Promise((resolve, reject) => {
+              logger.debug(
+                `[batchUpdate] Emitting update-file-desc-perm for fileId=${fileId}, permission=${perm}, description.length=${desc?.length}, hasCTw=${!!CTw}`
+              )
+              socket.emit(
+                'update-file-desc-perm',
+                { fileId, description: desc, permission: perm, CTw },
+                (response) => {
+                  if (response.errorMsg) {
+                    logger.error(
+                      `[batchUpdate] Server returned error for fileId=${fileId}: ${response.errorMsg}`
+                    )
+                    reject(new Error(response.errorMsg))
+                  } else {
+                    logger.debug(
+                      `[batchUpdate] Server OK for fileId=${fileId}. Storing tags=${JSON.stringify(tags)}, attrIds=${JSON.stringify(attrIds)} to local DB`
+                    )
+                    // Wrap storeTagAttr so a throw rejects the Promise instead of hanging it
+                    try {
+                      this.databaseManager.storeTagAttr(fileId, tags, attrIds)
+                      // Immediately verify the write
+                      const verifyTags = this.databaseManager.getTagsOfFile(fileId)
+                      const verifyAttrs = this.databaseManager.getAttrIdsOfFile(fileId)
+                      logger.debug(
+                        `[batchUpdate] Verified DB write for fileId=${fileId}: tags=${JSON.stringify(verifyTags)}, attrs=${JSON.stringify(verifyAttrs)}`
+                      )
+                      resolve()
+                    } catch (storeErr) {
+                      logger.error(
+                        `[batchUpdate] storeTagAttr threw for fileId=${fileId}: ${storeErr}`
+                      )
+                      reject(storeErr)
+                    }
+                  }
+                }
+              )
+            })
+            succeeded.push(fileId)
+          } catch (e) {
+            logger.error(`[batchUpdate] Failed to update fileId=${fileId}: ${e.message}`)
+            failed.push(fileId)
+          }
+        })
+      )
+
+      logger.debug(
+        `[batchUpdate] Done. succeeded=${JSON.stringify(succeeded)}, failed=${JSON.stringify(failed)}`
+      )
+      // Refresh file list once after all local DB writes are complete
+      this.getFileListProcess(GlobalValueManager.curFolderId)
+    } catch (error) {
+      logger.error(`[batchUpdate] Outer error: ${error}`)
+    }
+    return { succeeded, failed }
+  }
 
   /**
    * Ask to update file description, permission, attribute and tags.

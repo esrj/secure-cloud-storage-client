@@ -6,6 +6,7 @@ import { PageType, parseFileList, parseRequestList } from './Types'
 import PublicTable from './PublicTable'
 import FileTable from './FileTable'
 import ReplyTable from './ReplyTable'
+import WatermarkDetectPage from './WatermarkDetectPage'
 import { Card } from '@material-tailwind/react'
 import SearchBar from './SearchBar'
 import FileViewButtonGroup from './FileViewButtonGroup'
@@ -21,6 +22,7 @@ import {
 } from './Contexts'
 import toast from 'react-hot-toast'
 import { Validators } from './Validator'
+import PostUploadDialog from './PostUploadDialog'
 
 function MainView() {
   const [curPath, setCurPath] = useState([{ name: '', folderId: null }])
@@ -29,6 +31,7 @@ function MainView() {
   const [whiteList, setWhiteList] = useState([])
   const [blackList, setBlackList] = useState([])
   const [publicFileList, setPublicFileList] = useState([])
+  const [uploadBatch, setUploadBatch] = useState(null) // { fileIds: string[] } | null
   const {
     publicSearchTermC: [publicSearchTerm, setPublicSearchTerm],
     searchTimesC: [searchTimes]
@@ -78,6 +81,10 @@ function MainView() {
     window.electronAPI.onSearchFiles((result) => {
       const searchedFileList = parseFileList(result, false)
       setPublicFileList((prevList) => [...prevList, ...searchedFileList])
+    })
+
+    window.electronAPI.onUploadBatchDone((result) => {
+      setUploadBatch(result)
     })
   }, [])
 
@@ -137,6 +144,8 @@ function MainView() {
         return <ReplyTable replyList={requestList} />
       case PageType.request:
         return <RequestTable requestedList={requestedList} />
+      case PageType.watermarkDetect:
+        return <WatermarkDetectPage />
       default:
         return null
     }
@@ -146,11 +155,13 @@ function MainView() {
     <CurPathContext.Provider value={curPathContextValue}>
       <UserListContext.Provider value={userListContextValue}>
         <Card className="flex grow gap-2 pt-2 items-start overflow-auto">
-          <div className="flex flex-row w-full gap-4 px-2">
-            <SearchBar />
-            {pageType === PageType.file && <FileViewButtonGroup curPath={curPath} />}
-            {pageType === PageType.request && <RequestViewButtonGroup />}
-          </div>
+          {pageType !== PageType.watermarkDetect && (
+            <div className="flex flex-row w-full gap-4 px-2">
+              <SearchBar />
+              {pageType === PageType.file && <FileViewButtonGroup curPath={curPath} />}
+              {pageType === PageType.request && <RequestViewButtonGroup />}
+            </div>
+          )}
 
           {pageType === PageType.file && (
             <div className="px-2">
@@ -161,6 +172,12 @@ function MainView() {
           {renderTableView(pageType)}
         </Card>
       </UserListContext.Provider>
+      {uploadBatch && (
+        <PostUploadDialog
+          fileIds={uploadBatch.fileIds}
+          onClose={() => setUploadBatch(null)}
+        />
+      )}
     </CurPathContext.Provider>
   )
 }

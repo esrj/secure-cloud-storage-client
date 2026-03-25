@@ -29,6 +29,7 @@ if (process.contextIsolated) {
         ipcRenderer.on('notice', (_event, result, level) => callback(result, level)),
       askUploadFile: (curPath) => ipcRenderer.send('upload', curPath),
       askDownloadFile: (uuid) => ipcRenderer.send('download', uuid),
+      askDownloadFileWithOptions: (opts) => ipcRenderer.send('download-with-options', opts),
       askDeleteFile: (uuid) => ipcRenderer.send('delete', uuid),
       askAddFolder: (curPath, folderName) => ipcRenderer.send('add-folder', curPath, folderName),
       askDeleteFolder: (folderId) => ipcRenderer.send('delete-folder', folderId),
@@ -52,6 +53,11 @@ if (process.contextIsolated) {
       updateRequestValue: (values) => ipcRenderer.send('update-request-value', values),
       updateUserList: (users) => ipcRenderer.send('update-user-list', users),
       updateFileDescPerm: (values) => ipcRenderer.send('update-file-desc-perm', values),
+      // Post-upload batch settings
+      onUploadBatchDone: (callback) =>
+        ipcRenderer.on('upload-batch-done', (_event, result) => callback(result)),
+      askBatchUpdateFileDescPerm: (values) =>
+        ipcRenderer.invoke('batch-update-file-desc-perm', values),
       // Requests
       askRequestFile: (requestInfo) => ipcRenderer.send('request-file', requestInfo),
       askRequestList: () => ipcRenderer.send('get-request-list'),

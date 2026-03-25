@@ -17,7 +17,8 @@ import {
   ClipboardDocumentCheckIcon,
   ClipboardDocumentListIcon,
   PaperAirplaneIcon,
-  DocumentDuplicateIcon
+  DocumentDuplicateIcon,
+  MagnifyingGlassIcon
 } from '@heroicons/react/24/outline'
 import PropTypes from 'prop-types'
 import { useState, useContext } from 'react'
@@ -127,6 +128,17 @@ function NavBar({ pageType, setPageType, seenRequest, seenReply }) {
               <PaperAirplaneIcon className="h-5 w-5" />
             </ListItemPrefix>
             請求檔案
+          </ListItem>
+          <ListItem
+            selected={pageType === PageType.watermarkDetect}
+            onClick={() => setPageType(PageType.watermarkDetect)}
+            ripple={false}
+            className="focus:bg-none"
+          >
+            <ListItemPrefix>
+              <MagnifyingGlassIcon className="h-5 w-5" />
+            </ListItemPrefix>
+            浮水印偵測
           </ListItem>
           <ListItem
             onClick={() =>

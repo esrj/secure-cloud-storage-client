@@ -2,3 +2,14 @@ keys:
   path: user2.keys
 blockchain:
   walletKeyFilename: wallet2.key
+
+# 上線時用
+server:
+  protocol: https
+  host: 211.73.81.95
+  port:
+    https: 443
+    sftp: 7001
+
+trustedAuthority:
+  url: 211.73.81.95:2999

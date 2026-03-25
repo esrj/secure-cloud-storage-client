@@ -30,10 +30,12 @@ const winston = require("winston");
 const fs = require("node:fs");
 const yaml = require("js-yaml");
 const promises = require("node:fs/promises");
+const node_stream = require("node:stream");
+const pdfLib = require("pdf-lib");
+const Jimp = require("jimp");
 const FormData = require("form-data");
 const ethers = require("ethers");
 const basicFtp = require("basic-ftp");
-const node_stream = require("node:stream");
 const cq = require("concurrent-queue");
 const crypto = require("crypto");
 const stream = require("stream");
@@ -3612,6 +3614,157 @@ class RequestManager {
     });
   }
 }
+const WATERMARK_SUPPORTED_MIMES = ["application/pdf", "image/png", "image/jpeg"];
+function getMimeFromFilename(filename = "") {
+  const ext = (filename.split(".").pop() || "").toLowerCase();
+  const map = {
+    pdf: "application/pdf",
+    png: "image/png",
+    jpg: "image/jpeg",
+    jpeg: "image/jpeg"
+  };
+  return map[ext] || null;
+}
+function isWatermarkSupported(filename) {
+  return WATERMARK_SUPPORTED_MIMES.includes(getMimeFromFilename(filename));
+}
+async function applyVisibleWatermark(inputBuffer, mimeType, opts) {
+  logger.info(`[WatermarkProcessor] Applying watermark: mime=${mimeType}, position=${opts.position}, opacity=${opts.opacity}`);
+  if (mimeType === "application/pdf") {
+    return _watermarkPDF(inputBuffer, opts);
+  } else if (mimeType === "image/png" || mimeType === "image/jpeg") {
+    return _watermarkImage(inputBuffer, mimeType, opts);
+  }
+  throw new Error("WATERMARK_UNSUPPORTED_FORMAT");
+}
+async function _watermarkPDF(inputBuffer, { text, position = "bottomRight", opacity = 0.3, fontSize = 14 }) {
+  const pdfDoc = await pdfLib.PDFDocument.load(inputBuffer);
+  const font = await pdfDoc.embedFont(pdfLib.StandardFonts.Helvetica);
+  const color = pdfLib.rgb(0.4, 0.4, 0.4);
+  for (const page of pdfDoc.getPages()) {
+    const { width, height } = page.getSize();
+    const textWidth = font.widthOfTextAtSize(text, fontSize);
+    if (position === "diagonal") {
+      const step = Math.max(120, height / 3);
+      for (let y = step * 0.5; y < height; y += step) {
+        page.drawText(text, {
+          x: Math.max(10, (width - textWidth) / 2),
+          y,
+          size: fontSize,
+          font,
+          color,
+          opacity,
+          rotate: pdfLib.degrees(45)
+        });
+      }
+    } else {
+      const x = position === "bottomRight" ? Math.max(10, width - textWidth - 20) : 20;
+      page.drawText(text, { x, y: 20, size: fontSize, font, color, opacity });
+    }
+  }
+  return Buffer.from(await pdfDoc.save());
+}
+async function _watermarkImage(inputBuffer, mimeType, { text, position = "bottomRight", opacity = 0.5, fontSize = 32 }) {
+  const image = await Jimp.read(inputBuffer);
+  const w = image.bitmap.width;
+  const h = image.bitmap.height;
+  let fontKey;
+  if (fontSize >= 32) fontKey = Jimp.FONT_SANS_32_WHITE;
+  else if (fontSize >= 16) fontKey = Jimp.FONT_SANS_16_WHITE;
+  else fontKey = Jimp.FONT_SANS_8_WHITE;
+  const font = await Jimp.loadFont(fontKey);
+  const textW = Jimp.measureText(font, text);
+  const textH = Jimp.measureTextHeight(font, text, w + 1);
+  const overlay = new Jimp(w, h, 0);
+  let x = 20;
+  let y = Math.max(0, h - textH - 20);
+  if (position === "bottomRight") {
+    x = Math.max(10, w - textW - 20);
+  } else if (position === "diagonal") {
+    x = Math.max(0, (w - textW) / 2);
+    y = Math.max(0, (h - textH) / 2);
+  }
+  overlay.print(font, x, y, text);
+  const clampedOpacity = Math.min(1, Math.max(0, opacity));
+  overlay.scan(0, 0, w, h, function(px, py, idx) {
+    const origAlpha = this.bitmap.data[idx + 3];
+    if (origAlpha > 0) {
+      this.bitmap.data[idx + 3] = Math.round(origAlpha * clampedOpacity);
+    }
+  });
+  image.composite(overlay, 0, 0, {
+    mode: Jimp.BLEND_SOURCE_OVER,
+    opacitySource: 1,
+    opacityDest: 1
+  });
+  const jimpMime = mimeType === "image/png" ? Jimp.MIME_PNG : Jimp.MIME_JPEG;
+  return image.getBufferAsync(jimpMime);
+}
+async function applyInvisibleWatermark(inputBuffer, mimeType, opts) {
+  logger.info(`[WatermarkProcessor] Applying INVISIBLE watermark: mime=${mimeType}`);
+  if (mimeType === "application/pdf") {
+    return _invisiblePDF(inputBuffer, opts);
+  } else if (mimeType === "image/png") {
+    return _lsbPNG(inputBuffer, opts);
+  } else if (mimeType === "image/jpeg") {
+    return _lsbJPEG(inputBuffer, opts);
+  }
+  throw new Error("WATERMARK_UNSUPPORTED_FORMAT");
+}
+async function _invisiblePDF(inputBuffer, { text }) {
+  const pdfDoc = await pdfLib.PDFDocument.load(inputBuffer);
+  const font = await pdfDoc.embedFont(pdfLib.StandardFonts.Helvetica);
+  for (const page of pdfDoc.getPages()) {
+    const { width, height } = page.getSize();
+    for (let y = 30; y < height; y += 120) {
+      for (let x = 10; x < width - 10; x += 180) {
+        page.drawText(text, {
+          x,
+          y,
+          size: 8,
+          font,
+          color: pdfLib.rgb(0, 0, 0),
+          // colour is irrelevant for mode 3, but required
+          renderingMode: pdfLib.TextRenderingMode.Invisible
+          // mode 3: renders nothing
+        });
+      }
+    }
+  }
+  return Buffer.from(await pdfDoc.save());
+}
+function _encodeLSB(bitmapData, width, height, text) {
+  const textBytes = Buffer.from(text, "utf8");
+  const header = Buffer.allocUnsafe(4);
+  header.writeUInt32BE(textBytes.length, 0);
+  const payload = Buffer.concat([header, textBytes]);
+  const capacity = width * height;
+  if (payload.length * 8 > capacity) {
+    throw new Error(
+      `Invisible watermark text too long for this image (need ${payload.length * 8} bits, have ${capacity}).`
+    );
+  }
+  let bitPos = 0;
+  for (let byteIdx = 0; byteIdx < payload.length; byteIdx++) {
+    for (let bit = 7; bit >= 0; bit--) {
+      const rOffset = bitPos * 4;
+      const bitValue = payload[byteIdx] >> bit & 1;
+      bitmapData[rOffset] = bitmapData[rOffset] & 254 | bitValue;
+      bitPos++;
+    }
+  }
+}
+async function _lsbPNG(inputBuffer, { text }) {
+  const image = await Jimp.read(inputBuffer);
+  _encodeLSB(image.bitmap.data, image.bitmap.width, image.bitmap.height, text);
+  return image.getBufferAsync(Jimp.MIME_PNG);
+}
+async function _lsbJPEG(inputBuffer, { text }) {
+  const image = await Jimp.read(inputBuffer);
+  _encodeLSB(image.bitmap.data, image.bitmap.width, image.bitmap.height, text);
+  image.quality(95);
+  return image.getBufferAsync(Jimp.MIME_JPEG);
+}
 const BLOCK_RANGE_LIMIT = GlobalValueManager$1.blockchain.blockRangeLimit;
 function uuidToBigInt(uuidString) {
   const uuidRegex = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
@@ -4057,6 +4210,23 @@ class AESModule {
       spk,
       encryptedStream
     };
+  }
+  /**
+   * Decrypt an encrypted buffer directly (non-streaming, for watermark post-processing).
+   * @param {Buffer} encryptedBuffer
+   * @param {string} cipher  Encrypted AES key
+   * @param {string} spk     Signing public key
+   * @param {boolean} proxied
+   * @returns {Promise<Buffer>} Decrypted content
+   */
+  async decryptBuffer(encryptedBuffer, cipher, spk, proxied = false) {
+    const message = await this.keyManager.decrypt(cipher, spk, proxied, true);
+    const decipher = crypto.createDecipheriv(
+      "aes-256-cbc",
+      message.buffer.slice(0, 32),
+      message.buffer.slice(32, 48)
+    );
+    return Buffer.concat([decipher.update(encryptedBuffer), decipher.final()]);
   }
   /**
    *  Decrypt the encrypted AES key with user's public key and create a decipher stream with the AES key.
@@ -4580,6 +4750,9 @@ class DatabaseManager {
    * @param {Array<number>} attrIds
    */
   storeTagAttr(fileId, tags, attrIds) {
+    logger.debug(
+      `[DatabaseManager] storeTagAttr: fileId=${fileId}, tags=${JSON.stringify(tags)}, attrIds=${JSON.stringify(attrIds)}`
+    );
     this.deleteTags.run(fileId);
     this.deleteAttrId.run(fileId);
     for (const tag of tags) {
@@ -4588,6 +4761,7 @@ class DatabaseManager {
     for (const attrId of attrIds) {
       this.insertAttrId.run(fileId, attrId);
     }
+    logger.debug(`[DatabaseManager] storeTagAttr done for fileId=${fileId}`);
   }
   /**
    * Encrypt the database and store on server.
@@ -4705,6 +4879,7 @@ class FileManager {
   aesModule;
   blockchainManager;
   uploadQueue;
+  #uploadBatch = { expected: 0, fileIds: [] };
   /**
    * @param {AESModule} aesModule
    * @param {BlockchainManager} blockchainManager
@@ -4712,12 +4887,15 @@ class FileManager {
    * @param {DatabaseManager} databaseManager
    * @param {number} queueConcurrency
    */
-  constructor(aesModule2, blockchainManager2, abseManager2, databaseManager2, queueConcurrency = 1) {
+  constructor(aesModule2, blockchainManager2, abseManager2, databaseManager2, queueConcurrency = 3) {
     this.aesModule = aesModule2;
     this.blockchainManager = blockchainManager2;
     this.abseManager = abseManager2;
     this.databaseManager = databaseManager2;
     this.uploadQueue = cq().limit({ concurrency: queueConcurrency }).process(this.#uploadProcess.bind(this));
+    this.blockchainQueue = cq().limit({ concurrency: 1 }).process(async ({ coordinator }) => {
+      await coordinator.uploadToBlockchainWhenReady();
+    });
     socket.on("upload-file-res", (response) => {
       if (response.errorMsg) {
         logger.error(
@@ -4726,8 +4904,11 @@ class FileManager {
         this.#sendUploadErrorNotice(response.errorMsg);
       } else {
         GlobalValueManager$1.sendNotice(`Success to upload file ${response.fileId}`, "success");
+        this.#uploadBatch.fileIds.push(response.fileId);
         this.getFileListProcess(GlobalValueManager$1.curFolderId);
       }
+      this.#uploadBatch.expected = Math.max(0, this.#uploadBatch.expected - 1);
+      this.#checkUploadBatchDone();
     });
     socket.on("partial-search-files", (response) => {
       const { files } = response;
@@ -4752,11 +4933,22 @@ class FileManager {
   #sendDownloadErrorNotice(errorMsg, treatmentMsg = TryAgainMsg) {
     GlobalValueManager$1.sendNotice(`Failed to download file: ${errorMsg} ${treatmentMsg}`, "error");
   }
-  // can return promise, but not needed
+  /**
+   * Check if all files in the current upload batch have received a response.
+   * If so, notify the renderer to open the post-upload settings dialog.
+   */
+  #checkUploadBatchDone() {
+    if (this.#uploadBatch.expected === 0 && this.#uploadBatch.fileIds.length > 0) {
+      GlobalValueManager$1.mainWindow?.webContents.send("upload-batch-done", {
+        fileIds: [...this.#uploadBatch.fileIds]
+      });
+      this.#uploadBatch = { expected: 0, fileIds: [] };
+    }
+  }
   /**
    * The process of actually uploading the file.
+   * Properly awaits each stage so concurrent-queue concurrency control works correctly.
    * @param {{ filePath: string, parentFolderId: string }} info
-   * @returns
    */
   async #uploadProcess({ filePath, parentFolderId }) {
     let cipher = null;
@@ -4781,84 +4973,96 @@ class FileManager {
       return;
     }
     logger.info("Sending key and iv to server...");
-    socket.emit("upload-file-pre", { cipher, spk, parentFolderId }, async (response) => {
-      const { errorMsg, fileId } = response;
-      if (errorMsg) {
-        logger.error(`Failed to upload file: ${errorMsg}. Upload aborted.`);
-        this.#sendUploadErrorNotice(errorMsg);
-        return;
-      }
-      const tempEncryptedFilePath = path$1.resolve(GlobalValueManager$1.tempPath, fileId);
-      const writeStream = fs.createWriteStream(tempEncryptedFilePath);
-      const fileUploadCoordinator = new FileUploadCoordinator(
-        this.blockchainManager,
-        JSON.stringify({ filename: originalFileName })
-      );
-      this.aesModule.makeHashPromise(encryptedStream).then((digest) => {
-        fileUploadCoordinator.finishHash(digest);
-      }).catch((error) => {
-        logger.error(error);
-        this.#sendUploadErrorNotice("File hash calculation failed.");
+    let fileId;
+    try {
+      fileId = await new Promise((resolve, reject) => {
+        socket.emit("upload-file-pre", { cipher, spk, parentFolderId }, (response) => {
+          if (response.errorMsg) reject(new Error(response.errorMsg));
+          else resolve(response.fileId);
+        });
       });
-      writeStream.on("close", async () => {
-        logger.info(`Encrypted file finished writing.`, { tempEncryptedFilePath });
-        const protocol = GlobalValueManager$1.serverConfig.protocol;
-        logger.info(`Uploading file ${path$1.basename(filePath)} with protocol ${protocol}`);
-        try {
-          switch (protocol) {
-            case "https":
-              await uploadFileProcessHttps(
-                tempEncryptedFilePath,
-                originalFileName,
-                fileId,
-                fileUploadCoordinator
-              );
-              break;
-            case "ftps":
-              await uploadFileProcessFtps(
-                tempEncryptedFilePath,
-                originalFileName,
-                fileId,
-                fileUploadCoordinator
-              );
-              break;
-            case "sftp":
-              await uploadFileProcessSftp(
-                tempEncryptedFilePath,
-                originalFileName,
-                fileId,
-                fileUploadCoordinator
-              );
-              break;
-            default:
-              logger.error("Invalid file protocol");
-              this.#sendUploadErrorNotice("Invalid file protocol.");
-              return;
+    } catch (error) {
+      logger.error(`Failed to pre-upload: ${error.message}. Upload aborted.`);
+      this.#sendUploadErrorNotice(error.message);
+      return;
+    }
+    const tempEncryptedFilePath = path$1.resolve(GlobalValueManager$1.tempPath, fileId);
+    const writeStream = fs.createWriteStream(tempEncryptedFilePath);
+    const fileUploadCoordinator = new FileUploadCoordinator(
+      this.blockchainManager,
+      JSON.stringify({ filename: originalFileName })
+    );
+    const hashPassThrough = new node_stream.PassThrough();
+    const writePassThrough = new node_stream.PassThrough();
+    encryptedStream.pipe(hashPassThrough);
+    encryptedStream.pipe(writePassThrough);
+    this.aesModule.makeHashPromise(hashPassThrough).then((digest) => {
+      fileUploadCoordinator.finishHash(digest);
+    }).catch((error) => {
+      logger.error(error);
+      this.#sendUploadErrorNotice("File hash calculation failed.");
+    });
+    try {
+      await new Promise((resolve, reject) => {
+        writeStream.on("close", async () => {
+          logger.info(`Encrypted file finished writing.`, { tempEncryptedFilePath });
+          const protocol = GlobalValueManager$1.serverConfig.protocol;
+          logger.info(`Uploading file ${path$1.basename(filePath)} with protocol ${protocol}`);
+          try {
+            switch (protocol) {
+              case "https":
+                await uploadFileProcessHttps(
+                  tempEncryptedFilePath,
+                  originalFileName,
+                  fileId,
+                  fileUploadCoordinator
+                );
+                break;
+              case "ftps":
+                await uploadFileProcessFtps(
+                  tempEncryptedFilePath,
+                  originalFileName,
+                  fileId,
+                  fileUploadCoordinator
+                );
+                break;
+              case "sftp":
+                await uploadFileProcessSftp(
+                  tempEncryptedFilePath,
+                  originalFileName,
+                  fileId,
+                  fileUploadCoordinator
+                );
+                break;
+              default:
+                throw new Error("Invalid file protocol");
+            }
+            resolve();
+          } catch (err) {
+            reject(err);
           }
-        } catch (error) {
+        });
+        writeStream.on("error", (error) => {
           logger.error(error);
-          this.#sendUploadErrorNotice(`Upload with ${protocol} failed.`, CheckLogForDetailMsg);
-          return;
-        }
-        try {
-          await fileUploadCoordinator.uploadToBlockchainWhenReady();
-          GlobalValueManager$1.sendNotice(
-            "File and info uploaded to server and blockchain.",
-            "normal"
+          this.#sendUploadErrorNotice(
+            "Encrypted file failed to write.",
+            CheckDiskSizePermissionTryAgainMsg
           );
-        } catch (error) {
-          logger.error(error);
-          this.#sendUploadErrorNotice("Blockchain upload failed.", ContactManagerOrTryAgainMsg);
-        }
+          reject(error);
+        });
+        writePassThrough.pipe(writeStream);
       });
-      writeStream.on("error", (error) => {
-        logger.error(error);
-        this.#sendUploadErrorNotice(
-          "Encrypted file failed to write.",
-          CheckDiskSizePermissionTryAgainMsg
-        );
-      });
-      encryptedStream.pipe(writeStream);
+    } catch (error) {
+      logger.error(error);
+      this.#sendUploadErrorNotice(
+        `Upload with ${GlobalValueManager$1.serverConfig.protocol} failed.`,
+        CheckLogForDetailMsg
+      );
+      return;
+    }
+    this.blockchainQueue({ coordinator: fileUploadCoordinator }).catch((error) => {
+      logger.error(error);
+      this.#sendUploadErrorNotice("Blockchain upload failed.", ContactManagerOrTryAgainMsg);
     });
   }
   /**
@@ -4871,6 +5075,7 @@ class FileManager {
       properties: ["openFile", "multiSelections"]
     });
     if (filePaths.length > 0) {
+      this.#uploadBatch = { expected: filePaths.length, fileIds: [] };
       for (const filePath of filePaths) {
         this.uploadQueue({ filePath, parentFolderId });
       }
@@ -5127,6 +5332,242 @@ class FileManager {
     }
   }
   /**
+   * Download a file with options (original or watermark).
+   * Called by the IPC handler for 'download-with-options'.
+   * @param {{ fileId: string, mode: 'original'|'watermark', watermarkOptions: object|null }} opts
+   */
+  downloadFileWithOptionsProcess({ fileId, mode, watermarkOptions }) {
+    if (mode !== "watermark") {
+      this.downloadFileProcess(fileId);
+      return;
+    }
+    this.#downloadWithWatermark(fileId, watermarkOptions);
+  }
+  /**
+   * Full watermark download flow.
+   * 1) Server logs download event + returns authenticated metadata
+   * 2) Pre-download to get file info + blockchain verify
+   * 3) Download + decrypt to temp file
+   * 4) Apply watermark
+   * 5) Save to user's chosen path
+   */
+  async #downloadWithWatermark(fileId, watermarkOptions) {
+    let watermarkMeta;
+    try {
+      watermarkMeta = await new Promise((resolve, reject) => {
+        socket.emit(
+          "download-file-with-watermark",
+          {
+            fileId,
+            mode: "watermark",
+            watermark: {
+              visible: watermarkOptions?.visible ?? true,
+              invisible: watermarkOptions?.invisible ?? false,
+              customNote: watermarkOptions?.customNote ?? "",
+              position: watermarkOptions?.position ?? "bottomRight",
+              opacity: watermarkOptions?.opacity ?? 0.3,
+              fontSize: watermarkOptions?.fontSize ?? 14
+            }
+          },
+          (response) => {
+            if (response.errorMsg) reject(new Error(response.errorMsg));
+            else resolve(response.watermarkMeta);
+          }
+        );
+      });
+    } catch (e) {
+      logger.error(`[WM] get watermark meta failed: ${e.message}`);
+      this.#sendDownloadErrorNotice(e.message, ContactManagerOrTryAgainMsg);
+      return;
+    }
+    socket.emit("download-file-pre", { fileId }, async (response) => {
+      try {
+        if (response.errorMsg) {
+          this.#sendDownloadErrorNotice(response.errorMsg, ContactManagerOrTryAgainMsg);
+          return;
+        }
+        if (!response.fileInfo) {
+          this.#sendDownloadErrorNotice("File not found", ContactManagerOrTryAgainMsg);
+          return;
+        }
+        try {
+          const bv = await this.blockchainManager.getFileVerification(
+            fileId,
+            response.fileInfo.verifyblocknumber
+          );
+          if (!bv || bv.verificationInfo !== "success") {
+            this.#sendDownloadErrorNotice("File not verified on blockchain.", ContactManagerOrTryAgainMsg);
+            return;
+          }
+        } catch (e) {
+          logger.error(e);
+          this.#sendDownloadErrorNotice("Blockchain verification failed.", ContactManagerOrTryAgainMsg);
+          return;
+        }
+        let blockchainFileInfo = null;
+        try {
+          blockchainFileInfo = await this.blockchainManager.getFileInfo(
+            fileId,
+            response.fileInfo.infoblocknumber
+          );
+          if (!blockchainFileInfo) {
+            this.#sendDownloadErrorNotice("File info not on blockchain.", ContactManagerOrTryAgainMsg);
+            return;
+          }
+        } catch (e) {
+          logger.error(e);
+          this.#sendDownloadErrorNotice("Failed to get blockchain file info.", ContactManagerOrTryAgainMsg);
+          return;
+        }
+        const { id, name, cipher, spk, size } = response.fileInfo;
+        const proxied = response.fileInfo.ownerId !== response.fileInfo.originOwnerId;
+        const mimeType = watermarkOptions?.mimeType ?? getMimeFromFilename(name);
+        if (!isWatermarkSupported(name)) {
+          this.#sendDownloadErrorNotice(
+            `${name} 格式不支援浮水印，改以原檔下載。`
+          );
+          this.downloadFileProcess(fileId);
+          return;
+        }
+        const { filePath, canceled } = await electron.dialog.showSaveDialog({
+          defaultPath: name,
+          properties: ["showOverwriteConfirmation", "createDirectory"]
+        });
+        if (canceled) {
+          GlobalValueManager$1.sendNotice("Download canceled.", "error");
+          return;
+        }
+        const tempPath = path$1.resolve(
+          GlobalValueManager$1.tempPath,
+          `${id}_wm_${Date.now()}`
+        );
+        try {
+          await this.#downloadDecryptToPath(id, name, cipher, spk, size, proxied, blockchainFileInfo, tempPath);
+        } catch (e) {
+          logger.error(e);
+          return;
+        }
+        GlobalValueManager$1.sendNotice("Applying watermark...", "normal");
+        try {
+          const decryptedBuffer = await promises.readFile(tempPath);
+          const shortUid = (watermarkMeta.userId || "").slice(0, 8);
+          const shortFid = (watermarkMeta.fileId || "").slice(0, 8);
+          const ts = watermarkMeta.ts || (/* @__PURE__ */ new Date()).toISOString();
+          const customNote = (watermarkOptions?.customNote || "").trim();
+          const wmText = `uid:${shortUid} | fid:${shortFid} | ${ts}${customNote ? " | " + customNote : ""}`;
+          let processedBuffer = decryptedBuffer;
+          if (watermarkOptions?.visible !== false) {
+            processedBuffer = await applyVisibleWatermark(processedBuffer, mimeType, {
+              text: wmText,
+              position: watermarkOptions?.position ?? "bottomRight",
+              opacity: watermarkOptions?.opacity ?? 0.3,
+              fontSize: watermarkOptions?.fontSize ?? 14
+            });
+          }
+          if (watermarkOptions?.invisible === true) {
+            processedBuffer = await applyInvisibleWatermark(processedBuffer, mimeType, {
+              text: wmText
+            });
+          }
+          await promises.writeFile(filePath, processedBuffer);
+          const modes = [
+            watermarkOptions?.visible !== false && "可視",
+            watermarkOptions?.invisible === true && "不可視"
+          ].filter(Boolean).join(" + ");
+          GlobalValueManager$1.sendNotice(`File downloaded with ${modes} watermark.`, "success");
+        } catch (e) {
+          logger.error(e);
+          const code = e.message === "WATERMARK_UNSUPPORTED_FORMAT" ? e.message : "Watermark failed.";
+          this.#sendDownloadErrorNotice(code, TryAgainMsg);
+        } finally {
+          try {
+            await promises.unlink(tempPath);
+          } catch (_) {
+          }
+        }
+      } catch (error) {
+        logger.error(error);
+        this.#sendDownloadErrorNotice("Unexpected error.", ContactManagerOrTryAgainMsg);
+      }
+    });
+  }
+  /**
+   * Download + decrypt a file to an explicit output path, then verify hash.
+   * Used by watermark flow to get decrypted file before applying watermark.
+   */
+  async #downloadDecryptToPath(fileId, filename, cipher, spk, size, proxied, blockchainFileInfo, outputPath) {
+    const writeStream = fs.createWriteStream(outputPath);
+    let writeCompleteResolve, writeCompleteReject;
+    const writeCompletePromise = new Promise((resolve, reject) => {
+      writeCompleteResolve = resolve;
+      writeCompleteReject = reject;
+    });
+    writeStream.on("finish", () => writeCompleteResolve());
+    writeStream.on("error", async (err) => {
+      logger.error(err);
+      try {
+        await promises.unlink(outputPath);
+      } catch (_) {
+      }
+      writeCompleteReject(err);
+    });
+    const decipher = await this.aesModule.decrypt(cipher, spk, proxied);
+    decipher.on("error", async (err) => {
+      logger.error(err);
+      this.#sendDownloadErrorNotice("File decryption failed.", ContactManagerOrTryAgainMsg);
+      try {
+        await promises.unlink(outputPath);
+      } catch (_) {
+      }
+    });
+    const pipeProgress = createPipeProgress({ total: size }, logger);
+    const hashPromise = this.aesModule.makeHashPromise(pipeProgress);
+    pipeProgress.pipe(decipher);
+    decipher.pipe(writeStream);
+    const protocol = GlobalValueManager$1.serverConfig.protocol;
+    try {
+      switch (protocol) {
+        case "https":
+          await downloadFileProcessHttps(fileId, pipeProgress, outputPath);
+          break;
+        case "ftps":
+          await downloadFileProcessFtps(fileId, pipeProgress, outputPath);
+          break;
+        case "sftp":
+          await downloadFileProcessSftp(fileId, pipeProgress, outputPath);
+          break;
+        default:
+          throw new Error("Invalid file protocol");
+      }
+      await writeCompletePromise;
+    } catch (error) {
+      logger.error(error);
+      this.#sendDownloadErrorNotice(`Download failed.`, CheckLogForDetailMsg);
+      throw error;
+    }
+    try {
+      const fileHash = await hashPromise;
+      const blockchainHash = bigIntToHex(blockchainFileInfo.fileHash, 64);
+      if (fileHash !== blockchainHash) {
+        logger.error(`Hash mismatch for ${fileId}`);
+        this.#sendDownloadErrorNotice("File hash mismatch. File may be modified.", ContactManagerOrTryAgainMsg);
+        socket.emit("download-file-hash-error", { fileId, fileHash, blockchainHash });
+        try {
+          await promises.unlink(outputPath);
+        } catch (_) {
+        }
+        throw new Error("Hash mismatch");
+      }
+      logger.info(`[WM] Hash verified for ${fileId}`);
+    } catch (error) {
+      if (error.message !== "Hash mismatch") {
+        logger.error(error);
+        this.#sendDownloadErrorNotice("Hash verification failed.");
+      }
+      throw error;
+    }
+  }
+  /**
    * Ask to delete a file on server.
    * @param {string} fileId
    */
@@ -5327,6 +5768,86 @@ class FileManager {
       logger.error(error);
       GlobalValueManager$1.sendNotice("Failed to search file because of trapdoor calculation", "error");
     }
+  }
+  /**
+   * Batch update permission/description/tags/attrs for multiple files at once.
+   * Computes CTw once and applies it to all fileIds in parallel.
+   * @returns {{ succeeded: string[], failed: string[] }}
+   */
+  async batchUpdateFileDescPermProcess({ fileIds, desc, perm, selectedAttrs, tags }) {
+    const succeeded = [];
+    const failed = [];
+    try {
+      tags = tags.filter((t) => t !== "").slice(0, 5);
+      const pp = await this.abseManager.getPP();
+      const globalAttrs = pp ? pp.U : [];
+      selectedAttrs = selectedAttrs.filter((attr) => globalAttrs.includes(attr));
+      const attrIds = selectedAttrs.map((attr) => globalAttrs.indexOf(attr));
+      logger.debug(
+        `[batchUpdate] Starting batch update: fileIds=${JSON.stringify(fileIds)}, perm=${perm}, tags=${JSON.stringify(tags)}, selectedAttrs=${JSON.stringify(selectedAttrs)}, attrIds=${JSON.stringify(attrIds)}, desc.length=${desc?.length}`
+      );
+      let CTw = null;
+      if (perm == 1 && tags.length > 0) {
+        CTw = await this.abseManager.Enc(tags, selectedAttrs);
+        logger.debug(`[batchUpdate] CTw computed for tags=${JSON.stringify(tags)}`);
+      } else {
+        logger.debug(
+          `[batchUpdate] CTw skipped: perm=${perm}, tags.length=${tags.length}`
+        );
+      }
+      await Promise.all(
+        fileIds.map(async (fileId) => {
+          try {
+            await new Promise((resolve, reject) => {
+              logger.debug(
+                `[batchUpdate] Emitting update-file-desc-perm for fileId=${fileId}, permission=${perm}, description.length=${desc?.length}, hasCTw=${!!CTw}`
+              );
+              socket.emit(
+                "update-file-desc-perm",
+                { fileId, description: desc, permission: perm, CTw },
+                (response) => {
+                  if (response.errorMsg) {
+                    logger.error(
+                      `[batchUpdate] Server returned error for fileId=${fileId}: ${response.errorMsg}`
+                    );
+                    reject(new Error(response.errorMsg));
+                  } else {
+                    logger.debug(
+                      `[batchUpdate] Server OK for fileId=${fileId}. Storing tags=${JSON.stringify(tags)}, attrIds=${JSON.stringify(attrIds)} to local DB`
+                    );
+                    try {
+                      this.databaseManager.storeTagAttr(fileId, tags, attrIds);
+                      const verifyTags = this.databaseManager.getTagsOfFile(fileId);
+                      const verifyAttrs = this.databaseManager.getAttrIdsOfFile(fileId);
+                      logger.debug(
+                        `[batchUpdate] Verified DB write for fileId=${fileId}: tags=${JSON.stringify(verifyTags)}, attrs=${JSON.stringify(verifyAttrs)}`
+                      );
+                      resolve();
+                    } catch (storeErr) {
+                      logger.error(
+                        `[batchUpdate] storeTagAttr threw for fileId=${fileId}: ${storeErr}`
+                      );
+                      reject(storeErr);
+                    }
+                  }
+                }
+              );
+            });
+            succeeded.push(fileId);
+          } catch (e) {
+            logger.error(`[batchUpdate] Failed to update fileId=${fileId}: ${e.message}`);
+            failed.push(fileId);
+          }
+        })
+      );
+      logger.debug(
+        `[batchUpdate] Done. succeeded=${JSON.stringify(succeeded)}, failed=${JSON.stringify(failed)}`
+      );
+      this.getFileListProcess(GlobalValueManager$1.curFolderId);
+    } catch (error) {
+      logger.error(`[batchUpdate] Outer error: ${error}`);
+    }
+    return { succeeded, failed };
   }
   /**
    * Ask to update file description, permission, attribute and tags.
@@ -5714,6 +6235,10 @@ electron.app.whenReady().then(() => {
     if (GlobalValueManager$1.loggedIn) fileManager.getFileListProcess(curFolderId);
   });
   electron.ipcMain.on("download", (_event, fileId) => fileManager.downloadFileProcess(fileId));
+  electron.ipcMain.on(
+    "download-with-options",
+    (_event, opts) => fileManager.downloadFileWithOptionsProcess(opts)
+  );
   electron.ipcMain.on("delete", (_event, fileId) => fileManager.deleteFileProcess(fileId));
   electron.ipcMain.on(
     "add-folder",
@@ -5764,6 +6289,9 @@ electron.app.whenReady().then(() => {
   });
   electron.ipcMain.on("update-file-desc-perm", (_event, values) => {
     fileManager.updateFileDescPermProcess(values);
+  });
+  electron.ipcMain.handle("batch-update-file-desc-perm", async (_event, values) => {
+    return await fileManager.batchUpdateFileDescPermProcess(values);
   });
   electron.ipcMain.handle("share-secret", (_event, values) => {
     return loginManager.shareSecret(values);

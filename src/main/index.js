@@ -131,6 +131,9 @@ app.whenReady().then(() => {
     if (GlobalValueManager.loggedIn) fileManager.getFileListProcess(curFolderId)
   })
   ipcMain.on('download', (_event, fileId) => fileManager.downloadFileProcess(fileId))
+  ipcMain.on('download-with-options', (_event, opts) =>
+    fileManager.downloadFileWithOptionsProcess(opts)
+  )
   ipcMain.on('delete', (_event, fileId) => fileManager.deleteFileProcess(fileId))
   ipcMain.on('add-folder', (_event, curPath, folderName) =>
     fileManager.addFolderProcess(curPath, folderName)
@@ -179,6 +182,9 @@ app.whenReady().then(() => {
   })
   ipcMain.on('update-file-desc-perm', (_event, values) => {
     fileManager.updateFileDescPermProcess(values)
+  })
+  ipcMain.handle('batch-update-file-desc-perm', async (_event, values) => {
+    return await fileManager.batchUpdateFileDescPermProcess(values)
   })
   // Secret sharing
   ipcMain.handle('share-secret', (_event, values) => {

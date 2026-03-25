@@ -14,7 +14,7 @@ import {
   Input
 } from '@material-tailwind/react'
 import PropTypes from 'prop-types'
-import { useContext, useState } from 'react'
+import { useContext, useState, useEffect } from 'react'
 import { PageContext, ProfileContext } from './Contexts'
 import { PageType, PermissionType, bytesToSize } from './Types'
 import ComboBox from './ComboBox'
@@ -27,6 +27,17 @@ function FileDetailDialog({ open, setOpen, fileData }) {
   const [permission, setPermission] = useState(fileData.perm)
   const [selectedAttrs, setSelectedAttrs] = useState(fileData.attrs || [])
   const [tags, setTags] = useState(fileData.tags ? fileData.tags.join(' ') : '')
+
+  // Sync state from fileData every time the dialog opens,
+  // so changes made after initial mount (e.g. post-upload batch update) are reflected.
+  useEffect(() => {
+    if (open) {
+      setDesc(fileData.desc ?? '')
+      setPermission(fileData.perm)
+      setSelectedAttrs(fileData.attrs || [])
+      setTags(fileData.tags ? fileData.tags.join(' ') : '')
+    }
+  }, [open])
   const {
     userIdC: [userId, setUserId]
   } = useContext(ProfileContext)

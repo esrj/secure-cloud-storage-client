@@ -81,6 +81,9 @@ class DatabaseManager {
    * @param {Array<number>} attrIds
    */
   storeTagAttr(fileId, tags, attrIds) {
+    logger.debug(
+      `[DatabaseManager] storeTagAttr: fileId=${fileId}, tags=${JSON.stringify(tags)}, attrIds=${JSON.stringify(attrIds)}`
+    )
     this.deleteTags.run(fileId)
     this.deleteAttrId.run(fileId)
     for (const tag of tags) {
@@ -89,6 +92,7 @@ class DatabaseManager {
     for (const attrId of attrIds) {
       this.insertAttrId.run(fileId, attrId)
     }
+    logger.debug(`[DatabaseManager] storeTagAttr done for fileId=${fileId}`)
   }
 
   /**
