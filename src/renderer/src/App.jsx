@@ -4,7 +4,6 @@
 import { useState, useEffect, useMemo, useCallback } from 'react'
 import NavBar, { PageType } from './components/NavBar.jsx'
 import MainView from './components/MainView.jsx'
-// import ProgressView from './components/ProgressView.jsx'
 import Console from './components/Console.jsx'
 import {
   ProfileContext,
@@ -93,7 +92,6 @@ function App() {
       }
     })
     window.electronAPI.onUserConfig(({ name, email, userId }) => {
-      // console.log(name, email, userId)
       setStoredName(name)
       setStoredEmail(email)
       setUserId(userId)
@@ -108,7 +106,6 @@ function App() {
     window.electronAPI.onGlobalAttrs(({ globalAttrs }) => {
       setGlobalAttrs(globalAttrs)
     })
-    // login()
   }, [])
 
   function swapPageHandler(newPageType) {
@@ -137,7 +134,6 @@ function App() {
       case PageType.reply:
         setSearchType(SearchType.fileId)
         window.electronAPI.askRequestList()
-
         break
       case PageType.request:
         window.electronAPI.askRequestedList()
@@ -179,7 +175,6 @@ function App() {
           </RequestContext.Provider>
         </PageContext.Provider>
       </ProfileContext.Provider>
-      {/* <ProgressView /> */}
     </>
   )
 }

@@ -17,13 +17,24 @@ import {
 } from '@material-tailwind/react'
 import PropTypes from 'prop-types'
 
-/** Supported MIME types for visible watermark — mirrors WatermarkProcessor.js */
-const SUPPORTED_MIMES = ['application/pdf', 'image/png', 'image/jpeg']
+const DOCX_MIME = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+const DOC_MIME = 'application/msword'
+
+/** Supported MIME types for watermark — mirrors WatermarkProcessor.js */
+const SUPPORTED_MIMES = ['application/pdf', 'image/png', 'image/jpeg', DOCX_MIME, 'text/plain']
 
 function getMimeFromFilename(filename = '') {
   const ext = (filename.split('.').pop() || '').toLowerCase()
   return (
-    { pdf: 'application/pdf', png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg' }[ext] || null
+    {
+      pdf: 'application/pdf',
+      png: 'image/png',
+      jpg: 'image/jpeg',
+      jpeg: 'image/jpeg',
+      docx: DOCX_MIME,
+      doc: DOC_MIME,
+      txt: 'text/plain'
+    }[ext] || null
   )
 }
 
@@ -52,6 +63,10 @@ function DownloadOptionsDialog({ open, onClose, fileData }) {
 
   function handleDownload() {
     const effectiveMode = !watermarkSupported ? 'original' : mode
+    if (effectiveMode === 'watermark' && watermarkSupported && !visibleWm && !invisibleWm) {
+      window.alert('請至少選擇「可視浮水印」或「不可視浮水印」其中一種。')
+      return
+    }
     onClose()
     window.electronAPI.askDownloadFileWithOptions({
       fileId: fileData.fileId,
@@ -107,7 +122,12 @@ function DownloadOptionsDialog({ open, onClose, fileData }) {
             <Typography>浮水印下載</Typography>
           </label>
 
-          {!watermarkSupported && mime && (
+          {!watermarkSupported && mime === DOC_MIME && (
+            <Typography variant="small" color="amber" className="ml-6">
+              ⚠ 舊版 DOC 格式不支援浮水印，請先將檔案另存為 DOCX 後再試。
+            </Typography>
+          )}
+          {!watermarkSupported && mime && mime !== DOC_MIME && (
             <Typography variant="small" color="red" className="ml-6">
               此檔案格式（{mime}）不支援浮水印
             </Typography>
@@ -137,7 +157,12 @@ function DownloadOptionsDialog({ open, onClose, fileData }) {
                   <Checkbox
                     label="不可視浮水印"
                     checked={invisibleWm}
-                    onChange={(e) => setInvisibleWm(e.target.checked)}
+                    onChange={(e) => {
+                      const on = e.target.checked
+                      setInvisibleWm(on)
+                      // 多數使用者只要「不可視」時會忘記關閉可視，導致下載檔仍看得到字
+                      if (on) setVisibleWm(false)
+                    }}
                     ripple={false}
                   />
                   {invisibleWm && mime === 'image/jpeg' && (
@@ -145,6 +170,8 @@ function DownloadOptionsDialog({ open, onClose, fileData }) {
                       ⚠ JPEG 為有損格式，不可視浮水印可能在二次壓縮後部分失效，建議使用 PNG。
                     </Typography>
                   )}
+
+
                 </div>
               </div>
             </div>
@@ -157,6 +184,7 @@ function DownloadOptionsDialog({ open, onClose, fileData }) {
                 </Typography>
 
                 {/* Position */}
+                {mime !== 'text/plain' && (
                 <div>
                   <Typography variant="h6" className="mb-1">位置</Typography>
                   <Select
@@ -169,7 +197,18 @@ function DownloadOptionsDialog({ open, onClose, fileData }) {
                       <Option key={val} value={val}>{label}</Option>
                     ))}
                   </Select>
+                  {mime === DOCX_MIME && (
+                    <Typography variant="small" color="gray" className="mt-1">
+                      DOCX 格式的浮水印將附加於文件末尾，位置設定不適用。
+                    </Typography>
+                  )}
                 </div>
+                )}
+                {mime === 'text/plain' && visibleWm && (
+                  <Typography variant="small" color="gray">
+                    TXT 為純文字格式，可視浮水印將以標記行形式附加於文件末尾。位置、透明度與字體大小設定不適用。
+                  </Typography>
+                )}
 
                 {/* Opacity slider */}
                 <div>
@@ -203,7 +242,7 @@ function DownloadOptionsDialog({ open, onClose, fileData }) {
 
             {/* Custom note */}
             <Input
-              label="自訂備注（選填）"
+              label="自訂浮水印（選填）"
               labelProps={{ className: 'font-sans peer-focus:hidden' }}
               value={customNote}
               onChange={(e) => setCustomNote(e.target.value)}
@@ -214,11 +253,21 @@ function DownloadOptionsDialog({ open, onClose, fileData }) {
         )}
 
         {/* ── File info footer ── */}
-        <div className="border-t border-gray-100 pt-2">
+        <div className="border-t border-gray-100 pt-2 flex flex-col gap-1">
           <Typography variant="small" color="gray">
             檔案：{fileData?.name || '—'} ｜ 格式：{mime || '未知'} ｜{' '}
-            浮水印：{watermarkSupported ? '✓ 支援' : '✗ 不支援'}
+            浮水印：{watermarkSupported ? '✓ 支援' : mime === DOC_MIME ? '⚠ 需轉為 DOCX' : '✗ 不支援'}
           </Typography>
+          {watermarkSupported && mime === DOCX_MIME && (
+            <Typography variant="small" color="gray">
+              可視浮水印：✓（文件末尾段落）｜ 不可視浮水印：✓（自訂屬性，高穩定）
+            </Typography>
+          )}
+          {watermarkSupported && mime === 'text/plain' && (
+            <Typography variant="small" color="gray">
+              可視浮水印：✓（末尾標記行）｜ 不可視浮水印：✓（零寬字元，⚠ 穩定性有限）
+            </Typography>
+          )}
         </div>
       </DialogBody>
 

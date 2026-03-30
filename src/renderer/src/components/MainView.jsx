@@ -7,6 +7,7 @@ import PublicTable from './PublicTable'
 import FileTable from './FileTable'
 import ReplyTable from './ReplyTable'
 import WatermarkDetectPage from './WatermarkDetectPage'
+import AgentPage from './AgentPage'
 import { Card } from '@material-tailwind/react'
 import SearchBar from './SearchBar'
 import FileViewButtonGroup from './FileViewButtonGroup'
@@ -31,7 +32,7 @@ function MainView() {
   const [whiteList, setWhiteList] = useState([])
   const [blackList, setBlackList] = useState([])
   const [publicFileList, setPublicFileList] = useState([])
-  const [uploadBatch, setUploadBatch] = useState(null) // { fileIds: string[] } | null
+  const [uploadBatch, setUploadBatch] = useState(null)
   const {
     publicSearchTermC: [publicSearchTerm, setPublicSearchTerm],
     searchTimesC: [searchTimes]
@@ -56,7 +57,6 @@ function MainView() {
     window.electronAPI.onFileListRes((result) => {
       const { files, folders } = result
       const fileList = parseFileList(files, false)
-
       const folderList = JSON.parse(folders)
       folderList.forEach((element) => {
         element.folderId = element.id
@@ -77,13 +77,12 @@ function MainView() {
       setWhiteList(whiteList)
       setBlackList(blackList)
     })
-
     window.electronAPI.onSearchFiles((result) => {
       const searchedFileList = parseFileList(result, false)
       setPublicFileList((prevList) => [...prevList, ...searchedFileList])
     })
-
     window.electronAPI.onUploadBatchDone((result) => {
+      // result now includes: fileIds, sourcePaths, classificationPreview, classifyBatchKey
       setUploadBatch(result)
     })
   }, [])
@@ -146,6 +145,8 @@ function MainView() {
         return <RequestTable requestedList={requestedList} />
       case PageType.watermarkDetect:
         return <WatermarkDetectPage />
+      case PageType.agentSearch:
+        return <AgentPage />
       default:
         return null
     }
@@ -155,8 +156,8 @@ function MainView() {
     <CurPathContext.Provider value={curPathContextValue}>
       <UserListContext.Provider value={userListContextValue}>
         <Card className="flex grow gap-2 pt-2 items-start overflow-auto">
-          {pageType !== PageType.watermarkDetect && (
-            <div className="flex flex-row w-full gap-4 px-2">
+          {pageType !== PageType.watermarkDetect && pageType !== PageType.agentSearch && (
+            <div className="flex flex-row w-full gap-4 px-2 items-center">
               <SearchBar />
               {pageType === PageType.file && <FileViewButtonGroup curPath={curPath} />}
               {pageType === PageType.request && <RequestViewButtonGroup />}
@@ -172,9 +173,13 @@ function MainView() {
           {renderTableView(pageType)}
         </Card>
       </UserListContext.Provider>
-      {uploadBatch && (
+      {uploadBatch && uploadBatch.fileIds && uploadBatch.fileIds.length > 0 && (
         <PostUploadDialog
+          key={uploadBatch.fileIds.join('\0')}
           fileIds={uploadBatch.fileIds}
+          sourcePaths={uploadBatch.sourcePaths ?? []}
+          classificationPreview={uploadBatch.classificationPreview ?? null}
+          classifyBatchKey={uploadBatch.classifyBatchKey ?? null}
           onClose={() => setUploadBatch(null)}
         />
       )}

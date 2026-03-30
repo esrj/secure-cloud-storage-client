@@ -1,7 +1,7 @@
 /**
  * Watermark detection page.
  * All processing is local — no file is uploaded to the server.
- * Supports: PDF (invisible text), PNG/JPEG (LSB steganography).
+ * Supports: PDF (invisible text), PNG/JPEG (LSB LSB), DOCX (custom property + body text), TXT (visible marker + ZWC).
  */
 import { useState, useRef, useCallback } from 'react'
 import {
@@ -23,8 +23,35 @@ import { detectWatermark } from '../watermarkDetector'
 import { bytesToSize } from './Types'
 import toast from 'react-hot-toast'
 
-const SUPPORTED_EXTS = ['PDF', 'PNG', 'JPG', 'JPEG']
-const SUPPORTED_MIMES = ['application/pdf', 'image/png', 'image/jpeg']
+const SUPPORTED_EXTS = ['PDF', 'PNG', 'JPG', 'JPEG', 'DOCX', 'TXT']
+const SUPPORTED_MIMES = [
+  'application/pdf',
+  'image/png',
+  'image/jpeg',
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  'text/plain'
+]
+
+function _mimeFromExt(filename = '') {
+  const ext = (filename.split('.').pop() || '').toLowerCase()
+  return {
+    pdf: 'application/pdf', png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg',
+    docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    doc: 'application/msword', txt: 'text/plain'
+  }[ext] || ''
+}
+
+function _friendlyMime(mime = '') {
+  const map = {
+    'application/pdf': 'PDF',
+    'image/png': 'PNG',
+    'image/jpeg': 'JPEG',
+    'application/vnd.openxmlformats-officedocument.wordprocessingml.document': 'DOCX',
+    'application/msword': 'DOC',
+    'text/plain': 'TXT'
+  }
+  return map[mime] || mime
+}
 
 function WatermarkDetectPage() {
   const [file, setFile] = useState(null)
@@ -37,7 +64,11 @@ function WatermarkDetectPage() {
 
   function handleFileSelect(selectedFile) {
     if (!selectedFile) return
-    const mime = selectedFile.type || ''
+    const mime = selectedFile.type || _mimeFromExt(selectedFile.name)
+    if (mime === 'application/msword') {
+      toast.error('舊版 DOC 不支援偵測，請先另存為 DOCX 格式後再試')
+      return
+    }
     if (!SUPPORTED_MIMES.includes(mime)) {
       toast.error(`不支援的格式：${mime || selectedFile.name.split('.').pop().toUpperCase()}`)
       return
@@ -142,7 +173,7 @@ function WatermarkDetectPage() {
         <input
           ref={inputRef}
           type="file"
-          accept=".pdf,.png,.jpg,.jpeg"
+          accept=".pdf,.png,.jpg,.jpeg,.docx,.txt"
           className="hidden"
           onChange={handleInputChange}
         />
@@ -192,7 +223,7 @@ function FileInfoCard({ file, onClear }) {
         {file.name}
       </Typography>
       <div className="flex gap-3">
-        <Chip value={file.type || '未知格式'} size="sm" variant="ghost" color="blue" />
+        <Chip value={_friendlyMime(file.type) || '未知格式'} size="sm" variant="ghost" color="blue" />
         <Chip value={bytesToSize(file.size)} size="sm" variant="ghost" color="gray" />
       </div>
       <Button
@@ -210,6 +241,10 @@ function FileInfoCard({ file, onClear }) {
       </Button>
     </div>
   )
+}
+
+function _isVisibleMethod(method) {
+  return method === 'txt-visible-marker' || method === 'docx-body-text'
 }
 
 function ResultCard({ result, onCopy }) {
@@ -233,14 +268,14 @@ function ResultCard({ result, onCopy }) {
             <>
               <CheckCircleIcon className="size-7 text-green-600 shrink-0" />
               <Typography color="green" className="font-bold">
-                ✅ 偵測到不可視浮水印
+                ✅ 偵測到{_isVisibleMethod(result.method) ? '可視' : '不可視'}浮水印
               </Typography>
             </>
           ) : (
             <>
               <XCircleIcon className="size-7 text-red-400 shrink-0" />
               <Typography color="red" className="font-bold">
-                ❌ 未偵測到不可視浮水印
+                ❌ 未偵測到浮水印
               </Typography>
             </>
           )}
@@ -272,6 +307,15 @@ function ResultCard({ result, onCopy }) {
         </div>
       )}
 
+      {/* Stability warning for TXT ZWC */}
+      {result.method === 'txt-zwc-steganography' && result.detected && (
+        <div className="flex items-start gap-2 bg-amber-50 rounded-lg p-3">
+          <Typography variant="small" color="amber">
+            ⚠ TXT 零寬字元浮水印穩定性有限，部分文字編輯器在重新儲存後可能移除，建議以 DOCX 或 PDF 格式保存機敏文件。
+          </Typography>
+        </div>
+      )}
+
       {/* Reason / explanation */}
       {result.reason && (
         <div className="border-t border-blue-gray-50 pt-3">
@@ -281,8 +325,8 @@ function ResultCard({ result, onCopy }) {
         </div>
       )}
 
-      {/* Unsupported */}
-      {isUnsupported && (
+      {/* Unsupported (only if there's no reason message already) */}
+      {isUnsupported && !result.reason && (
         <Typography color="red">此檔案格式不支援浮水印偵測</Typography>
       )}
     </Card>
@@ -293,6 +337,10 @@ function MethodBadge({ method }) {
   const config = {
     'pdf-invisible-text': { label: 'PDF 不可視文字', color: 'purple' },
     'lsb-r-channel': { label: 'LSB R 通道隱寫', color: 'teal' },
+    'docx-custom-property': { label: 'DOCX 自訂屬性', color: 'indigo' },
+    'docx-body-text': { label: 'DOCX 文件文字', color: 'blue-gray' },
+    'txt-visible-marker': { label: 'TXT 可視標記', color: 'green' },
+    'txt-zwc-steganography': { label: 'TXT 零寬字元', color: 'cyan' },
     unsupported: { label: '不支援', color: 'red' },
     error: { label: '錯誤', color: 'red' }
   }

@@ -1,5 +1,13 @@
 /**
- * This file handles a local database which stores file tag and attribute settings.
+ * Local SQLite database for client-side backup.
+ *
+ * NOTE: tag_table and attr_table have been REMOVED.
+ * Tags and attribute IDs are now stored in the server-side PostgreSQL
+ * (file_tags / file_attrs tables) and returned as part of the file-list response.
+ *
+ * This class is kept solely for the encrypted DB backup / recovery feature
+ * (encryptToServer / recoverFromServer). The SQLite file itself is essentially
+ * empty now and can be thought of as a placeholder.
  */
 import Database from 'better-sqlite3'
 import GlobalValueManager from './GlobalValueManager'
@@ -23,77 +31,43 @@ class DatabaseManager {
     this.keyManager = keyManager
     this.init()
   }
+
   /**
-   * Initialize database scheme and statements
+   * Initialize database.
+   * Old tag_table / attr_table rows are cleaned up on first run so the
+   * SQLite file stays lean after the migration to PostgreSQL.
    */
   init() {
     this.db = Database(GlobalValueManager.dbPath)
-    // Tags
-    this.db
-      .prepare(
-        `CREATE TABLE IF NOT EXISTS tag_table (
-        fileid TEXT not null,
-        tag TEXT not null,
-        PRIMARY KEY (fileid, tag)
-        );`
-      )
-      .run()
-    this.insertTag = this.db.prepare(`INSERT INTO tag_table (fileid, tag) VALUES (?, ?);`)
-    this.getTags = this.db.prepare(`SELECT tag FROM tag_table WHERE fileid = ?;`)
-    this.deleteTags = this.db.prepare(`DELETE FROM tag_table WHERE fileid = ?;`)
-    // Attributes
-    this.db
-      .prepare(
-        `CREATE TABLE IF NOT EXISTS attr_table (
-        fileid TEXT not null,
-        attrid INTEGER not null,
-        PRIMARY KEY (fileid, attrid)
-        );`
-      )
-      .run()
-    this.insertAttrId = this.db.prepare(`INSERT INTO attr_table (fileid, attrid) VALUES (?, ?);`)
-    this.getAttrIds = this.db.prepare(`SELECT attrid FROM attr_table WHERE fileid = ?;`)
-    this.deleteAttrId = this.db.prepare(`DELETE FROM attr_table WHERE fileid = ?;`)
-  }
 
-  /**
-   * Get tags of file
-   * @param {string} fileId
-   * @returns {Array<string>} tags
-   */
-  getTagsOfFile(fileId) {
-    return this.getTags.all(fileId)
-  }
-
-  /**
-   * Get attribute Ids of file
-   * @param {string} fileId
-   * @returns {Array<string>} attribute Ids
-   */
-  getAttrIdsOfFile(fileId) {
-    return this.getAttrIds.all(fileId)
-  }
-
-  /**
-   * Store tags and attribute Ids into database
-   * @param {string} fileId
-   * @param {Array<string>} tags
-   * @param {Array<number>} attrIds
-   */
-  storeTagAttr(fileId, tags, attrIds) {
-    logger.debug(
-      `[DatabaseManager] storeTagAttr: fileId=${fileId}, tags=${JSON.stringify(tags)}, attrIds=${JSON.stringify(attrIds)}`
-    )
-    this.deleteTags.run(fileId)
-    this.deleteAttrId.run(fileId)
-    for (const tag of tags) {
-      this.insertTag.run(fileId, tag)
+    // Remove legacy tables if they still exist (one-time migration cleanup)
+    try {
+      this.db.prepare('DROP TABLE IF EXISTS tag_table').run()
+      this.db.prepare('DROP TABLE IF EXISTS attr_table').run()
+    } catch (e) {
+      logger.warn(`[DatabaseManager] Could not drop legacy tables: ${e.message}`)
     }
-    for (const attrId of attrIds) {
-      this.insertAttrId.run(fileId, attrId)
-    }
-    logger.debug(`[DatabaseManager] storeTagAttr done for fileId=${fileId}`)
   }
+
+  // ── Stub methods kept for call-site compatibility ────────────────────────
+  // Any code that still calls these will silently no-op rather than throw.
+
+  /** @deprecated tags are now stored in PostgreSQL */
+  getTagsOfFile(_fileId) {
+    return []
+  }
+
+  /** @deprecated attrIds are now stored in PostgreSQL */
+  getAttrIdsOfFile(_fileId) {
+    return []
+  }
+
+  /** @deprecated tags are now stored in PostgreSQL */
+  storeTagAttr(_fileId, _tags, _attrIds) {
+    logger.debug('[DatabaseManager] storeTagAttr is a no-op: data lives in PostgreSQL now.')
+  }
+
+  // ── Backup / Recovery (unchanged) ────────────────────────────────────────
 
   /**
    * Encrypt the database and store on server.
@@ -106,7 +80,6 @@ class DatabaseManager {
       const cipher = crypto.createCipheriv('aes-256-cbc', key, iv)
       const fileStream = createReadStream(GlobalValueManager.dbPath)
       fileStream.pipe(cipher)
-      // Upload with HTTPS. Maybe combine with HttpsFileProcess?
       logger.info('Upload encrypted database to server.')
       const form = new FormData()
       form.append('file', cipher, basename(GlobalValueManager.dbPath))
@@ -155,18 +128,15 @@ class DatabaseManager {
 
   /**
    * Retrieve encrypted database and recover from server
-   * @returns
    */
   async recoverFromServer() {
     try {
       this.db.close()
-      // Create file streams
       const sk = this.keyManager.getKeys().sk
       const { key, iv } = await deriveAESKeyIvFromBuffer(sk)
       const decipher = crypto.createDecipheriv('aes-256-cbc', key, iv)
       const fileStream = createWriteStream(GlobalValueManager.dbPath)
       decipher.pipe(fileStream)
-      // Download from server
       const request = net.request({
         method: 'GET',
         url: `${GlobalValueManager.httpsUrl}/downloadDb`,
@@ -176,8 +146,6 @@ class DatabaseManager {
 
       request.on('response', (response) => {
         logger.info(`STATUS: ${response.statusCode}`)
-        // logger.info(`HEADERS: ${JSON.stringify(response.headers)}`)
-
         response.on('data', (chunk) => {
           if (response.statusCode === 200) {
             decipher.write(chunk)
@@ -185,7 +153,6 @@ class DatabaseManager {
             logger.info(`BODY: ${chunk}`)
           }
         })
-
         response.on('end', () => {
           logger.info('No more data in response.')
           decipher.end()

@@ -1,12 +1,13 @@
 /**
- * This file record types and some parsing functions
+ * This file records types and some parsing functions
  */
 export const PageType = Object.freeze({
   public: 'public',
   file: 'file',
   reply: 'reply',
   request: 'request',
-  watermarkDetect: 'watermarkDetect'
+  watermarkDetect: 'watermarkDetect',
+  agentSearch: 'agentSearch'
 })
 
 export const ResponseType = Object.freeze({
@@ -16,9 +17,9 @@ export const ResponseType = Object.freeze({
 })
 
 export const PermissionType = Object.freeze({
-  0: '私人', // private
-  1: '公開', // public
-  2: '不公開' // unlisted
+  0: '私人',
+  1: '公開',
+  2: '不公開'
 })
 
 export const SearchType = Object.freeze({

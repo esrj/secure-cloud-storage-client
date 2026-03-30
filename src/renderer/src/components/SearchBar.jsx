@@ -18,13 +18,13 @@ function SearchBar() {
   const [pageType] = useContext(PageContext)
 
   return (
-    <div className="flex flex-row grow justify-center items-center">
+    <div className="flex flex-row grow h-11 items-stretch min-w-0">
       <Menu placement="bottom-start">
         <MenuHandler>
           <Button
             ripple={false}
             variant="text"
-            className="rounded-r-none h-full min-w-24 !px-0 justify-center border border-gray-400"
+            className="rounded-r-none h-full w-24 shrink-0 !px-0 justify-center border border-gray-400"
           >
             {pageType === PageType.public ? 'Tag' : type}
           </Button>
@@ -53,11 +53,11 @@ function SearchBar() {
           else setSearchTerm(e.target.value)
         }}
         size="lg"
-        className="grow rounded-none focus:!border-t-gray-900"
-      ></Input>
+        className="rounded-none focus:!border-t-gray-900"
+        containerProps={{ className: '!min-w-0 flex-1 h-full' }}
+      />
       <Button
-        className="h-full min-w-12 rounded-l-none justify-center"
-        size="sm"
+        className="h-full w-12 shrink-0 rounded-l-none flex items-center justify-center !p-0"
         variant="gradient"
         onClick={() => setSearchTimes(searchTimes + 1)}
       >

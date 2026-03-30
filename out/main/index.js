@@ -33,6 +33,7 @@ const promises = require("node:fs/promises");
 const node_stream = require("node:stream");
 const pdfLib = require("pdf-lib");
 const Jimp = require("jimp");
+const JSZip = require("jszip");
 const FormData = require("form-data");
 const ethers = require("ethers");
 const basicFtp = require("basic-ftp");
@@ -44,6 +45,8 @@ const ssh2 = require("ssh2");
 const mcl = require("mcl-wasm");
 const assert = require("node:assert");
 const Database = require("better-sqlite3");
+const node_module = require("node:module");
+const mammoth = require("mammoth");
 const sss = require("shamirs-secret-sharing");
 const fs$1 = require("fs");
 function _interopNamespaceDefault(e) {
@@ -3614,14 +3617,26 @@ class RequestManager {
     });
   }
 }
-const WATERMARK_SUPPORTED_MIMES = ["application/pdf", "image/png", "image/jpeg"];
+const DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+const TXT_MIME = "text/plain";
+const WATERMARK_SUPPORTED_MIMES = [
+  "application/pdf",
+  "image/png",
+  "image/jpeg",
+  DOCX_MIME,
+  TXT_MIME
+];
 function getMimeFromFilename(filename = "") {
   const ext = (filename.split(".").pop() || "").toLowerCase();
   const map = {
     pdf: "application/pdf",
     png: "image/png",
     jpg: "image/jpeg",
-    jpeg: "image/jpeg"
+    jpeg: "image/jpeg",
+    docx: DOCX_MIME,
+    doc: "application/msword",
+    // not in supported list — binary OLE format
+    txt: TXT_MIME
   };
   return map[ext] || null;
 }
@@ -3629,25 +3644,25 @@ function isWatermarkSupported(filename) {
   return WATERMARK_SUPPORTED_MIMES.includes(getMimeFromFilename(filename));
 }
 async function applyVisibleWatermark(inputBuffer, mimeType, opts) {
-  logger.info(`[WatermarkProcessor] Applying watermark: mime=${mimeType}, position=${opts.position}, opacity=${opts.opacity}`);
-  if (mimeType === "application/pdf") {
-    return _watermarkPDF(inputBuffer, opts);
-  } else if (mimeType === "image/png" || mimeType === "image/jpeg") {
-    return _watermarkImage(inputBuffer, mimeType, opts);
-  }
+  logger.info(`[WatermarkProcessor] Applying visible watermark: mime=${mimeType}, position=${opts.position}, opacity=${opts.opacity}`);
+  if (mimeType === "application/pdf") return _watermarkPDF(inputBuffer, opts);
+  if (mimeType === "image/png" || mimeType === "image/jpeg") return _watermarkImage(inputBuffer, mimeType, opts);
+  if (mimeType === DOCX_MIME) return _visibleDocx(inputBuffer, opts);
+  if (mimeType === TXT_MIME) return _visibleTxt(inputBuffer, opts);
   throw new Error("WATERMARK_UNSUPPORTED_FORMAT");
 }
 async function _watermarkPDF(inputBuffer, { text, position = "bottomRight", opacity = 0.3, fontSize = 14 }) {
+  const safeText = _toAsciiSafe(text) || text.replace(/[^\x20-\x7E]/g, "?");
   const pdfDoc = await pdfLib.PDFDocument.load(inputBuffer);
   const font = await pdfDoc.embedFont(pdfLib.StandardFonts.Helvetica);
   const color = pdfLib.rgb(0.4, 0.4, 0.4);
   for (const page of pdfDoc.getPages()) {
     const { width, height } = page.getSize();
-    const textWidth = font.widthOfTextAtSize(text, fontSize);
+    const textWidth = font.widthOfTextAtSize(safeText, fontSize);
     if (position === "diagonal") {
       const step = Math.max(120, height / 3);
       for (let y = step * 0.5; y < height; y += step) {
-        page.drawText(text, {
+        page.drawText(safeText, {
           x: Math.max(10, (width - textWidth) / 2),
           y,
           size: fontSize,
@@ -3659,12 +3674,13 @@ async function _watermarkPDF(inputBuffer, { text, position = "bottomRight", opac
       }
     } else {
       const x = position === "bottomRight" ? Math.max(10, width - textWidth - 20) : 20;
-      page.drawText(text, { x, y: 20, size: fontSize, font, color, opacity });
+      page.drawText(safeText, { x, y: 20, size: fontSize, font, color, opacity });
     }
   }
   return Buffer.from(await pdfDoc.save());
 }
 async function _watermarkImage(inputBuffer, mimeType, { text, position = "bottomRight", opacity = 0.5, fontSize = 32 }) {
+  const safeText = _toAsciiSafe(text) || text.replace(/[^\x20-\x7E]/g, "?");
   const image = await Jimp.read(inputBuffer);
   const w = image.bitmap.width;
   const h = image.bitmap.height;
@@ -3673,8 +3689,8 @@ async function _watermarkImage(inputBuffer, mimeType, { text, position = "bottom
   else if (fontSize >= 16) fontKey = Jimp.FONT_SANS_16_WHITE;
   else fontKey = Jimp.FONT_SANS_8_WHITE;
   const font = await Jimp.loadFont(fontKey);
-  const textW = Jimp.measureText(font, text);
-  const textH = Jimp.measureTextHeight(font, text, w + 1);
+  const textW = Jimp.measureText(font, safeText);
+  const textH = Jimp.measureTextHeight(font, safeText, w + 1);
   const overlay = new Jimp(w, h, 0);
   let x = 20;
   let y = Math.max(0, h - textH - 20);
@@ -3684,7 +3700,7 @@ async function _watermarkImage(inputBuffer, mimeType, { text, position = "bottom
     x = Math.max(0, (w - textW) / 2);
     y = Math.max(0, (h - textH) / 2);
   }
-  overlay.print(font, x, y, text);
+  overlay.print(font, x, y, safeText);
   const clampedOpacity = Math.min(1, Math.max(0, opacity));
   overlay.scan(0, 0, w, h, function(px, py, idx) {
     const origAlpha = this.bitmap.data[idx + 3];
@@ -3700,34 +3716,73 @@ async function _watermarkImage(inputBuffer, mimeType, { text, position = "bottom
   const jimpMime = mimeType === "image/png" ? Jimp.MIME_PNG : Jimp.MIME_JPEG;
   return image.getBufferAsync(jimpMime);
 }
-async function applyInvisibleWatermark(inputBuffer, mimeType, opts) {
-  logger.info(`[WatermarkProcessor] Applying INVISIBLE watermark: mime=${mimeType}`);
-  if (mimeType === "application/pdf") {
-    return _invisiblePDF(inputBuffer, opts);
-  } else if (mimeType === "image/png") {
-    return _lsbPNG(inputBuffer, opts);
-  } else if (mimeType === "image/jpeg") {
-    return _lsbJPEG(inputBuffer, opts);
+async function _visibleDocx(inputBuffer, { text, opacity = 0.3, fontSize = 14 }) {
+  const zip = await JSZip.loadAsync(inputBuffer);
+  const docFile = zip.file("word/document.xml");
+  if (!docFile) throw new Error("WATERMARK_UNSUPPORTED_FORMAT");
+  const docXml = await docFile.async("string");
+  const grayVal = Math.round(64 + (1 - Math.min(1, Math.max(0, opacity))) * 128);
+  const hex = grayVal.toString(16).padStart(2, "0").toUpperCase();
+  const colorHex = `${hex}${hex}${hex}`;
+  const szHp = Math.round(fontSize * 2);
+  const wmPara = [
+    "<w:p>",
+    '<w:pPr><w:jc w:val="center"/><w:spacing w:before="120" w:after="0"/>',
+    '<w:pBdr><w:top w:val="single" w:sz="4" w:space="1" w:color="CCCCCC"/></w:pBdr>',
+    "</w:pPr>",
+    "<w:r>",
+    `<w:rPr><w:color w:val="${colorHex}"/><w:sz w:val="${szHp}"/><w:szCs w:val="${szHp}"/></w:rPr>`,
+    `<w:t xml:space="preserve">${_escapeXml(text)}</w:t>`,
+    "</w:r>",
+    "</w:p>"
+  ].join("");
+  const sectPrIdx = docXml.lastIndexOf("<w:sectPr");
+  let modified;
+  if (sectPrIdx !== -1) {
+    modified = docXml.slice(0, sectPrIdx) + wmPara + docXml.slice(sectPrIdx);
+  } else {
+    modified = docXml.replace("</w:body>", wmPara + "</w:body>");
   }
+  zip.file("word/document.xml", modified);
+  return zip.generateAsync({ type: "nodebuffer", compression: "DEFLATE" });
+}
+function _visibleTxt(inputBuffer, { text }) {
+  const suffix = Buffer.from(`
+
+# Watermark: ${text}
+`, "utf8");
+  return Buffer.concat([inputBuffer, suffix]);
+}
+async function applyInvisibleWatermark(inputBuffer, mimeType, opts) {
+  logger.info(`[WatermarkProcessor] Applying invisible watermark: mime=${mimeType}`);
+  if (mimeType === "application/pdf") return _invisiblePDF(inputBuffer, opts);
+  if (mimeType === "image/png") return _lsbPNG(inputBuffer, opts);
+  if (mimeType === "image/jpeg") return _lsbJPEG(inputBuffer, opts);
+  if (mimeType === DOCX_MIME) return _invisibleDocx(inputBuffer, opts);
+  if (mimeType === TXT_MIME) return _invisibleTxt(inputBuffer, opts);
   throw new Error("WATERMARK_UNSUPPORTED_FORMAT");
 }
 async function _invisiblePDF(inputBuffer, { text }) {
   const pdfDoc = await pdfLib.PDFDocument.load(inputBuffer);
   const font = await pdfDoc.embedFont(pdfLib.StandardFonts.Helvetica);
+  const fontSize = 8;
   for (const page of pdfDoc.getPages()) {
     const { width, height } = page.getSize();
+    const encoded = font.encodeText(text);
     for (let y = 30; y < height; y += 120) {
       for (let x = 10; x < width - 10; x += 180) {
-        page.drawText(text, {
-          x,
-          y,
-          size: 8,
-          font,
-          color: pdfLib.rgb(0, 0, 0),
-          // colour is irrelevant for mode 3, but required
-          renderingMode: pdfLib.TextRenderingMode.Invisible
-          // mode 3: renders nothing
-        });
+        page.setFont(font);
+        page.pushOperators(
+          pdfLib.pushGraphicsState(),
+          pdfLib.beginText(),
+          pdfLib.setFillingColor(pdfLib.rgb(0, 0, 0)),
+          pdfLib.setFontAndSize(page.fontKey, fontSize),
+          pdfLib.setTextRenderingMode(pdfLib.TextRenderingMode.Invisible),
+          pdfLib.rotateAndSkewTextRadiansAndTranslate(0, 0, 0, x, y),
+          pdfLib.showText(encoded),
+          pdfLib.endText(),
+          pdfLib.popGraphicsState()
+        );
       }
     }
   }
@@ -3764,6 +3819,97 @@ async function _lsbJPEG(inputBuffer, { text }) {
   _encodeLSB(image.bitmap.data, image.bitmap.width, image.bitmap.height, text);
   image.quality(95);
   return image.getBufferAsync(Jimp.MIME_JPEG);
+}
+async function _invisibleDocx(inputBuffer, { text }) {
+  const zip = await JSZip.loadAsync(inputBuffer);
+  const customXml = [
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>',
+    '<Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/custom-properties"',
+    ' xmlns:vt="http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes">',
+    '<property fmtid="{D5CDD505-2E9C-101B-9397-08002B2CF9AE}" pid="2" name="WatermarkPayload">',
+    `<vt:lpwstr>${_escapeXml(text)}</vt:lpwstr>`,
+    "</property>",
+    "</Properties>"
+  ].join("\n");
+  zip.file("docProps/custom.xml", customXml);
+  const ctFile = zip.file("[Content_Types].xml");
+  if (ctFile) {
+    const ctXml = await ctFile.async("string");
+    if (!ctXml.includes("custom-properties")) {
+      zip.file(
+        "[Content_Types].xml",
+        ctXml.replace(
+          "</Types>",
+          '<Override PartName="/docProps/custom.xml" ContentType="application/vnd.openxmlformats-officedocument.custom-properties+xml"/></Types>'
+        )
+      );
+    }
+  }
+  const relsFile = zip.file("_rels/.rels");
+  if (relsFile) {
+    const relsXml = await relsFile.async("string");
+    if (!relsXml.includes("custom-properties")) {
+      zip.file(
+        "_rels/.rels",
+        relsXml.replace(
+          "</Relationships>",
+          '<Relationship Id="rId_WmCustom" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/custom-properties" Target="docProps/custom.xml"/></Relationships>'
+        )
+      );
+    }
+  }
+  return zip.generateAsync({ type: "nodebuffer", compression: "DEFLATE" });
+}
+function _invisibleTxt(inputBuffer, { text }) {
+  if (!_isValidUtf8(inputBuffer)) {
+    logger.warn("[WatermarkProcessor] TXT invisible watermark: non-UTF-8 file detected. Falling back to visible ASCII marker to preserve detectability.");
+    const suffix = Buffer.from(`
+
+# Watermark: ${text}
+`, "utf8");
+    return Buffer.concat([inputBuffer, suffix]);
+  }
+  const textBytes = Buffer.from(text, "utf8");
+  const header = Buffer.allocUnsafe(4);
+  header.writeUInt32BE(textBytes.length, 0);
+  const payload = Buffer.concat([header, textBytes]);
+  let zwcStr = "";
+  for (let i = 0; i < payload.length; i++) {
+    for (let bit = 7; bit >= 0; bit--) {
+      zwcStr += payload[i] >> bit & 1 ? "‍" : "​";
+    }
+  }
+  const zwcBytes = Buffer.from(zwcStr, "utf8");
+  return Buffer.concat([inputBuffer, zwcBytes]);
+}
+function _isValidUtf8(buf) {
+  let i = 0;
+  while (i < buf.length) {
+    const b = buf[i];
+    let extra;
+    if (b < 128) {
+      extra = 0;
+    } else if ((b & 224) === 192) {
+      extra = 1;
+    } else if ((b & 240) === 224) {
+      extra = 2;
+    } else if ((b & 248) === 240) {
+      extra = 3;
+    } else {
+      return false;
+    }
+    for (let j = 1; j <= extra; j++) {
+      if (i + j >= buf.length || (buf[i + j] & 192) !== 128) return false;
+    }
+    i += extra + 1;
+  }
+  return true;
+}
+function _toAsciiSafe(text) {
+  return text.replace(/[^\x20-\x7E]/g, "").replace(/\s{2,}/g, " ").trim();
+}
+function _escapeXml(str) {
+  return str.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&apos;");
 }
 const BLOCK_RANGE_LIMIT = GlobalValueManager$1.blockchain.blockRangeLimit;
 function uuidToBigInt(uuidString) {
@@ -4702,67 +4848,34 @@ class DatabaseManager {
     this.init();
   }
   /**
-   * Initialize database scheme and statements
+   * Initialize database.
+   * Old tag_table / attr_table rows are cleaned up on first run so the
+   * SQLite file stays lean after the migration to PostgreSQL.
    */
   init() {
     this.db = Database(GlobalValueManager$1.dbPath);
-    this.db.prepare(
-      `CREATE TABLE IF NOT EXISTS tag_table (
-        fileid TEXT not null,
-        tag TEXT not null,
-        PRIMARY KEY (fileid, tag)
-        );`
-    ).run();
-    this.insertTag = this.db.prepare(`INSERT INTO tag_table (fileid, tag) VALUES (?, ?);`);
-    this.getTags = this.db.prepare(`SELECT tag FROM tag_table WHERE fileid = ?;`);
-    this.deleteTags = this.db.prepare(`DELETE FROM tag_table WHERE fileid = ?;`);
-    this.db.prepare(
-      `CREATE TABLE IF NOT EXISTS attr_table (
-        fileid TEXT not null,
-        attrid INTEGER not null,
-        PRIMARY KEY (fileid, attrid)
-        );`
-    ).run();
-    this.insertAttrId = this.db.prepare(`INSERT INTO attr_table (fileid, attrid) VALUES (?, ?);`);
-    this.getAttrIds = this.db.prepare(`SELECT attrid FROM attr_table WHERE fileid = ?;`);
-    this.deleteAttrId = this.db.prepare(`DELETE FROM attr_table WHERE fileid = ?;`);
-  }
-  /**
-   * Get tags of file
-   * @param {string} fileId
-   * @returns {Array<string>} tags
-   */
-  getTagsOfFile(fileId) {
-    return this.getTags.all(fileId);
-  }
-  /**
-   * Get attribute Ids of file
-   * @param {string} fileId
-   * @returns {Array<string>} attribute Ids
-   */
-  getAttrIdsOfFile(fileId) {
-    return this.getAttrIds.all(fileId);
-  }
-  /**
-   * Store tags and attribute Ids into database
-   * @param {string} fileId
-   * @param {Array<string>} tags
-   * @param {Array<number>} attrIds
-   */
-  storeTagAttr(fileId, tags, attrIds) {
-    logger.debug(
-      `[DatabaseManager] storeTagAttr: fileId=${fileId}, tags=${JSON.stringify(tags)}, attrIds=${JSON.stringify(attrIds)}`
-    );
-    this.deleteTags.run(fileId);
-    this.deleteAttrId.run(fileId);
-    for (const tag of tags) {
-      this.insertTag.run(fileId, tag);
+    try {
+      this.db.prepare("DROP TABLE IF EXISTS tag_table").run();
+      this.db.prepare("DROP TABLE IF EXISTS attr_table").run();
+    } catch (e) {
+      logger.warn(`[DatabaseManager] Could not drop legacy tables: ${e.message}`);
     }
-    for (const attrId of attrIds) {
-      this.insertAttrId.run(fileId, attrId);
-    }
-    logger.debug(`[DatabaseManager] storeTagAttr done for fileId=${fileId}`);
   }
+  // ── Stub methods kept for call-site compatibility ────────────────────────
+  // Any code that still calls these will silently no-op rather than throw.
+  /** @deprecated tags are now stored in PostgreSQL */
+  getTagsOfFile(_fileId) {
+    return [];
+  }
+  /** @deprecated attrIds are now stored in PostgreSQL */
+  getAttrIdsOfFile(_fileId) {
+    return [];
+  }
+  /** @deprecated tags are now stored in PostgreSQL */
+  storeTagAttr(_fileId, _tags, _attrIds) {
+    logger.debug("[DatabaseManager] storeTagAttr is a no-op: data lives in PostgreSQL now.");
+  }
+  // ── Backup / Recovery (unchanged) ────────────────────────────────────────
   /**
    * Encrypt the database and store on server.
    */
@@ -4819,7 +4932,6 @@ class DatabaseManager {
   }
   /**
    * Retrieve encrypted database and recover from server
-   * @returns
    */
   async recoverFromServer() {
     try {
@@ -4875,11 +4987,677 @@ class DatabaseManager {
     }
   }
 }
+const REASON_UNSUPPORTED = "FORMAT_NOT_SUPPORTED_OR_EMPTY";
+const MAX_EXTRACT_BYTES = 100 * 1024 * 1024;
+let _cjsRequire = null;
+try {
+  const base = typeof __filename !== "undefined" ? __filename : require("url").pathToFileURL(__filename).href;
+  _cjsRequire = node_module.createRequire(base);
+} catch (e) {
+  logger.warn(`[TextExtract] createRequire setup failed: ${e.message}`);
+}
+let _pdfParse = null;
+async function getPdfParse() {
+  if (_pdfParse) return _pdfParse;
+  if (_cjsRequire) {
+    try {
+      const mod = _cjsRequire("pdf-parse");
+      const fn = typeof mod === "function" ? mod : mod?.default;
+      if (typeof fn === "function") {
+        _pdfParse = fn;
+        logger.debug("[TextExtract] pdf-parse loaded via createRequire");
+        return _pdfParse;
+      }
+      logger.warn(`[TextExtract] pdf-parse via createRequire: unexpected type=${typeof mod}`);
+    } catch (e) {
+      logger.warn(`[TextExtract] pdf-parse createRequire failed: ${e.message}`);
+    }
+  }
+  try {
+    const mod = await import("pdf-parse");
+    const fn = typeof mod?.default?.default === "function" ? mod.default.default : typeof mod?.default === "function" ? mod.default : typeof mod === "function" ? mod : null;
+    if (typeof fn === "function") {
+      _pdfParse = fn;
+      logger.debug("[TextExtract] pdf-parse loaded via dynamic import");
+      return _pdfParse;
+    }
+    logger.warn(`[TextExtract] pdf-parse dynamic import: all shapes failed. Keys: ${JSON.stringify(Object.keys(mod ?? {}))}`);
+  } catch (e) {
+    logger.warn(`[TextExtract] pdf-parse dynamic import threw: ${e.message}`);
+  }
+  return null;
+}
+let _pdfjsLib = null;
+async function getPdfjsLib() {
+  if (_pdfjsLib) return _pdfjsLib;
+  if (!_cjsRequire) return null;
+  let lib = null;
+  let workerPath = null;
+  const candidates = [
+    "pdfjs-dist/legacy/build/pdf.js",
+    "pdfjs-dist/build/pdf.js",
+    "pdfjs-dist"
+  ];
+  for (const c of candidates) {
+    try {
+      const mod = _cjsRequire(c);
+      lib = mod?.default ?? mod;
+      if (lib?.getDocument) {
+        logger.debug(`[TextExtract] pdfjs-dist loaded from: ${c}`);
+        break;
+      }
+      lib = null;
+    } catch {
+    }
+  }
+  if (!lib) {
+    logger.warn("[TextExtract] pdfjs-dist: could not load library");
+    return null;
+  }
+  const workerCandidates = [
+    "pdfjs-dist/legacy/build/pdf.worker.js",
+    "pdfjs-dist/build/pdf.worker.js",
+    "pdfjs-dist/build/pdf.worker.mjs"
+  ];
+  for (const w of workerCandidates) {
+    try {
+      workerPath = _cjsRequire.resolve(w);
+      break;
+    } catch {
+    }
+  }
+  if (workerPath && lib?.GlobalWorkerOptions) {
+    lib.GlobalWorkerOptions.workerSrc = workerPath;
+    logger.debug(`[TextExtract] pdfjs-dist worker set to: ${workerPath}`);
+  } else if (lib?.GlobalWorkerOptions) {
+    lib.GlobalWorkerOptions.workerSrc = "pdfjs-dist/build/pdf.worker.js";
+    logger.warn("[TextExtract] pdfjs-dist: worker path not resolved, using module name");
+  }
+  _pdfjsLib = lib;
+  return _pdfjsLib;
+}
+async function readFileBounded(filePath) {
+  const st = await promises.stat(filePath);
+  if (!st.isFile()) throw new Error("NOT_A_REGULAR_FILE");
+  if (st.size > MAX_EXTRACT_BYTES) throw new Error("FILE_TOO_LARGE");
+  return promises.readFile(filePath);
+}
+function cleanExtractedText(raw) {
+  if (!raw || typeof raw !== "string") return "";
+  let s = raw.replace(/\r\n/g, "\n");
+  s = s.split("\n").map((line) => line.replace(/[ \t]+/g, " ").trim()).join("\n");
+  s = s.replace(/\n{3,}/g, "\n\n");
+  return s.trim();
+}
+function isEffectivelyEmpty(text) {
+  return !text || !/\S/.test(text);
+}
+function decodeTextBuffer(buf) {
+  if (buf.length === 0) return "";
+  if (buf.length >= 3 && buf[0] === 239 && buf[1] === 187 && buf[2] === 191)
+    return buf.slice(3).toString("utf8");
+  if (buf.length >= 2 && buf[0] === 254 && buf[1] === 255)
+    return buf.slice(2).toString("utf16be");
+  if (buf.length >= 2 && buf[0] === 255 && buf[1] === 254)
+    return buf.slice(2).toString("utf16le");
+  let s = buf.toString("utf8");
+  if (s.length > 0 && s.charCodeAt(0) === 65279) s = s.slice(1);
+  return s;
+}
+async function extractTxt(filePath) {
+  const buf = await readFileBounded(filePath);
+  return decodeTextBuffer(buf);
+}
+async function extractDocx(filePath) {
+  const buf = await readFileBounded(filePath);
+  const { value } = await mammoth.extractRawText({ buffer: buf });
+  return value || "";
+}
+async function extractPdf(filePath) {
+  const buf = await readFileBounded(filePath);
+  logger.debug(`[TextExtract] Extracting PDF: "${filePath}" (${buf.length} bytes)`);
+  const pdfParse = await getPdfParse();
+  if (pdfParse) {
+    try {
+      const data = await pdfParse(buf);
+      const text = typeof data?.text === "string" ? data.text : "";
+      logger.debug(`[TextExtract] pdf-parse result: text.length=${text.length}`);
+      if (!isEffectivelyEmpty(text)) return text;
+      logger.debug("[TextExtract] pdf-parse returned empty text, trying pdfjs-dist...");
+    } catch (e) {
+      logger.warn(`[TextExtract] pdf-parse threw for "${filePath}": ${e.message}`);
+    }
+  }
+  const pdfjsLib = await getPdfjsLib();
+  if (!pdfjsLib) {
+    logger.warn("[TextExtract] pdfjs-dist unavailable; PDF extraction failed");
+    return "";
+  }
+  try {
+    const loadingTask = pdfjsLib.getDocument({
+      data: new Uint8Array(buf),
+      useSystemFonts: true,
+      verbosity: 0
+    });
+    const pdf = await loadingTask.promise;
+    logger.debug(`[TextExtract] pdfjs-dist: ${pdf.numPages} pages`);
+    const pageTexts = [];
+    for (let i = 1; i <= pdf.numPages; i++) {
+      const page = await pdf.getPage(i);
+      const content = await page.getTextContent();
+      const pageText = content.items.filter((item) => "str" in item && item.str).map((item) => item.str).join(" ");
+      pageTexts.push(pageText);
+    }
+    await pdf.destroy();
+    const text = pageTexts.join("\n");
+    logger.debug(`[TextExtract] pdfjs-dist result: text.length=${text.length}`);
+    return text;
+  } catch (e) {
+    logger.warn(`[TextExtract] pdfjs-dist threw for "${filePath}": ${e.message}`);
+    return "";
+  }
+}
+async function extractOne(filePath, ext) {
+  switch (ext) {
+    case ".txt":
+    case ".text":
+    case ".md":
+    case ".markdown":
+      return extractTxt(filePath);
+    case ".pdf":
+      return extractPdf(filePath);
+    case ".docx":
+      return extractDocx(filePath);
+    default:
+      return null;
+  }
+}
+async function extractTextFromFiles(paths) {
+  if (!Array.isArray(paths) || paths.length === 0) {
+    return { supported: false, reason: REASON_UNSUPPORTED, texts: [] };
+  }
+  const texts = [];
+  for (const filePath of paths) {
+    if (typeof filePath !== "string" || !filePath.trim()) continue;
+    const ext = path$1.extname(filePath).toLowerCase();
+    let raw = null;
+    try {
+      raw = await extractOne(filePath, ext);
+    } catch (e) {
+      logger.warn(`[TextExtract] Failed to extract "${filePath}": ${e.message}`);
+      raw = null;
+    }
+    if (raw === null) continue;
+    const text = cleanExtractedText(raw);
+    if (isEffectivelyEmpty(text)) {
+      logger.warn(
+        `[TextExtract] "${filePath}" extracted but text is empty (ext=${ext}; possibly a scanned/image-only PDF with no text layer)`
+      );
+      continue;
+    }
+    texts.push({ path: filePath, text });
+  }
+  if (texts.length === 0) {
+    return { supported: false, reason: REASON_UNSUPPORTED, texts: [] };
+  }
+  return { supported: true, texts };
+}
+const DEFAULT_CLASSIFIER_THRESHOLD = 0.55;
+function parseThreshold(v, fallback) {
+  const n = typeof v === "number" ? v : parseFloat(String(v ?? ""));
+  if (!Number.isFinite(n)) return fallback;
+  return Math.min(1, Math.max(0, n));
+}
+function getClassifierSettings() {
+  let classifierThreshold = parseThreshold(
+    process.env.CLASSIFIER_THRESHOLD,
+    DEFAULT_CLASSIFIER_THRESHOLD
+  );
+  try {
+    const g = GlobalValueManager$1;
+    const ct = g?.classifier?.threshold ?? g?.["classifier.threshold"];
+    if (ct != null && ct !== "") classifierThreshold = parseThreshold(ct, classifierThreshold);
+  } catch {
+  }
+  return { classifierThreshold };
+}
+const MODEL_FILENAME = "Qwen3-14B-Q4_K_M.gguf";
+const CONTEXT_SIZE = 2048;
+const CLASSIFY_JSON_SCHEMA = {
+  type: "object",
+  properties: {
+    labels: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: {
+          name: { type: "string" },
+          score: { type: "number" },
+          evidence: { type: "array", items: { type: "string" } }
+        },
+        required: ["name", "score", "evidence"]
+      }
+    },
+    final_labels: { type: "array", items: { type: "string" } }
+  },
+  required: ["labels", "final_labels"]
+};
+let _nlc = null;
+let _llama = null;
+let _model = null;
+let _context = null;
+let _grammar = null;
+let _inferenceChain = Promise.resolve();
+async function getNLC() {
+  if (!_nlc) {
+    _nlc = await import("node-llama-cpp");
+  }
+  return _nlc;
+}
+function getModelPath() {
+  if (process.env.LLAMA_MODEL_PATH) return process.env.LLAMA_MODEL_PATH;
+  if (utils.is.dev) {
+    return path$1.join(electron.app.getAppPath(), "resources", "models", MODEL_FILENAME);
+  }
+  return path$1.join(process.resourcesPath, "models", MODEL_FILENAME);
+}
+async function ensureReady() {
+  if (_context) return;
+  const modelPath = getModelPath();
+  if (!fs.existsSync(modelPath)) {
+    throw new Error(
+      `LLM model not found.
+Expected: "${modelPath}"
+Place Qwen3-14B-Q4_K_M.gguf inside resources/models/ or set the LLAMA_MODEL_PATH environment variable.`
+    );
+  }
+  const { getLlama } = await getNLC();
+  _llama = await getLlama();
+  _model = await _llama.loadModel({ modelPath });
+  _context = await _model.createContext({ contextSize: CONTEXT_SIZE, sequences: 1 });
+  _grammar = await _llama.createGrammarForJsonSchema(CLASSIFY_JSON_SCHEMA);
+}
+async function _doGenerate(prompt, opts) {
+  await ensureReady();
+  const { LlamaChatSession } = await getNLC();
+  const systemPrompt = `/no_think
+
+${opts.system ?? ""}`.trim();
+  const sequence = _context.getSequence();
+  try {
+    const session = new LlamaChatSession({
+      contextSequence: sequence,
+      systemPrompt,
+      autoDisposeSequence: false
+      // we dispose explicitly in finally
+    });
+    return await session.prompt(prompt, {
+      temperature: typeof opts.temperature === "number" ? opts.temperature : 0.1,
+      maxTokens: 1024,
+      grammar: _grammar
+    });
+  } finally {
+    try {
+      await sequence.dispose();
+    } catch {
+    }
+  }
+}
+async function generate(prompt, opts = {}) {
+  let resolveSlot, rejectSlot;
+  const slot = new Promise((res, rej) => {
+    resolveSlot = res;
+    rejectSlot = rej;
+  });
+  _inferenceChain = _inferenceChain.then(() => _doGenerate(prompt, opts)).then(resolveSlot, rejectSlot);
+  return slot;
+}
+const ZH_CLASSIFY_SYSTEM_PROMPT = `你是一個文件分類器。根據輸入的「文件片段」判斷它屬於哪些類別，並輸出嚴格 JSON。
+
+分類標籤固定如下（不可新增、不可改名）：
+- 海軍：艦隊/艦艇/潛艦/海上航行/港口/海事作戰/海軍單位/海軍採購與訓練
+- 陸軍：地面作戰/步兵/裝甲/砲兵/工兵/陸上基地/陸軍單位/陸軍採購與訓練
+- 空軍：航空作戰/戰機/飛行任務/飛彈/防空/航電/飛安/空軍基地/空軍單位
+- 聯合作戰：跨軍種協同/聯參/國防部層級/聯合演訓/共同規範/多軍種指揮體系
+- 演訓戰備：演習/訓練/戰備整備/動員/教範/戰術程序/演訓通報
+- 其他：非軍事或無法判斷軍種、或僅泛泛提到國防但無明確歸類
+
+規則：
+1) 一份文件可以多標籤（例如 聯合作戰 + 海軍）。
+2) 必須輸出每個標籤的 score（0~1），代表信心。
+3) evidence 必須是從原文擷取的 1~3 句短引文或關鍵詞（不要編造；每句盡量 <= 30 字）。
+4) final_labels 只包含 score >= threshold 的標籤（threshold 由使用者提供）；若全部低於 threshold，final_labels 必須是 ["其他"]。
+5) 若片段內容不足以判斷，請提高「其他」分數，並把 final_labels 設為 ["其他"]。
+6) 僅輸出 JSON（不要 markdown、不要額外文字）。
+7) JSON schema 固定如下，labels 必須包含全部標籤且順序一致：
+{
+  "labels": [
+    {"name":"海軍","score":0.0,"evidence":[]},
+    {"name":"陸軍","score":0.0,"evidence":[]},
+    {"name":"空軍","score":0.0,"evidence":[]},
+    {"name":"聯合作戰","score":0.0,"evidence":[]},
+    {"name":"演訓戰備","score":0.0,"evidence":[]},
+    {"name":"其他","score":0.0,"evidence":[]}
+  ],
+  "final_labels": ["其他"]
+}
+8) score 最多 2 位小數。
+9) 若某標籤 score >= threshold，該標籤 evidence 不可為空。`;
+const ZH_LABEL_ORDER = ["海軍", "陸軍", "空軍", "聯合作戰", "演訓戰備", "其他"];
+const ZH_SET = new Set(ZH_LABEL_ORDER);
+function clamp01(n) {
+  if (typeof n !== "number" || !Number.isFinite(n)) return 0;
+  return Math.min(1, Math.max(0, n));
+}
+function roundScore2(n) {
+  return Math.round(clamp01(n) * 100) / 100;
+}
+function clampThreshold(t) {
+  if (typeof t !== "number" || !Number.isFinite(t)) return 0.55;
+  return Math.min(1, Math.max(0, t));
+}
+function stripMarkdownFence(s) {
+  let t = String(s).trim();
+  if (t.startsWith("```")) {
+    t = t.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/m, "").trim();
+  }
+  const i = t.indexOf("{");
+  const j = t.lastIndexOf("}");
+  if (i >= 0 && j > i) t = t.slice(i, j + 1);
+  return t.trim();
+}
+function parseZhClassificationResponse(rawText) {
+  let parsed;
+  try {
+    parsed = JSON.parse(stripMarkdownFence(rawText));
+  } catch {
+    return { ok: false, reason: "JSON_PARSE_FAILED" };
+  }
+  if (!parsed || typeof parsed !== "object" || !Array.isArray(parsed.labels)) {
+    return { ok: false, reason: "JSON_PARSE_FAILED" };
+  }
+  const byName = /* @__PURE__ */ new Map();
+  for (const entry of parsed.labels) {
+    if (entry && typeof entry.name === "string" && ZH_SET.has(entry.name)) {
+      byName.set(entry.name, entry);
+    }
+  }
+  const labels = ZH_LABEL_ORDER.map((name) => {
+    const e = byName.get(name);
+    const score = roundScore2(typeof e?.score === "number" ? e.score : 0);
+    const evidence = Array.isArray(e?.evidence) ? e.evidence.filter((x) => typeof x === "string").map((x) => x.trim()).filter(Boolean).slice(0, 3) : [];
+    return { name, score, evidence };
+  });
+  return { ok: true, labels };
+}
+function balanceZhLabelsFromRuns(okRuns) {
+  const runs = okRuns.filter((r) => r && Array.isArray(r.labels) && r.labels.length > 0);
+  if (runs.length === 0) {
+    return ZH_LABEL_ORDER.map((name) => ({ name, score: 0, evidence: [] }));
+  }
+  return ZH_LABEL_ORDER.map((name) => {
+    let sum = 0;
+    let n = 0;
+    let bestScore = -1;
+    let bestEv = [];
+    const pool = [];
+    for (const run of runs) {
+      const L = run.labels.find((l) => l.name === name);
+      if (!L) continue;
+      sum += L.score;
+      n += 1;
+      const ev = Array.isArray(L.evidence) ? L.evidence : [];
+      for (const x of ev) {
+        if (typeof x === "string" && x.trim() && !pool.includes(x.trim())) pool.push(x.trim());
+      }
+      if (L.score > bestScore && ev.length > 0) {
+        bestScore = L.score;
+        bestEv = ev.filter((x) => typeof x === "string" && x.trim()).slice(0, 3);
+      }
+    }
+    const score = roundScore2(n > 0 ? sum / n : 0);
+    const evidence = (bestEv.length > 0 ? bestEv : pool).slice(0, 3);
+    return { name, score, evidence };
+  });
+}
+function computeFinalLabelsFromBalanced(labels, threshold) {
+  const th = clampThreshold(threshold);
+  const finals = [];
+  for (const l of labels) {
+    if (l.score >= th && l.evidence.length > 0) finals.push(l.name);
+  }
+  if (finals.length === 0) return ["其他"];
+  return finals;
+}
+const CHUNK_CHAR_LIMIT = 2e3;
+const MAX_CHUNKS_PER_FILE = 3;
+function sliceTextIntoChunks(fullText) {
+  const t = typeof fullText === "string" ? fullText : "";
+  const out = [];
+  for (let i = 0; i < MAX_CHUNKS_PER_FILE; i++) {
+    const start = i * CHUNK_CHAR_LIMIT;
+    if (start >= t.length) break;
+    out.push(t.slice(start, start + CHUNK_CHAR_LIMIT));
+  }
+  return out;
+}
+async function classifyDocuments(input) {
+  const enable = input?.enable !== false;
+  if (!enable) {
+    return { supported: false, reason: "DISABLED", labels: [], final_labels: [] };
+  }
+  const settings = getClassifierSettings();
+  const threshold = clampThreshold(
+    typeof input?.threshold === "number" ? input.threshold : settings.classifierThreshold
+  );
+  const paths = Array.isArray(input?.paths) ? input.paths.filter((p) => typeof p === "string" && p.trim()) : [];
+  if (paths.length === 0) {
+    return {
+      supported: false,
+      reason: "NO_FILES",
+      labels: [],
+      final_labels: [],
+      extraction: { attempted: false }
+    };
+  }
+  const extracted = await extractTextFromFiles(paths);
+  if (!extracted.supported) {
+    return {
+      supported: false,
+      reason: extracted.reason,
+      labels: [],
+      final_labels: [],
+      extraction: { attempted: true, ok: false }
+    };
+  }
+  const extraction = {
+    attempted: true,
+    ok: true,
+    filesCount: extracted.texts.length,
+    files: extracted.texts.map((t) => ({
+      path: t.path,
+      name: path$1.basename(t.path),
+      charLen: t.text.length,
+      chunks: sliceTextIntoChunks(t.text).length
+    }))
+  };
+  const chunkJobs = [];
+  for (const { path: path2, text } of extracted.texts) {
+    const parts = sliceTextIntoChunks(text);
+    for (let ci = 0; ci < parts.length; ci++) {
+      chunkJobs.push({ path: path2, chunkIndex: ci + 1, chunkTotal: parts.length, body: parts[ci] });
+    }
+  }
+  if (chunkJobs.length === 0) {
+    return {
+      supported: false,
+      reason: "EMPTY_CONTENT",
+      labels: [],
+      final_labels: [],
+      extraction
+    };
+  }
+  const totalChunks = chunkJobs.length;
+  const report = (done2) => {
+    if (typeof input?.onProgress === "function") {
+      input.onProgress({ done: done2, total: totalChunks });
+    }
+  };
+  const okRuns = [];
+  const rawResponses = [];
+  try {
+    for (let i = 0; i < chunkJobs.length; i++) {
+      const job = chunkJobs[i];
+      const userPrompt = `本輪門檻 threshold = ${threshold}
+
+此為同一批上傳中的其中一段文字。請僅依下列「文件片段」輸出 JSON（規格見 system，僅 JSON、勿 markdown）。
+
+檔案：${path$1.basename(job.path)}（第 ${job.chunkIndex}/${job.chunkTotal} 段）
+
+${job.body}`;
+      const raw = await generate(userPrompt, {
+        system: ZH_CLASSIFY_SYSTEM_PROMPT,
+        temperature: typeof input?.temperature === "number" ? input.temperature : 0.1
+      });
+      rawResponses.push(raw);
+      const parsed = parseZhClassificationResponse(raw);
+      if (parsed.ok) okRuns.push({ labels: parsed.labels });
+      report(i + 1);
+    }
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    return {
+      supported: false,
+      reason: "LLM_GENERATE_FAILED",
+      labels: [],
+      final_labels: [],
+      extraction,
+      llmError: msg,
+      thresholdUsed: threshold
+    };
+  }
+  if (okRuns.length === 0) {
+    return {
+      supported: false,
+      reason: "JSON_PARSE_FAILED",
+      labels: [],
+      final_labels: [],
+      extraction,
+      llmRawText: rawResponses[0] ?? "",
+      thresholdUsed: threshold
+    };
+  }
+  const balancedLabels = balanceZhLabelsFromRuns(okRuns);
+  const final_labels = computeFinalLabelsFromBalanced(balancedLabels, threshold);
+  return {
+    supported: true,
+    labels: balancedLabels,
+    final_labels,
+    classification: { labels: balancedLabels, final_labels },
+    extraction: {
+      ...extraction,
+      chunksClassified: chunkJobs.length,
+      parseSuccessRuns: okRuns.length
+    },
+    llmRawText: input?.debug ? rawResponses.join("\n---\n") : void 0,
+    thresholdUsed: threshold
+  };
+}
+const cache = /* @__PURE__ */ new Map();
+function makeUploadBatchClassifyKey(paths) {
+  const sorted = [...paths].filter((p) => typeof p === "string" && p.trim()).sort();
+  return crypto$1.createHash("sha256").update(sorted.join("\0"), "utf8").digest("hex").slice(0, 32);
+}
+function getPreUploadClassifyEntry(batchKey) {
+  return cache.get(batchKey);
+}
+async function runPreUploadClassification(notify, batchKey, paths) {
+  cache.set(batchKey, { state: "running" });
+  notify({ batchKey, phase: "running" });
+  try {
+    const { classifierThreshold } = getClassifierSettings();
+    const result = await classifyDocuments({
+      enable: true,
+      paths,
+      threshold: classifierThreshold,
+      onProgress: (p) => notify({ batchKey, phase: "running", progress: p })
+    });
+    cache.set(batchKey, { state: "done", result });
+    notify({ batchKey, phase: "finished", result });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    logger.error(`[SmartClassify] Classification failed for batch ${batchKey}: ${msg}`, {
+      stack: e instanceof Error ? e.stack : void 0
+    });
+    const errResult = {
+      supported: false,
+      reason: "CLASSIFY_EXCEPTION",
+      llmError: msg,
+      labels: [],
+      final_labels: []
+    };
+    cache.set(batchKey, { state: "done", result: errResult });
+    notify({ batchKey, phase: "finished", result: errResult });
+  }
+}
+function snapshotForPostUploadDialog(classifierWanted, classifierEnabled, batchKey) {
+  if (!classifierWanted) {
+    return { classificationPreview: null, classifyBatchKey: null };
+  }
+  if (!classifierEnabled) {
+    return {
+      classificationPreview: {
+        supported: false,
+        reason: "CLASSIFIER_DISABLED",
+        labels: [],
+        final_labels: []
+      },
+      classifyBatchKey: null
+    };
+  }
+  if (!batchKey) {
+    return {
+      classificationPreview: { supported: false, reason: "NO_CLASSIFY_KEY", labels: [], final_labels: [] },
+      classifyBatchKey: null
+    };
+  }
+  const entry = cache.get(batchKey);
+  if (!entry || entry.state === "running") {
+    return {
+      classificationPreview: { pending: true, batchKey },
+      classifyBatchKey: batchKey
+    };
+  }
+  return {
+    classificationPreview: entry.result ?? { supported: false, reason: "NO_RESULT", labels: [], final_labels: [] },
+    classifyBatchKey: batchKey
+  };
+}
+let appClassifierEnabled = true;
+let uploadBatchSmartClassifyWanted = false;
+function setAppClassifierEnabled(v) {
+  appClassifierEnabled = Boolean(v);
+}
+function getAppClassifierEnabled() {
+  return appClassifierEnabled;
+}
+function setUploadBatchSmartClassifyWanted(v) {
+  uploadBatchSmartClassifyWanted = Boolean(v);
+}
+function getUploadBatchSmartClassifyWanted() {
+  return uploadBatchSmartClassifyWanted;
+}
 class FileManager {
   aesModule;
   blockchainManager;
   uploadQueue;
-  #uploadBatch = { expected: 0, fileIds: [] };
+  #uploadBatch = {
+    expected: 0,
+    fileIds: [],
+    pathsByFileId: {},
+    classifyBatchKey: null,
+    classifierWanted: false
+  };
   /**
    * @param {AESModule} aesModule
    * @param {BlockchainManager} blockchainManager
@@ -4939,10 +5717,26 @@ class FileManager {
    */
   #checkUploadBatchDone() {
     if (this.#uploadBatch.expected === 0 && this.#uploadBatch.fileIds.length > 0) {
+      const { classifyBatchKey, classifierWanted, fileIds, pathsByFileId } = this.#uploadBatch;
+      const sourcePaths = fileIds.map((id) => pathsByFileId[id]).filter(Boolean);
+      const { classificationPreview } = snapshotForPostUploadDialog(
+        classifierWanted,
+        getAppClassifierEnabled(),
+        classifyBatchKey
+      );
       GlobalValueManager$1.mainWindow?.webContents.send("upload-batch-done", {
-        fileIds: [...this.#uploadBatch.fileIds]
+        fileIds: [...fileIds],
+        sourcePaths,
+        classificationPreview,
+        classifyBatchKey
       });
-      this.#uploadBatch = { expected: 0, fileIds: [] };
+      this.#uploadBatch = {
+        expected: 0,
+        fileIds: [],
+        pathsByFileId: {},
+        classifyBatchKey: null,
+        classifierWanted: false
+      };
     }
   }
   /**
@@ -4985,6 +5779,9 @@ class FileManager {
       logger.error(`Failed to pre-upload: ${error.message}. Upload aborted.`);
       this.#sendUploadErrorNotice(error.message);
       return;
+    }
+    if (this.#uploadBatch.pathsByFileId) {
+      this.#uploadBatch.pathsByFileId[fileId] = filePath;
     }
     const tempEncryptedFilePath = path$1.resolve(GlobalValueManager$1.tempPath, fileId);
     const writeStream = fs.createWriteStream(tempEncryptedFilePath);
@@ -5075,7 +5872,23 @@ class FileManager {
       properties: ["openFile", "multiSelections"]
     });
     if (filePaths.length > 0) {
-      this.#uploadBatch = { expected: filePaths.length, fileIds: [] };
+      const classifierWanted = getUploadBatchSmartClassifyWanted();
+      const classifierEnabled = getAppClassifierEnabled();
+      const classifyBatchKey = classifierWanted && classifierEnabled ? makeUploadBatchClassifyKey(filePaths) : null;
+      this.#uploadBatch = {
+        expected: filePaths.length,
+        fileIds: [],
+        pathsByFileId: {},
+        classifyBatchKey,
+        classifierWanted
+      };
+      if (classifierWanted && classifierEnabled && classifyBatchKey) {
+        void runPreUploadClassification(
+          (payload) => GlobalValueManager$1.mainWindow?.webContents.send("preupload-classify-status", payload),
+          classifyBatchKey,
+          filePaths
+        );
+      }
       for (const filePath of filePaths) {
         this.uploadQueue({ filePath, parentFolderId });
       }
@@ -5100,8 +5913,8 @@ class FileManager {
           const globalAttrs = (await this.abseManager.getPP())?.U || [];
           const filesObj = JSON.parse(files);
           filesObj.forEach((file) => {
-            file.tags = this.databaseManager.getTagsOfFile(file.id).map((row) => row.tag);
-            file.attrs = this.databaseManager.getAttrIdsOfFile(file.id).map((row) => globalAttrs.at(row.attrid));
+            file.tags = Array.isArray(file.tags) ? file.tags : [];
+            file.attrs = Array.isArray(file.attrIds) ? file.attrIds.map((id) => globalAttrs.at(id)).filter(Boolean) : [];
             logger.debug(`attrs for file ${file.id}`, { attrs: file.attrs });
           });
           GlobalValueManager$1.mainWindow?.webContents.send("file-list-res", {
@@ -5361,8 +6174,8 @@ class FileManager {
             fileId,
             mode: "watermark",
             watermark: {
-              visible: watermarkOptions?.visible ?? true,
-              invisible: watermarkOptions?.invisible ?? false,
+              visible: watermarkOptions?.visible === true,
+              invisible: watermarkOptions?.invisible === true,
               customNote: watermarkOptions?.customNote ?? "",
               position: watermarkOptions?.position ?? "bottomRight",
               opacity: watermarkOptions?.opacity ?? 0.3,
@@ -5456,7 +6269,7 @@ class FileManager {
           const customNote = (watermarkOptions?.customNote || "").trim();
           const wmText = `uid:${shortUid} | fid:${shortFid} | ${ts}${customNote ? " | " + customNote : ""}`;
           let processedBuffer = decryptedBuffer;
-          if (watermarkOptions?.visible !== false) {
+          if (watermarkOptions?.visible === true) {
             processedBuffer = await applyVisibleWatermark(processedBuffer, mimeType, {
               text: wmText,
               position: watermarkOptions?.position ?? "bottomRight",
@@ -5471,7 +6284,7 @@ class FileManager {
           }
           await promises.writeFile(filePath, processedBuffer);
           const modes = [
-            watermarkOptions?.visible !== false && "可視",
+            watermarkOptions?.visible === true && "可視",
             watermarkOptions?.invisible === true && "不可視"
           ].filter(Boolean).join(" + ");
           GlobalValueManager$1.sendNotice(`File downloaded with ${modes} watermark.`, "success");
@@ -5800,11 +6613,11 @@ class FileManager {
           try {
             await new Promise((resolve, reject) => {
               logger.debug(
-                `[batchUpdate] Emitting update-file-desc-perm for fileId=${fileId}, permission=${perm}, description.length=${desc?.length}, hasCTw=${!!CTw}`
+                `[batchUpdate] Emitting update-file-desc-perm for fileId=${fileId}, permission=${perm}, tags=${JSON.stringify(tags)}, hasCTw=${!!CTw}`
               );
               socket.emit(
                 "update-file-desc-perm",
-                { fileId, description: desc, permission: perm, CTw },
+                { fileId, description: desc, permission: perm, CTw, tags, attrIds },
                 (response) => {
                   if (response.errorMsg) {
                     logger.error(
@@ -5813,22 +6626,9 @@ class FileManager {
                     reject(new Error(response.errorMsg));
                   } else {
                     logger.debug(
-                      `[batchUpdate] Server OK for fileId=${fileId}. Storing tags=${JSON.stringify(tags)}, attrIds=${JSON.stringify(attrIds)} to local DB`
+                      `[batchUpdate] Server OK for fileId=${fileId}. tags/attrIds stored in PostgreSQL.`
                     );
-                    try {
-                      this.databaseManager.storeTagAttr(fileId, tags, attrIds);
-                      const verifyTags = this.databaseManager.getTagsOfFile(fileId);
-                      const verifyAttrs = this.databaseManager.getAttrIdsOfFile(fileId);
-                      logger.debug(
-                        `[batchUpdate] Verified DB write for fileId=${fileId}: tags=${JSON.stringify(verifyTags)}, attrs=${JSON.stringify(verifyAttrs)}`
-                      );
-                      resolve();
-                    } catch (storeErr) {
-                      logger.error(
-                        `[batchUpdate] storeTagAttr threw for fileId=${fileId}: ${storeErr}`
-                      );
-                      reject(storeErr);
-                    }
+                    resolve();
                   }
                 }
               );
@@ -5864,19 +6664,17 @@ class FileManager {
         CTw = await this.abseManager.Enc(tags, selectedAttrs);
         logger.debug(`Selected tags: ${tags}, selected attrs: ${selectedAttrs}`);
       }
+      const attrIds = selectedAttrs.map((attr) => globalAttrs.indexOf(attr));
       logger.info(`Asking to ${actionStr}...`);
       socket.emit(
         "update-file-desc-perm",
-        { fileId, description: desc, permission: perm, CTw },
+        { fileId, description: desc, permission: perm, CTw, tags, attrIds },
         (response) => {
           const { errorMsg } = response;
           if (errorMsg) {
             logger.error(`Failed to ${actionStr}: ${errorMsg}`);
             GlobalValueManager$1.sendNotice(`Failed to ${actionStr}`, "error");
           } else {
-            const attrIds = selectedAttrs.map((attr) => globalAttrs.indexOf(attr));
-            logger.debug(`store attrids`, { attrIds });
-            this.databaseManager.storeTagAttr(fileId, tags, attrIds);
             logger.info(`Success to ${actionStr}`);
             GlobalValueManager$1.sendNotice(`Success to ${actionStr}`, "success");
             this.getFileListProcess(GlobalValueManager$1.curFolderId);
@@ -6149,6 +6947,452 @@ class LoginManager {
     }
   }
 }
+let done = false;
+function registerClassifierIpcOnce() {
+  if (done) return;
+  done = true;
+  electron.ipcMain.handle("classifier:set-enabled", (_, enabled) => {
+    setAppClassifierEnabled(Boolean(enabled));
+    return { ok: true };
+  });
+  electron.ipcMain.handle("classifier:set-upload-batch-smart-classify", (_, wanted) => {
+    setUploadBatchSmartClassifyWanted(Boolean(wanted));
+    return { ok: true };
+  });
+  electron.ipcMain.handle("classifier:get-upload-batch-smart-classify", () => ({
+    wanted: getUploadBatchSmartClassifyWanted()
+  }));
+}
+let fileManagerRef = null;
+let registered = false;
+function setFileManagerForUploadPostIpc(fm) {
+  fileManagerRef = fm;
+}
+function registerUploadPostIpcOnce() {
+  if (registered) return;
+  registered = true;
+  electron.ipcMain.handle("classify-documents", async (_, input) => classifyDocuments(input));
+  electron.ipcMain.handle("preupload-classify-snapshot", async (_, batchKey) => {
+    if (typeof batchKey !== "string" || !batchKey.trim()) return null;
+    return getPreUploadClassifyEntry(batchKey.trim()) ?? null;
+  });
+  electron.ipcMain.handle("file-manager:start-upload", async (_, folderId) => {
+    if (!fileManagerRef || typeof fileManagerRef.uploadFileProcess !== "function") {
+      throw new Error("FileManager is not ready for upload");
+    }
+    const fid = folderId != null && folderId !== "" ? folderId : GlobalValueManager$1.curFolderId;
+    await fileManagerRef.uploadFileProcess(fid);
+  });
+  electron.ipcMain.handle("file-manager:refresh-list", (_, folderId) => {
+    if (!fileManagerRef || typeof fileManagerRef.getFileListProcess !== "function") {
+      throw new Error("FileManager is not ready for file list");
+    }
+    const fid = folderId != null && folderId !== "" ? folderId : GlobalValueManager$1.curFolderId;
+    fileManagerRef.getFileListProcess(fid);
+    return true;
+  });
+  electron.ipcMain.handle("ask-batch-update-file-desc-perm", async (_, payload) => {
+    if (!fileManagerRef || typeof fileManagerRef.batchUpdateFileDescPermProcess !== "function") {
+      throw new Error("FileManager is not ready for batch update");
+    }
+    return fileManagerRef.batchUpdateFileDescPermProcess(payload);
+  });
+}
+const PERM_LABEL = { 0: "私人", 1: "公開", 2: "不公開" };
+function bytesToSize(bytes) {
+  const n = parseInt(bytes, 10);
+  if (!n) return "0 B";
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  const i = Math.min(Math.floor(Math.log(n) / Math.log(1e3)), units.length - 1);
+  return `${(n / Math.pow(1e3, i)).toFixed(2)} ${units[i]}`;
+}
+function enrichFile(rawFile, databaseManager2, uploaderName) {
+  const fileId = rawFile.fileId ?? rawFile.id ?? "";
+  const name = rawFile.name ?? "";
+  const ext = path$1.extname(name).replace(".", "").toLowerCase();
+  const size = parseInt(rawFile.size ?? 0, 10);
+  const date = rawFile.date ?? (rawFile.timestamp ? String(rawFile.timestamp).split("T")[0] : "");
+  const perm = rawFile.perm ?? rawFile.permissions ?? 0;
+  const desc = rawFile.desc ?? rawFile.description ?? "";
+  const ownerId = rawFile.owner ?? rawFile.ownerId ?? "";
+  let tags = [];
+  if (Array.isArray(rawFile.tags) && rawFile.tags.length > 0) {
+    tags = rawFile.tags.filter((t) => typeof t === "string" && t.trim());
+  } else {
+    try {
+      const rows = databaseManager2?.getTagsOfFile(fileId) ?? [];
+      tags = rows.map((r) => r.tag);
+    } catch {
+    }
+  }
+  const permLabel = PERM_LABEL[perm] ?? String(perm);
+  return {
+    fileId,
+    name,
+    ext,
+    file_type: ext || "未知",
+    size,
+    sizeLabel: bytesToSize(size),
+    date,
+    upload_time: date,
+    perm,
+    permLabel,
+    is_public: perm === 1,
+    security_level: permLabel,
+    desc,
+    tags,
+    uploader_name: uploaderName || "未知",
+    uploader_id: ownerId
+  };
+}
+function buildSearchableMetadata(rawFiles, databaseManager2, uploaderName = "") {
+  if (!Array.isArray(rawFiles)) return [];
+  return rawFiles.map((f) => enrichFile(f, databaseManager2, uploaderName));
+}
+const MODEL = "gemini-3-flash-preview";
+const BASE_URL = `https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent`;
+function resolveConfigPath() {
+  if (utils.is.dev) {
+    return path$1.join(electron.app.getAppPath(), "src/main/config/agentApiKeys.json");
+  }
+  return path$1.join(process.resourcesPath, "agentApiKeys.json");
+}
+function loadApiKey() {
+  const configPath = resolveConfigPath();
+  if (!fs.existsSync(configPath)) {
+    throw new Error(
+      `agentApiKeys.json not found at ${configPath}. Copy agentApiKeys.example.json → agentApiKeys.json and fill in your Gemini key.`
+    );
+  }
+  const cfg = JSON.parse(fs.readFileSync(configPath, "utf8"));
+  if (!cfg.gemini) {
+    throw new Error('Gemini API key is empty. Fill in the "gemini" field in agentApiKeys.json.');
+  }
+  return cfg.gemini;
+}
+async function geminiGenerateContent({ messages, systemInstruction, temperature = 0 }) {
+  const apiKey = loadApiKey();
+  const contents = messages.map((m) => ({
+    role: m.role === "assistant" ? "model" : "user",
+    parts: [{ text: m.content }]
+  }));
+  const body = {
+    system_instruction: { parts: [{ text: systemInstruction }] },
+    contents,
+    generationConfig: { temperature, maxOutputTokens: 2048 }
+  };
+  logger.debug(`[GeminiClient] POST ${BASE_URL} — ${messages.length} message(s)`);
+  const res = await fetch(`${BASE_URL}?key=${apiKey}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body)
+  });
+  if (!res.ok) {
+    const errText = await res.text();
+    throw new Error(`Gemini API error ${res.status}: ${errText}`);
+  }
+  const data = await res.json();
+  const text = data.candidates?.[0]?.content?.parts?.[0]?.text ?? "";
+  logger.debug(`[GeminiClient] response length=${text.length}`);
+  return text;
+}
+const PARSE_SYSTEM = `你是一個檔案搜尋助手。將使用者的自然語言查詢轉換成結構化 JSON 過濾條件。
+
+【可用欄位】
+- name        (string): 檔案名稱（含副檔名），用 name.contains 做部分比對
+- file_type   (string[]): 副檔名，例如 ["pdf","docx","txt","xlsx"]
+- tags        (string[]): 分類標籤。重要：「海軍」「陸軍」「空軍」「聯合作戰」「演訓戰備」「其他」等軍事分類一律放在 tags，不要放在 name
+  - tags.any    : 只要有其中一個標籤就符合（OR）
+  - tags.all    : 必須同時有所有標籤（AND）
+  - tags.none   : 不能有這些標籤（排除）
+- is_public   (true/false): 是否為公開文件
+- date.after / date.before (YYYY-MM-DD): 上傳日期範圍
+- size.min / size.max (bytes): 檔案大小
+- desc.contains (string): 說明欄位關鍵字
+- uploader_name.contains (string): 上傳者名稱
+- any_text    (string): 跨欄位模糊搜尋（同時比對 name、desc、tags）
+
+【重要規則】
+1. 分類標籤（海軍/陸軍/空軍等）一定要放在 tags.any，不要放在 name.contains
+2. 若使用者說「只找公開」→ is_public: true；說「私人/機密」→ is_public: false
+3. 若使用者要求「不要某類型」，用 tags.none 排除
+4. 排序預設按相關度（不需指定），只有使用者明確說「按日期/大小」才用 sort
+
+【回傳格式】只輸出 JSON，不要 markdown 或任何額外文字：
+{
+  "intent": "一句話描述使用者意圖",
+  "filters": {
+    "name":          { "contains": "..." },
+    "file_type":     ["pdf", "docx"],
+    "tags":          { "any": ["海軍"], "all": [], "none": [] },
+    "is_public":     true,
+    "date":          { "after": "2024-01-01", "before": "2025-12-31" },
+    "size":          { "min": 0, "max": 10485760 },
+    "desc":          { "contains": "..." },
+    "uploader_name": { "contains": "..." },
+    "any_text":      "..."
+  },
+  "sort": { "field": "date", "order": "desc" }
+}
+只填有意義的欄位，其餘省略。無法判斷條件時回傳 { "intent": "...", "filters": {}, "sort": null }。`;
+const SUMMARY_SYSTEM = `你是一個友善的檔案搜尋助手，只能分析 metadata（檔名、標籤、日期、大小、公開狀態、說明、上傳者），不能讀取文件內容。
+用繁體中文、對話語氣（3-5句）總結搜尋結果：說明找到幾份檔案、最相關的是哪些、符合的原因是什麼（依相關度評分排序）。
+若無結果，說明可能原因並給出修改建議。簡潔回答，不要用 markdown 清單格式。`;
+function applyFilters(files, filters) {
+  if (!filters || Object.keys(filters).length === 0) return files;
+  return files.filter((f) => {
+    if (filters.name?.contains) {
+      if (!f.name.toLowerCase().includes(filters.name.contains.toLowerCase())) return false;
+    }
+    if (Array.isArray(filters.file_type) && filters.file_type.length > 0) {
+      if (!filters.file_type.map((e) => e.toLowerCase()).includes(f.ext)) return false;
+    }
+    if (Array.isArray(filters.tags?.any) && filters.tags.any.length > 0) {
+      const lower = filters.tags.any.map((t) => t.toLowerCase());
+      if (!f.tags.some((t) => lower.includes(t.toLowerCase()))) return false;
+    }
+    if (Array.isArray(filters.tags?.all) && filters.tags.all.length > 0) {
+      const lower = filters.tags.all.map((t) => t.toLowerCase());
+      if (!lower.every((qt) => f.tags.some((ft) => ft.toLowerCase() === qt))) return false;
+    }
+    if (Array.isArray(filters.tags?.none) && filters.tags.none.length > 0) {
+      const lower = filters.tags.none.map((t) => t.toLowerCase());
+      if (f.tags.some((t) => lower.includes(t.toLowerCase()))) return false;
+    }
+    if (typeof filters.is_public === "boolean") {
+      if (f.is_public !== filters.is_public) return false;
+    }
+    if (filters.date?.after && f.date < filters.date.after) return false;
+    if (filters.date?.before && f.date > filters.date.before) return false;
+    if (typeof filters.size?.min === "number" && f.size < filters.size.min) return false;
+    if (typeof filters.size?.max === "number" && f.size > filters.size.max) return false;
+    if (filters.desc?.contains) {
+      if (!(f.desc ?? "").toLowerCase().includes(filters.desc.contains.toLowerCase())) return false;
+    }
+    if (filters.uploader_name?.contains) {
+      if (!f.uploader_name.toLowerCase().includes(filters.uploader_name.contains.toLowerCase()))
+        return false;
+    }
+    if (filters.any_text) {
+      const q = filters.any_text.toLowerCase();
+      const inName = f.name.toLowerCase().includes(q);
+      const inDesc = (f.desc ?? "").toLowerCase().includes(q);
+      const inTags = f.tags.some((t) => t.toLowerCase().includes(q));
+      if (!inName && !inDesc && !inTags) return false;
+    }
+    if (Array.isArray(filters.keywords) && filters.keywords.length > 0) {
+      const matchesAny = filters.keywords.some((kw) => {
+        const q = kw.toLowerCase();
+        return f.name.toLowerCase().includes(q) || (f.desc ?? "").toLowerCase().includes(q) || f.tags.some((t) => t.toLowerCase().includes(q));
+      });
+      if (!matchesAny) return false;
+    }
+    return true;
+  });
+}
+function scoreFile(file, parsedQuery) {
+  let score = 0;
+  const { filters } = parsedQuery;
+  if (!filters) return 0;
+  const anyTags = filters.tags?.any ?? [];
+  const allTags = filters.tags?.all ?? [];
+  const queryTags = [.../* @__PURE__ */ new Set([...anyTags, ...allTags])].map((t) => t.toLowerCase());
+  if (queryTags.length > 0) {
+    const matchCount = file.tags.filter((t) => queryTags.includes(t.toLowerCase())).length;
+    score += matchCount * 12;
+    if (matchCount === queryTags.length) score += 8;
+  }
+  if (filters.name?.contains) {
+    const q = filters.name.contains.toLowerCase();
+    if (file.name.toLowerCase().includes(q)) score += 7;
+  }
+  if (filters.any_text) {
+    const q = filters.any_text.toLowerCase();
+    if (file.name.toLowerCase().includes(q)) score += 6;
+    if ((file.desc ?? "").toLowerCase().includes(q)) score += 4;
+    if (file.tags.some((t) => t.toLowerCase().includes(q))) score += 10;
+  }
+  if (filters.desc?.contains) {
+    if ((file.desc ?? "").toLowerCase().includes(filters.desc.contains.toLowerCase())) score += 4;
+  }
+  const daysSince = (Date.now() - new Date(file.date).getTime()) / (1e3 * 60 * 60 * 24);
+  if (daysSince < 7) score += 5;
+  else if (daysSince < 30) score += 3;
+  else if (daysSince < 90) score += 1;
+  return score;
+}
+function sortFiles(files, parsedQuery) {
+  const scored = files.map((f) => ({ ...f, _score: scoreFile(f, parsedQuery) }));
+  return scored.sort((a, b) => {
+    if (b._score !== a._score) return b._score - a._score;
+    const { sort } = parsedQuery;
+    if (sort?.field && sort.field !== "relevance") {
+      const av = a[sort.field] ?? "";
+      const bv = b[sort.field] ?? "";
+      if (av < bv) return sort.order === "asc" ? -1 : 1;
+      if (av > bv) return sort.order === "asc" ? 1 : -1;
+    }
+    if (b.date !== a.date) return b.date > a.date ? 1 : -1;
+    return 0;
+  });
+}
+function extractKeywords(message) {
+  const STOP = [
+    "幫我",
+    "幫",
+    "請",
+    "請幫",
+    "可以",
+    "能不能",
+    "有沒有",
+    "我要",
+    "我想",
+    "我想要",
+    "尋找",
+    "搜尋",
+    "查詢",
+    "查找",
+    "找",
+    "找到",
+    "找一下",
+    "找找",
+    "相關",
+    "有關",
+    "關於",
+    "屬於",
+    "關聯",
+    "的文章",
+    "的文件",
+    "的資料",
+    "的檔案",
+    "的內容",
+    "的報告",
+    "文章",
+    "文件",
+    "資料",
+    "檔案",
+    "內容",
+    "報告",
+    "所有",
+    "全部",
+    "一些",
+    "的",
+    "了",
+    "嗎",
+    "吧",
+    "呢",
+    "啊",
+    "哦",
+    "喔",
+    "嗯",
+    "好",
+    "謝謝",
+    "最近",
+    "最新",
+    "最",
+    "我"
+  ];
+  let text = message;
+  for (const s of STOP.sort((a, b) => b.length - a.length)) {
+    text = text.replaceAll(s, " ");
+  }
+  const tokens = text.split(/[\s，。！？,. !?]+/).filter((t) => t.length >= 2);
+  return [...new Set(tokens)];
+}
+function parseJsonFromText(text) {
+  const cleaned = text.replace(/^```[a-z]*\n?/i, "").replace(/\n?```$/i, "").trim();
+  return JSON.parse(cleaned);
+}
+async function runAgentTurn({ userMessage, history, files }) {
+  const parseMessages = [
+    ...history.slice(-6),
+    { role: "user", content: userMessage }
+  ];
+  let parsedQuery = { intent: userMessage, filters: {}, sort: null };
+  let llmAvailable = true;
+  try {
+    const parseRaw = await geminiGenerateContent({
+      messages: parseMessages,
+      systemInstruction: PARSE_SYSTEM,
+      temperature: 0
+    });
+    parsedQuery = parseJsonFromText(parseRaw);
+    logger.debug(`[AgentService] parsed query: ${JSON.stringify(parsedQuery)}`);
+  } catch (e) {
+    llmAvailable = false;
+    logger.warn(`[AgentService] parse phase failed, falling back to keyword search: ${e.message}`);
+    const keywords = extractKeywords(userMessage);
+    logger.debug(`[AgentService] fallback keywords: ${JSON.stringify(keywords)}`);
+    parsedQuery = {
+      intent: userMessage,
+      filters: keywords.length > 0 ? { keywords } : {},
+      sort: null
+    };
+  }
+  const filtered = applyFilters(files, parsedQuery.filters);
+  const sorted = sortFiles(filtered, parsedQuery);
+  const topResults = sorted.slice(0, 20);
+  logger.debug(
+    `[AgentService] filter: ${files.length} → ${filtered.length}, top scores: ${topResults.slice(0, 3).map((f) => f._score).join(", ")}`
+  );
+  const resultSummaryForLlm = topResults.length === 0 ? "查無符合條件的檔案。" : topResults.map(
+    (f, i) => `${i + 1}. [相關分:${f._score}] ${f.name} | 類型:${f.file_type.toUpperCase() || "未知"} | 大小:${f.sizeLabel} | 上傳:${f.upload_time} | 公開:${f.is_public ? "是" : "否"} | 上傳者:${f.uploader_name}` + (f.tags.length ? ` | 標籤:${f.tags.join(",")}` : "") + (f.desc ? ` | 說明:${f.desc.slice(0, 80)}` : "")
+  ).join("\n");
+  const summaryUserMsg = `使用者查詢：「${userMessage}」
+解析意圖：${parsedQuery.intent ?? ""}
+符合條件 ${topResults.length} / 總共 ${files.length} 份，已按相關度排序：
+
+${resultSummaryForLlm}`;
+  let summary = `找到 ${topResults.length} 份符合條件的檔案。`;
+  if (!llmAvailable) {
+    if (topResults.length === 0) {
+      summary = `查無符合「${userMessage}」的檔案。請確認關鍵字或標籤是否正確。`;
+    } else {
+      const names = topResults.slice(0, 3).map((f) => f.name).join("、");
+      summary = `（AI 摘要暫時無法使用）找到 ${topResults.length} 份相關檔案：${names}${topResults.length > 3 ? " 等" : ""}。`;
+    }
+  } else {
+    try {
+      summary = await geminiGenerateContent({
+        messages: [{ role: "user", content: summaryUserMsg }],
+        systemInstruction: SUMMARY_SYSTEM,
+        temperature: 0.3
+      });
+    } catch (e) {
+      logger.warn(`[AgentService] summary phase failed: ${e.message}`);
+    }
+  }
+  const resultFiles = topResults.map(({ _score, ...rest }) => rest);
+  return {
+    summary,
+    matchCount: topResults.length,
+    totalCount: files.length,
+    files: resultFiles,
+    parsedQuery
+  };
+}
+let _databaseManager = null;
+let _registered = false;
+function setDatabaseManagerForAgentIpc(databaseManager2) {
+  _databaseManager = databaseManager2;
+}
+function registerAgentIpcOnce() {
+  if (_registered) return;
+  _registered = true;
+  electron.ipcMain.handle("agent:query", async (_event, { userMessage, history = [], rawFiles = [], uploaderName = "" }) => {
+    try {
+      logger.info(`[AgentIpc] agent:query — "${userMessage.slice(0, 80)}"`);
+      const publicOnly = rawFiles.filter((f) => (f.perm ?? f.permissions ?? 0) === 1);
+      logger.debug(`[AgentIpc] total=${rawFiles.length}, public=${publicOnly.length}`);
+      const files = buildSearchableMetadata(publicOnly, _databaseManager, uploaderName);
+      const result = await runAgentTurn({ userMessage, history, files });
+      return { ok: true, ...result };
+    } catch (e) {
+      logger.error(`[AgentIpc] agent:query error: ${e.message}`);
+      return { ok: false, error: e.message };
+    }
+  });
+}
 const keyManager = new KeyManager();
 keyManager.initKeys();
 const requestManager = new RequestManager(keyManager);
@@ -6305,6 +7549,11 @@ electron.app.whenReady().then(() => {
   electron.ipcMain.handle("recover-extra-key", (_event, values) => {
     return loginManager.onRecoverExtraKey(values);
   });
+  registerClassifierIpcOnce();
+  registerUploadPostIpcOnce();
+  setFileManagerForUploadPostIpc(fileManager);
+  registerAgentIpcOnce();
+  setDatabaseManagerForAgentIpc(databaseManager);
   createWindow();
   electron.app.on("activate", function() {
     if (electron.BrowserWindow.getAllWindows().length === 0) createWindow();

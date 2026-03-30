@@ -33,12 +33,27 @@ import {
 import { downloadFileProcessSftp, uploadFileProcessSftp } from './SftpFileProcess'
 import ABSEManager from './ABSEManager'
 import DatabaseManager from './DatabaseManager'
+import {
+  runPreUploadClassification,
+  makeUploadBatchClassifyKey,
+  snapshotForPostUploadDialog
+} from './services/preUploadClassifyCache.js'
+import {
+  getUploadBatchSmartClassifyWanted,
+  getAppClassifierEnabled
+} from './services/classifierRuntime.js'
 
 class FileManager {
   aesModule
   blockchainManager
   uploadQueue
-  #uploadBatch = { expected: 0, fileIds: [] }
+  #uploadBatch = {
+    expected: 0,
+    fileIds: [],
+    pathsByFileId: {},
+    classifyBatchKey: null,
+    classifierWanted: false
+  }
   /**
    * @param {AESModule} aesModule
    * @param {BlockchainManager} blockchainManager
@@ -116,10 +131,26 @@ class FileManager {
    */
   #checkUploadBatchDone() {
     if (this.#uploadBatch.expected === 0 && this.#uploadBatch.fileIds.length > 0) {
+      const { classifyBatchKey, classifierWanted, fileIds, pathsByFileId } = this.#uploadBatch
+      const sourcePaths = fileIds.map((id) => pathsByFileId[id]).filter(Boolean)
+      const { classificationPreview } = snapshotForPostUploadDialog(
+        classifierWanted,
+        getAppClassifierEnabled(),
+        classifyBatchKey
+      )
       GlobalValueManager.mainWindow?.webContents.send('upload-batch-done', {
-        fileIds: [...this.#uploadBatch.fileIds]
+        fileIds: [...fileIds],
+        sourcePaths,
+        classificationPreview,
+        classifyBatchKey
       })
-      this.#uploadBatch = { expected: 0, fileIds: [] }
+      this.#uploadBatch = {
+        expected: 0,
+        fileIds: [],
+        pathsByFileId: {},
+        classifyBatchKey: null,
+        classifierWanted: false
+      }
     }
   }
 
@@ -167,6 +198,11 @@ class FileManager {
       logger.error(`Failed to pre-upload: ${error.message}. Upload aborted.`)
       this.#sendUploadErrorNotice(error.message)
       return
+    }
+
+    // Keep source path for post-upload dialog + retry classify flow
+    if (this.#uploadBatch.pathsByFileId) {
+      this.#uploadBatch.pathsByFileId[fileId] = filePath
     }
 
     // Step 3: Set up tee — split encryptedStream into hash stream and write stream
@@ -270,8 +306,29 @@ class FileManager {
       properties: ['openFile', 'multiSelections']
     })
     if (filePaths.length > 0) {
-      // Reset batch tracker for this upload session
-      this.#uploadBatch = { expected: filePaths.length, fileIds: [] }
+      const classifierWanted = getUploadBatchSmartClassifyWanted()
+      const classifierEnabled = getAppClassifierEnabled()
+      const classifyBatchKey =
+        classifierWanted && classifierEnabled ? makeUploadBatchClassifyKey(filePaths) : null
+
+      this.#uploadBatch = {
+        expected: filePaths.length,
+        fileIds: [],
+        pathsByFileId: {},
+        classifyBatchKey,
+        classifierWanted
+      }
+
+      // Fire LM classification in background; upload continues concurrently
+      if (classifierWanted && classifierEnabled && classifyBatchKey) {
+        void runPreUploadClassification(
+          (payload) =>
+            GlobalValueManager.mainWindow?.webContents.send('preupload-classify-status', payload),
+          classifyBatchKey,
+          filePaths
+        )
+      }
+
       for (const filePath of filePaths) {
         this.uploadQueue({ filePath, parentFolderId })
       }
@@ -295,13 +352,13 @@ class FileManager {
         } else {
           logger.info('Sucess to get file list')
           const globalAttrs = (await this.abseManager.getPP())?.U || []
-          // Get tag and attribute from local storage and add into fileList
+          // tags and attrIds now come directly from the server (PostgreSQL)
           const filesObj = JSON.parse(files)
           filesObj.forEach((file) => {
-            file.tags = this.databaseManager.getTagsOfFile(file.id).map((row) => row.tag)
-            file.attrs = this.databaseManager
-              .getAttrIdsOfFile(file.id)
-              .map((row) => globalAttrs.at(row.attrid))
+            file.tags = Array.isArray(file.tags) ? file.tags : []
+            file.attrs = Array.isArray(file.attrIds)
+              ? file.attrIds.map((id) => globalAttrs.at(id)).filter(Boolean)
+              : []
             logger.debug(`attrs for file ${file.id}`, { attrs: file.attrs })
           })
           GlobalValueManager.mainWindow?.webContents.send('file-list-res', {
@@ -596,8 +653,8 @@ class FileManager {
             fileId,
             mode: 'watermark',
             watermark: {
-              visible: watermarkOptions?.visible ?? true,
-              invisible: watermarkOptions?.invisible ?? false,
+              visible: watermarkOptions?.visible === true,
+              invisible: watermarkOptions?.invisible === true,
               customNote: watermarkOptions?.customNote ?? '',
               position: watermarkOptions?.position ?? 'bottomRight',
               opacity: watermarkOptions?.opacity ?? 0.3,
@@ -711,8 +768,7 @@ class FileManager {
           // Apply visible watermark first (if requested), then invisible on top
           let processedBuffer = decryptedBuffer
 
-          if (watermarkOptions?.visible !== false) {
-            // Default: apply visible watermark
+          if (watermarkOptions?.visible === true) {
             processedBuffer = await applyVisibleWatermark(processedBuffer, mimeType, {
               text: wmText,
               position: watermarkOptions?.position ?? 'bottomRight',
@@ -729,7 +785,7 @@ class FileManager {
 
           await writeFile(filePath, processedBuffer)
           const modes = [
-            watermarkOptions?.visible !== false && '可視',
+            watermarkOptions?.visible === true && '可視',
             watermarkOptions?.invisible === true && '不可視'
           ]
             .filter(Boolean)
@@ -1077,11 +1133,11 @@ async searchFilesProcess({ tags }) {
           try {
             await new Promise((resolve, reject) => {
               logger.debug(
-                `[batchUpdate] Emitting update-file-desc-perm for fileId=${fileId}, permission=${perm}, description.length=${desc?.length}, hasCTw=${!!CTw}`
+                `[batchUpdate] Emitting update-file-desc-perm for fileId=${fileId}, permission=${perm}, tags=${JSON.stringify(tags)}, hasCTw=${!!CTw}`
               )
               socket.emit(
                 'update-file-desc-perm',
-                { fileId, description: desc, permission: perm, CTw },
+                { fileId, description: desc, permission: perm, CTw, tags, attrIds },
                 (response) => {
                   if (response.errorMsg) {
                     logger.error(
@@ -1090,24 +1146,9 @@ async searchFilesProcess({ tags }) {
                     reject(new Error(response.errorMsg))
                   } else {
                     logger.debug(
-                      `[batchUpdate] Server OK for fileId=${fileId}. Storing tags=${JSON.stringify(tags)}, attrIds=${JSON.stringify(attrIds)} to local DB`
+                      `[batchUpdate] Server OK for fileId=${fileId}. tags/attrIds stored in PostgreSQL.`
                     )
-                    // Wrap storeTagAttr so a throw rejects the Promise instead of hanging it
-                    try {
-                      this.databaseManager.storeTagAttr(fileId, tags, attrIds)
-                      // Immediately verify the write
-                      const verifyTags = this.databaseManager.getTagsOfFile(fileId)
-                      const verifyAttrs = this.databaseManager.getAttrIdsOfFile(fileId)
-                      logger.debug(
-                        `[batchUpdate] Verified DB write for fileId=${fileId}: tags=${JSON.stringify(verifyTags)}, attrs=${JSON.stringify(verifyAttrs)}`
-                      )
-                      resolve()
-                    } catch (storeErr) {
-                      logger.error(
-                        `[batchUpdate] storeTagAttr threw for fileId=${fileId}: ${storeErr}`
-                      )
-                      reject(storeErr)
-                    }
+                    resolve()
                   }
                 }
               )
@@ -1154,21 +1195,18 @@ async searchFilesProcess({ tags }) {
         // logger.debug(`matched files when update index: ${matchedFiles}`)
         logger.debug(`Selected tags: ${tags}, selected attrs: ${selectedAttrs}`)
       }
+      const attrIds = selectedAttrs.map((attr) => globalAttrs.indexOf(attr))
       logger.info(`Asking to ${actionStr}...`)
       socket.emit(
         'update-file-desc-perm',
-        { fileId, description: desc, permission: perm, CTw },
+        { fileId, description: desc, permission: perm, CTw, tags, attrIds },
         (response) => {
           const { errorMsg } = response
           if (errorMsg) {
             logger.error(`Failed to ${actionStr}: ${errorMsg}`)
             GlobalValueManager.sendNotice(`Failed to ${actionStr}`, 'error')
           } else {
-            // Store tags and selected attrs id in local database
-            // Turn attrs into IDs
-            const attrIds = selectedAttrs.map((attr) => globalAttrs.indexOf(attr))
-            logger.debug(`store attrids`, { attrIds })
-            this.databaseManager.storeTagAttr(fileId, tags, attrIds)
+            // tags and attrIds are now stored in PostgreSQL by the server
             logger.info(`Success to ${actionStr}`)
             GlobalValueManager.sendNotice(`Success to ${actionStr}`, 'success')
             this.getFileListProcess(GlobalValueManager.curFolderId)

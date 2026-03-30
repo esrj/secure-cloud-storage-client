@@ -18,7 +18,8 @@ import {
   ClipboardDocumentListIcon,
   PaperAirplaneIcon,
   DocumentDuplicateIcon,
-  MagnifyingGlassIcon
+  MagnifyingGlassIcon,
+  SparklesIcon
 } from '@heroicons/react/24/outline'
 import PropTypes from 'prop-types'
 import { useState, useContext } from 'react'
@@ -47,13 +48,24 @@ function NavBar({ pageType, setPageType, seenRequest, seenReply }) {
 
   return (
     <>
-      <Card className="h-full w-full max-w-80 p-4 shadow-xl shadow-blue-gray-900/5">
+      <Card className="h-full w-80 shrink-0 p-4 shadow-xl shadow-blue-gray-900/5">
         <div className="mb-2 p-4">
           <Typography variant="h5" color="blue-gray">
             機敏雲端
           </Typography>
         </div>
         <List>
+          <ListItem
+            selected={pageType === PageType.agentSearch}
+            onClick={() => setPageType(PageType.agentSearch)}
+            ripple={false}
+            className="focus:bg-none"
+          >
+            <ListItemPrefix>
+              <SparklesIcon className="h-5 w-5" />
+            </ListItemPrefix>
+            智慧搜尋
+          </ListItem>
           <ListItem
             selected={pageType === PageType.public}
             onClick={() => setPageType(PageType.public)}
@@ -178,8 +190,7 @@ function NavBar({ pageType, setPageType, seenRequest, seenReply }) {
 }
 
 NavBar.propTypes = {
-  pageType: PropTypes.oneOf([PageType.public, PageType.file, PageType.reply, PageType.request])
-    .isRequired,
+  pageType: PropTypes.oneOf([PageType.public, PageType.file, PageType.reply, PageType.request]).isRequired,
   setPageType: PropTypes.func.isRequired,
   seenRequest: PropTypes.number.isRequired,
   seenReply: PropTypes.number.isRequired
