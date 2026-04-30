@@ -7,7 +7,8 @@ import PublicTable from './PublicTable'
 import FileTable from './FileTable'
 import ReplyTable from './ReplyTable'
 import WatermarkDetectPage from './WatermarkDetectPage'
-import AgentPage from './AgentPage'
+// [DEMO_HIDE: smart-search] 智慧搜尋頁面暫時隱藏，demo 結束後解除註解即可恢復。
+// import AgentPage from './AgentPage'
 import { Card } from '@material-tailwind/react'
 import SearchBar from './SearchBar'
 import FileViewButtonGroup from './FileViewButtonGroup'
@@ -145,8 +146,9 @@ function MainView() {
         return <RequestTable requestedList={requestedList} />
       case PageType.watermarkDetect:
         return <WatermarkDetectPage />
-      case PageType.agentSearch:
-        return <AgentPage />
+      // [DEMO_HIDE: smart-search] 智慧搜尋頁面暫時隱藏，demo 結束後解除註解即可恢復。
+      // case PageType.agentSearch:
+      //   return <AgentPage />
       default:
         return null
     }

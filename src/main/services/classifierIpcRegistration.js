@@ -2,7 +2,8 @@ import { ipcMain } from 'electron'
 import {
   setAppClassifierEnabled,
   getUploadBatchSmartClassifyWanted,
-  setUploadBatchSmartClassifyWanted
+  setUploadBatchSmartClassifyWanted,
+  getSmartClassifyMode
 } from './classifierRuntime.js'
 
 let done = false
@@ -15,11 +16,12 @@ export function registerClassifierIpcOnce() {
     setAppClassifierEnabled(Boolean(enabled))
     return { ok: true }
   })
-  ipcMain.handle('classifier:set-upload-batch-smart-classify', (_, wanted) => {
-    setUploadBatchSmartClassifyWanted(Boolean(wanted))
+  ipcMain.handle('classifier:set-upload-batch-smart-classify', (_, modeOrBool) => {
+    setUploadBatchSmartClassifyWanted(modeOrBool)
     return { ok: true }
   })
   ipcMain.handle('classifier:get-upload-batch-smart-classify', () => ({
-    wanted: getUploadBatchSmartClassifyWanted()
+    wanted: getUploadBatchSmartClassifyWanted(),
+    mode: getSmartClassifyMode()
   }))
 }

@@ -1,8 +1,11 @@
 /** Local (renderer) preferences — master syncs via classifierSetEnabled IPC; upload-before syncs via classifier:set-upload-batch-smart-classify. */
 
 const LS_MASTER = 'scs.smartClassify.featureEnabled'
-/** 檔案列表「上傳時執行智慧分類」開關（與 main 同步） */
-const LS_UPLOAD_BEFORE = 'scs.uploadBatchSmartClassifyBeforeUpload'
+/** 檔案列表「上傳時執行智慧分類」模式（與 main 同步） */
+const LS_UPLOAD_MODE = 'scs.uploadBatchSmartClassifyMode'
+
+/** @type {readonly ['off','fast','medium']} */
+export const SMART_CLASSIFY_MODES = /** @type {const} */ (['off', 'fast', 'medium'])
 
 export function readSmartClassifyMasterEnabled() {
   try {
@@ -25,23 +28,29 @@ export function writeSmartClassifyMasterEnabled(v) {
   }
 }
 
-export function readUploadSmartClassifyBeforeUpload() {
+/** @returns {'off'|'fast'|'medium'} */
+export function readSmartClassifyMode() {
   try {
-    return localStorage.getItem(LS_UPLOAD_BEFORE) === '1'
-  } catch {
-    return false
-  }
+    const v = localStorage.getItem(LS_UPLOAD_MODE)
+    if (v && SMART_CLASSIFY_MODES.includes(v)) return v
+  } catch { /* ignore */ }
+  return 'off'
 }
 
-/**
- * @param {boolean} v
- */
-export function writeUploadSmartClassifyBeforeUpload(v) {
+/** @param {'off'|'fast'|'medium'} mode */
+export function writeSmartClassifyMode(mode) {
   try {
-    if (v) localStorage.setItem(LS_UPLOAD_BEFORE, '1')
-    else localStorage.removeItem(LS_UPLOAD_BEFORE)
+    localStorage.setItem(LS_UPLOAD_MODE, mode)
     window.dispatchEvent(new CustomEvent('scs-smart-classify-prefs-changed'))
-  } catch {
-    /* ignore */
-  }
+  } catch { /* ignore */ }
+}
+
+/** Backwards-compatible: true when mode is not 'off'. */
+export function readUploadSmartClassifyBeforeUpload() {
+  return readSmartClassifyMode() !== 'off'
+}
+
+/** @param {boolean} v */
+export function writeUploadSmartClassifyBeforeUpload(v) {
+  writeSmartClassifyMode(v ? 'fast' : 'off')
 }

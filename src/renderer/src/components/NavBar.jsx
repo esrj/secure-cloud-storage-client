@@ -55,6 +55,9 @@ function NavBar({ pageType, setPageType, seenRequest, seenReply }) {
           </Typography>
         </div>
         <List>
+          {/* [DEMO_HIDE: smart-search] 智慧搜尋入口暫時隱藏，demo 結束後解除註解即可恢復。
+              對應後端：MainView.jsx renderTableView 的 PageType.agentSearch case，
+              以及 AgentPage / AgentMessageBubble 元件、Types.PageType.agentSearch。
           <ListItem
             selected={pageType === PageType.agentSearch}
             onClick={() => setPageType(PageType.agentSearch)}
@@ -66,6 +69,7 @@ function NavBar({ pageType, setPageType, seenRequest, seenReply }) {
             </ListItemPrefix>
             智慧搜尋
           </ListItem>
+          */}
           <ListItem
             selected={pageType === PageType.public}
             onClick={() => setPageType(PageType.public)}

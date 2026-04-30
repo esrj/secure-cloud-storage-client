@@ -1077,11 +1077,23 @@ async searchFilesProcess({ tags }) {
       .filter((t) => t.length > 0)
       .slice(0, 5)
 
-    const TK = await this.abseManager.Trapdoor(tags)
+    if (tags.length === 0) {
+      return []
+    }
+
+    // 每個 tag 各自做 trapdoor → 後端逐 tag OR 搜尋並去重
+    // (server 的 SearchFileRequestSchema 已改為 { TKs, tags }，
+    //  舊的 { TK, tags } 會被驗收但走不到搜尋分支，導致
+    //  "Trapdoor count does not match tags." 錯誤)
+    const TKs = []
+    for (const tag of tags) {
+      const tk = await this.abseManager.Trapdoor([tag])
+      TKs.push(tk)
+    }
 
     return new Promise((resolve, reject) => {
-      logger.info('Search payload', { tags })
-      socket.emit('search-files', { TK, tags }, (response) => {
+      logger.info('Search payload', { tags, TKsCount: TKs.length })
+      socket.emit('search-files', { TKs, tags }, (response) => {
         const { errorMsg, files } = response
         if (errorMsg) {
           logger.error(`Failed to search files: ${errorMsg}`)

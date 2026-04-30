@@ -1,39 +1,40 @@
 /**
  * Action bar for the file-list page: folder creation, file upload,
- * and the smart-classify toggle (all visible before selecting files).
+ * and the smart-classify mode selector (all visible before selecting files).
  */
-import { ButtonGroup, Button, Switch, Typography } from '@material-tailwind/react'
+import { ButtonGroup, Button, Typography } from '@material-tailwind/react'
 import AddFolderDialog from './AddFolderDialog'
 import { ArrowUpTrayIcon, FolderPlusIcon } from '@heroicons/react/24/outline'
 import { useEffect, useState } from 'react'
 import PropTypes from 'prop-types'
 import AnalysisSpinner from './AnalysisSpinner'
-import {
-  readUploadSmartClassifyBeforeUpload,
-  writeUploadSmartClassifyBeforeUpload
-} from '../lib/smartClassifyPrefs'
+import { readSmartClassifyMode, writeSmartClassifyMode } from '../lib/smartClassifyPrefs'
+
+const MODE_LABELS = {
+  off: '智慧標籤 - 關閉',
+  fast: '智慧標籤 - fast',
+  medium: '智慧標籤 - thinking'
+}
 
 function FileViewButtonGroup({ curPath }) {
   const [folderOpen, setFolderOpen] = useState(false)
-  const [smartOn, setSmartOn] = useState(() => readUploadSmartClassifyBeforeUpload())
+  const [mode, setMode] = useState(() => readSmartClassifyMode())
   const [busy, setBusy] = useState(false)
   const [progress, setProgress] = useState(null)
 
-  // Sync toggle with main process on mount and when prefs change elsewhere
   useEffect(() => {
-    const v = readUploadSmartClassifyBeforeUpload()
-    setSmartOn(v)
+    const v = readSmartClassifyMode()
+    setMode(v)
     void window.electronAPI?.setUploadBatchSmartClassify?.(v)
 
     const sync = () => {
-      const updated = readUploadSmartClassifyBeforeUpload()
-      setSmartOn(updated)
+      const updated = readSmartClassifyMode()
+      setMode(updated)
     }
     window.addEventListener('scs-smart-classify-prefs-changed', sync)
     return () => window.removeEventListener('scs-smart-classify-prefs-changed', sync)
   }, [])
 
-  // Listen for classification progress from main process
   useEffect(() => {
     const unsub = window.electronAPI?.onPreuploadClassifyStatus?.((p) => {
       if (p?.phase === 'running') {
@@ -50,10 +51,11 @@ function FileViewButtonGroup({ curPath }) {
     return () => unsub?.()
   }, [])
 
-  function handleToggle(checked) {
-    setSmartOn(checked)
-    writeUploadSmartClassifyBeforeUpload(checked)
-    void window.electronAPI?.setUploadBatchSmartClassify?.(checked)
+  function handleModeChange(e) {
+    const next = e.target.value
+    setMode(next)
+    writeSmartClassifyMode(next)
+    void window.electronAPI?.setUploadBatchSmartClassify?.(next)
   }
 
   function uploadHandler() {
@@ -62,7 +64,6 @@ function FileViewButtonGroup({ curPath }) {
 
   return (
     <div className="flex flex-row items-stretch h-11 gap-2 shrink-0">
-      {/* Upload / folder buttons */}
       <ButtonGroup variant="outlined" className="h-full">
         <Button
           onClick={() => setFolderOpen(!folderOpen)}
@@ -80,31 +81,25 @@ function FileViewButtonGroup({ curPath }) {
         </Button>
       </ButtonGroup>
 
-      {/* Smart-classify toggle — inline with buttons */}
-      <div className="flex flex-row items-center gap-2 h-full rounded-md border border-blue-gray-200 bg-white px-2.5">
-        <Switch
-          id="sc-toggle"
-          checked={smartOn}
-          onChange={(e) => handleToggle(e.target.checked)}
-          color="blue"
-        />
-        <label
-          htmlFor="sc-toggle"
-          className="flex flex-row items-center gap-1.5 cursor-pointer select-none"
-        >
-          <Typography variant="small" className="font-medium text-blue-gray-800 text-xs">
-            智慧分類
+      {/* Smart-classify mode selector */}
+      <select
+        value={mode}
+        onChange={handleModeChange}
+        className="text-xs h-full rounded-md border border-blue-gray-200 bg-white px-2
+                   text-blue-gray-800 focus:outline-none focus:border-blue-500 cursor-pointer"
+      >
+        {Object.entries(MODE_LABELS).map(([k, label]) => (
+          <option key={k} value={k}>{label}</option>
+        ))}
+      </select>
+      {busy && (
+        <div className="flex flex-row items-center gap-1.5 h-full px-1">
+          <AnalysisSpinner className="h-3 w-3" />
+          <Typography variant="small" className="text-xs text-blue-600">
+            {progress ? `${progress.done}/${progress.total} 段` : '分析中…'}
           </Typography>
-          {busy && (
-            <>
-              <AnalysisSpinner className="h-3 w-3" />
-              <Typography variant="small" className="text-xs text-blue-600">
-                {progress ? `${progress.done}/${progress.total} 段` : '分析中…'}
-              </Typography>
-            </>
-          )}
-        </label>
-      </div>
+        </div>
+      )}
 
       <AddFolderDialog open={folderOpen} setOpen={setFolderOpen} />
     </div>

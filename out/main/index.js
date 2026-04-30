@@ -5221,8 +5221,24 @@ function getClassifierSettings() {
   }
   return { classifierThreshold };
 }
-const MODEL_FILENAME = "Qwen3-14B-Q4_K_M.gguf";
-const CONTEXT_SIZE = 2048;
+const MODEL_MAP = {
+  fast: "Qwen3.5-4B-q4_k_m.gguf",
+  medium: "Qwen3.5-9B-q4_k_m.gguf"
+  // high:   'Qwen3.5-27B-q4_k_m.gguf'
+};
+const OVERHEAD_TOKENS = 1024;
+const CONTEXT_TIERS = [
+  [2048 - OVERHEAD_TOKENS, 2048],
+  [4096 - OVERHEAD_TOKENS, 4096]
+];
+const MAX_CONTEXT_SIZE = 4096;
+const MAX_CHUNK_CHARS = MAX_CONTEXT_SIZE - OVERHEAD_TOKENS;
+function pickContextSize(charLen) {
+  for (const [maxChars, ctx] of CONTEXT_TIERS) {
+    if (charLen <= maxChars) return ctx;
+  }
+  return MAX_CONTEXT_SIZE;
+}
 const CLASSIFY_JSON_SCHEMA = {
   type: "object",
   properties: {
@@ -5247,6 +5263,8 @@ let _llama = null;
 let _model = null;
 let _context = null;
 let _grammar = null;
+let _loadedMode = null;
+let _loadedCtxSize = 0;
 let _inferenceChain = Promise.resolve();
 async function getNLC() {
   if (!_nlc) {
@@ -5254,31 +5272,77 @@ async function getNLC() {
   }
   return _nlc;
 }
-function getModelPath() {
+function getModelPath(mode = "fast") {
   if (process.env.LLAMA_MODEL_PATH) return process.env.LLAMA_MODEL_PATH;
+  const filename = MODEL_MAP[mode] || MODEL_MAP.fast;
   if (utils.is.dev) {
-    return path$1.join(electron.app.getAppPath(), "resources", "models", MODEL_FILENAME);
+    return path$1.join(electron.app.getAppPath(), "resources", "models", filename);
   }
-  return path$1.join(process.resourcesPath, "models", MODEL_FILENAME);
+  return path$1.join(process.resourcesPath, "models", filename);
 }
-async function ensureReady() {
-  if (_context) return;
-  const modelPath = getModelPath();
+async function teardown() {
+  if (_context) {
+    try {
+      await _context.dispose();
+    } catch {
+    }
+    _context = null;
+  }
+  if (_model) {
+    try {
+      await _model.dispose();
+    } catch {
+    }
+    _model = null;
+  }
+  _loadedMode = null;
+  _loadedCtxSize = 0;
+}
+async function ensureReady(mode, ctxSize) {
+  const needReloadModel = _loadedMode !== mode;
+  const needReloadCtx = ctxSize > _loadedCtxSize;
+  if (!needReloadModel && !needReloadCtx && _context) return;
+  if (needReloadModel) {
+    await teardown();
+  } else if (needReloadCtx && _context) {
+    try {
+      await _context.dispose();
+    } catch {
+    }
+    _context = null;
+  }
+  const modelPath = getModelPath(mode);
   if (!fs.existsSync(modelPath)) {
     throw new Error(
       `LLM model not found.
 Expected: "${modelPath}"
-Place Qwen3-14B-Q4_K_M.gguf inside resources/models/ or set the LLAMA_MODEL_PATH environment variable.`
+Place ${MODEL_MAP[mode] || MODEL_MAP.fast} inside resources/models/ or set the LLAMA_MODEL_PATH environment variable.`
     );
   }
   const { getLlama } = await getNLC();
-  _llama = await getLlama();
-  _model = await _llama.loadModel({ modelPath });
-  _context = await _model.createContext({ contextSize: CONTEXT_SIZE, sequences: 1 });
-  _grammar = await _llama.createGrammarForJsonSchema(CLASSIFY_JSON_SCHEMA);
+  if (!_llama) _llama = await getLlama();
+  if (!_model || needReloadModel) {
+    let sizeMB = "unknown";
+    try {
+      sizeMB = (fs.statSync(modelPath).size / (1024 * 1024)).toFixed(1);
+    } catch {
+    }
+    logger.info(`[LLM] Loading model mode="${mode}", path="${modelPath}", size=${sizeMB} MB`);
+    _model = await _llama.loadModel({ modelPath });
+    _loadedMode = mode;
+    logger.info(`[LLM] Model loaded successfully (mode="${mode}")`);
+  }
+  logger.info(`[LLM] Creating context mode="${mode}" contextSize=${ctxSize}`);
+  _context = await _model.createContext({ contextSize: ctxSize, sequences: 1 });
+  _loadedCtxSize = ctxSize;
+  if (!_grammar) {
+    _grammar = await _llama.createGrammarForJsonSchema(CLASSIFY_JSON_SCHEMA);
+  }
 }
 async function _doGenerate(prompt, opts) {
-  await ensureReady();
+  const mode = opts.mode || "fast";
+  const ctxSize = opts.contextSize || pickContextSize(prompt.length);
+  await ensureReady(mode, ctxSize);
   const { LlamaChatSession } = await getNLC();
   const systemPrompt = `/no_think
 
@@ -5289,13 +5353,17 @@ ${opts.system ?? ""}`.trim();
       contextSequence: sequence,
       systemPrompt,
       autoDisposeSequence: false
-      // we dispose explicitly in finally
     });
-    return await session.prompt(prompt, {
+    const t0 = Date.now();
+    const out = await session.prompt(prompt, {
       temperature: typeof opts.temperature === "number" ? opts.temperature : 0.1,
-      maxTokens: 1024,
+      maxTokens: 512,
       grammar: _grammar
     });
+    const dur = Date.now() - t0;
+    const preview = String(out).replace(/\s+/g, " ").slice(0, 240);
+    logger.info(`[LLM] generate done mode="${mode}" ctx=${ctxSize} ${dur}ms outLen=${out.length} preview="${preview}"`);
+    return out;
   } finally {
     try {
       await sequence.dispose();
@@ -5312,37 +5380,44 @@ async function generate(prompt, opts = {}) {
   _inferenceChain = _inferenceChain.then(() => _doGenerate(prompt, opts)).then(resolveSlot, rejectSlot);
   return slot;
 }
-const ZH_CLASSIFY_SYSTEM_PROMPT = `你是一個文件分類器。根據輸入的「文件片段」判斷它屬於哪些類別，並輸出嚴格 JSON。
+const ZH_CLASSIFY_SYSTEM_PROMPT = `你是一個文件批次分類器。本輪輸入可能是「單一檔案」或「一次多個檔案的整批」。請依「所有檔案的檔名 + 內文」綜合判斷整批屬於哪些軍種或主題類別，並只輸出「一份」嚴格 JSON。
 
-分類標籤固定如下（不可新增、不可改名）：
+分類標籤固定如下（不可新增、不可改名、順序不可變）：
 - 海軍：艦隊/艦艇/潛艦/海上航行/港口/海事作戰/海軍單位/海軍採購與訓練
 - 陸軍：地面作戰/步兵/裝甲/砲兵/工兵/陸上基地/陸軍單位/陸軍採購與訓練
 - 空軍：航空作戰/戰機/飛行任務/飛彈/防空/航電/飛安/空軍基地/空軍單位
 - 聯合作戰：跨軍種協同/聯參/國防部層級/聯合演訓/共同規範/多軍種指揮體系
 - 演訓戰備：演習/訓練/戰備整備/動員/教範/戰術程序/演訓通報
-- 其他：非軍事或無法判斷軍種、或僅泛泛提到國防但無明確歸類
+- 其他：明顯非軍事，或檔名與內容皆無法對應到任何上述類別
 
-規則：
-1) 一份文件可以多標籤（例如 聯合作戰 + 海軍）。
-2) 必須輸出每個標籤的 score（0~1），代表信心。
-3) evidence 必須是從原文擷取的 1~3 句短引文或關鍵詞（不要編造；每句盡量 <= 30 字）。
-4) final_labels 只包含 score >= threshold 的標籤（threshold 由使用者提供）；若全部低於 threshold，final_labels 必須是 ["其他"]。
-5) 若片段內容不足以判斷，請提高「其他」分數，並把 final_labels 設為 ["其他"]。
-6) 僅輸出 JSON（不要 markdown、不要額外文字）。
-7) JSON schema 固定如下，labels 必須包含全部標籤且順序一致：
+判斷規則：
+1) 整批可同時屬於多個類別（例如 聯合作戰 + 海軍 + 演訓戰備），標籤之間並非互斥。
+2) 必須對所有六個標籤輸出 score（0~1，最多兩位小數），代表你對「整批」屬於該標籤的信心。score 必須真實反映你的判斷，不可全部填 0、也不可照抄下方範例的數值。
+3) 多檔合併規則：
+   - 只要批次中「有任何一個檔案」明顯屬於某標籤，該標籤的 score 就應該偏高（≥ 0.55）。
+   - 不要因為其他檔案不屬於該標籤就把分數平均稀釋；採用「批次中最強的證據」作為依據。
+   - 例如批次包含 1 個海軍、1 個空軍檔案，海軍與空軍兩個標籤的 score 都應 ≥ 0.6。
+4) 線索來源包含「檔名」與「檔案內文」兩部分。即使內容很短或缺失，只要檔名或內容中含有明確的軍種關鍵詞（海軍、陸軍、空軍、艦、機、步兵、戰車、飛彈、演習、聯合…等），就應在對應標籤給出 ≥ 0.6 的 score，並把該關鍵詞放入 evidence。
+5) evidence 必須是從「檔名或原文」擷取的 1~3 個短引文或關鍵詞（不可編造；每項 ≤ 30 字）。當某標籤 score ≥ threshold 時，evidence 不可為空，且應註明來自哪份檔案（例如「檔案 1：陸軍工兵」）。
+6) final_labels 為 score ≥ threshold 的所有標籤組成的陣列（threshold 由使用者於 user prompt 提供）。
+7) 僅在以下情況才可將 final_labels 設為 ["其他"]：
+   (a) 整批所有檔案的檔名與內容皆無任何可對應之軍種/演訓關鍵詞，或
+   (b) 整批檔案明顯與軍事/國防/演訓/戰備無關。
+   一般情況請勿輕易回退到「其他」。
+8) 僅輸出「一份」JSON（不要 markdown、不要任何說明文字、不要 <think>、不要為每個檔案各輸出一份 JSON）。
+9) JSON schema 固定如下，labels 必須包含全部六個標籤且順序與下表一致。下方數字僅為「格式示意」，請務必依實際判斷填寫，不可原樣複製：
+
 {
   "labels": [
-    {"name":"海軍","score":0.0,"evidence":[]},
-    {"name":"陸軍","score":0.0,"evidence":[]},
-    {"name":"空軍","score":0.0,"evidence":[]},
-    {"name":"聯合作戰","score":0.0,"evidence":[]},
-    {"name":"演訓戰備","score":0.0,"evidence":[]},
-    {"name":"其他","score":0.0,"evidence":[]}
+    {"name":"海軍","score":0.12,"evidence":["示意，請替換"]},
+    {"name":"陸軍","score":0.74,"evidence":["示意，請替換"]},
+    {"name":"空軍","score":0.08,"evidence":[]},
+    {"name":"聯合作戰","score":0.31,"evidence":["示意，請替換"]},
+    {"name":"演訓戰備","score":0.66,"evidence":["示意，請替換"]},
+    {"name":"其他","score":0.05,"evidence":[]}
   ],
-  "final_labels": ["其他"]
-}
-8) score 最多 2 位小數。
-9) 若某標籤 score >= threshold，該標籤 evidence 不可為空。`;
+  "final_labels": ["陸軍","演訓戰備"]
+}`;
 const ZH_LABEL_ORDER = ["海軍", "陸軍", "空軍", "聯合作戰", "演訓戰備", "其他"];
 const ZH_SET = new Set(ZH_LABEL_ORDER);
 function clamp01(n) {
@@ -5390,36 +5465,6 @@ function parseZhClassificationResponse(rawText) {
   });
   return { ok: true, labels };
 }
-function balanceZhLabelsFromRuns(okRuns) {
-  const runs = okRuns.filter((r) => r && Array.isArray(r.labels) && r.labels.length > 0);
-  if (runs.length === 0) {
-    return ZH_LABEL_ORDER.map((name) => ({ name, score: 0, evidence: [] }));
-  }
-  return ZH_LABEL_ORDER.map((name) => {
-    let sum = 0;
-    let n = 0;
-    let bestScore = -1;
-    let bestEv = [];
-    const pool = [];
-    for (const run of runs) {
-      const L = run.labels.find((l) => l.name === name);
-      if (!L) continue;
-      sum += L.score;
-      n += 1;
-      const ev = Array.isArray(L.evidence) ? L.evidence : [];
-      for (const x of ev) {
-        if (typeof x === "string" && x.trim() && !pool.includes(x.trim())) pool.push(x.trim());
-      }
-      if (L.score > bestScore && ev.length > 0) {
-        bestScore = L.score;
-        bestEv = ev.filter((x) => typeof x === "string" && x.trim()).slice(0, 3);
-      }
-    }
-    const score = roundScore2(n > 0 ? sum / n : 0);
-    const evidence = (bestEv.length > 0 ? bestEv : pool).slice(0, 3);
-    return { name, score, evidence };
-  });
-}
 function computeFinalLabelsFromBalanced(labels, threshold) {
   const th = clampThreshold(threshold);
   const finals = [];
@@ -5429,21 +5474,69 @@ function computeFinalLabelsFromBalanced(labels, threshold) {
   if (finals.length === 0) return ["其他"];
   return finals;
 }
-const CHUNK_CHAR_LIMIT = 2e3;
-const MAX_CHUNKS_PER_FILE = 3;
-function sliceTextIntoChunks(fullText) {
-  const t = typeof fullText === "string" ? fullText : "";
-  const out = [];
-  for (let i = 0; i < MAX_CHUNKS_PER_FILE; i++) {
-    const start = i * CHUNK_CHAR_LIMIT;
-    if (start >= t.length) break;
-    out.push(t.slice(start, start + CHUNK_CHAR_LIMIT));
+const VALID_MODES = ["off", "fast", "medium"];
+let appClassifierEnabled = true;
+let uploadBatchSmartClassifyMode = "off";
+function setAppClassifierEnabled(v) {
+  appClassifierEnabled = Boolean(v);
+}
+function getAppClassifierEnabled() {
+  return appClassifierEnabled;
+}
+function setUploadBatchSmartClassifyWanted(v) {
+  if (typeof v === "boolean") {
+    uploadBatchSmartClassifyMode = v ? "fast" : "off";
+  } else if (v === "high") {
+    uploadBatchSmartClassifyMode = "medium";
+  } else if (VALID_MODES.includes(v)) {
+    uploadBatchSmartClassifyMode = v;
+  } else {
+    uploadBatchSmartClassifyMode = "off";
   }
-  return out;
+}
+function getUploadBatchSmartClassifyWanted() {
+  return uploadBatchSmartClassifyMode !== "off";
+}
+function getSmartClassifyMode() {
+  return uploadBatchSmartClassifyMode;
+}
+const PER_FILE_FRAME_OVERHEAD = 60;
+const MIN_PER_FILE_CHARS = 120;
+const MAX_PER_FILE_CHARS = 1800;
+function condenseToBudget(text, budget) {
+  const t = typeof text === "string" ? text : "";
+  if (t.length === 0) return "";
+  if (t.length <= budget) return t;
+  const ELLIPSIS = "\n…（中略）…\n";
+  const half = Math.floor((budget - ELLIPSIS.length) / 2);
+  if (half <= 0) return t.slice(0, budget);
+  return t.slice(0, half) + ELLIPSIS + t.slice(-half);
+}
+function perFileBudgetForBatch(fileCount) {
+  const N = Math.max(1, fileCount);
+  const totalBudget = Math.max(0, MAX_CHUNK_CHARS - N * PER_FILE_FRAME_OVERHEAD);
+  const raw = Math.floor(totalBudget / N);
+  return Math.max(MIN_PER_FILE_CHARS, Math.min(MAX_PER_FILE_CHARS, raw));
+}
+function buildCompositeBody(files, perFileBudget) {
+  return files.map((f, idx) => {
+    const header = `# 檔案 ${idx + 1}：${path$1.basename(f.path)}`;
+    if (!f.extracted || !f.text) {
+      return `${header}
+（無法擷取內文，請僅依檔名判斷）`;
+    }
+    const body = condenseToBudget(f.text, perFileBudget);
+    return `${header}
+${body}`;
+  }).join("\n\n---\n\n");
 }
 async function classifyDocuments(input) {
   const enable = input?.enable !== false;
   if (!enable) {
+    return { supported: false, reason: "DISABLED", labels: [], final_labels: [] };
+  }
+  const mode = getSmartClassifyMode();
+  if (mode === "off") {
     return { supported: false, reason: "DISABLED", labels: [], final_labels: [] };
   }
   const settings = getClassifierSettings();
@@ -5461,34 +5554,34 @@ async function classifyDocuments(input) {
     };
   }
   const extracted = await extractTextFromFiles(paths);
-  if (!extracted.supported) {
-    return {
-      supported: false,
-      reason: extracted.reason,
-      labels: [],
-      final_labels: [],
-      extraction: { attempted: true, ok: false }
-    };
+  const extractedByPath = /* @__PURE__ */ new Map();
+  if (extracted.supported) {
+    for (const e of extracted.texts) extractedByPath.set(e.path, e.text);
   }
+  const files = paths.map((p) => {
+    const text = extractedByPath.get(p) ?? "";
+    return { path: p, text, extracted: text.length > 0 };
+  });
+  const filesWithText = files.filter((f) => f.extracted).length;
   const extraction = {
     attempted: true,
-    ok: true,
-    filesCount: extracted.texts.length,
-    files: extracted.texts.map((t) => ({
-      path: t.path,
-      name: path$1.basename(t.path),
-      charLen: t.text.length,
-      chunks: sliceTextIntoChunks(t.text).length
+    ok: filesWithText > 0,
+    filesCount: files.length,
+    filesWithText,
+    files: files.map((f) => ({
+      path: f.path,
+      name: path$1.basename(f.path),
+      charLen: f.text.length,
+      extracted: f.extracted
     }))
   };
-  const chunkJobs = [];
-  for (const { path: path2, text } of extracted.texts) {
-    const parts = sliceTextIntoChunks(text);
-    for (let ci = 0; ci < parts.length; ci++) {
-      chunkJobs.push({ path: path2, chunkIndex: ci + 1, chunkTotal: parts.length, body: parts[ci] });
-    }
+  const perFileBudget = perFileBudgetForBatch(files.length);
+  let composite = buildCompositeBody(files, perFileBudget);
+  if (composite.length > MAX_CHUNK_CHARS) {
+    const TAIL = "\n…（後續檔案內容因長度超過模型上限而省略，已盡量保留檔名與前段內容）";
+    composite = composite.slice(0, MAX_CHUNK_CHARS - TAIL.length) + TAIL;
   }
-  if (chunkJobs.length === 0) {
+  if (composite.length === 0) {
     return {
       supported: false,
       reason: "EMPTY_CONTENT",
@@ -5497,33 +5590,32 @@ async function classifyDocuments(input) {
       extraction
     };
   }
-  const totalChunks = chunkJobs.length;
+  logger.info(
+    `[Classify] Batch composite: files=${files.length}, withText=${filesWithText}, perFileBudget=${perFileBudget}, compositeLen=${composite.length}, mode=${mode}`
+  );
+  const ctxSize = pickContextSize(composite.length);
+  const temperature = typeof input?.temperature === "number" ? input.temperature : mode === "medium" ? 0.25 : 0.1;
+  const userPrompt = `本輪門檻 threshold = ${threshold}
+本批共 ${files.length} 個檔案，請針對「整批檔案」綜合判斷並輸出一組嚴格 JSON（規格見 system，僅 JSON、勿 markdown、勿 <think>）。
+注意：score 必須真實反映你對「整批」的判斷，不可全部填 0、也不可照抄 system 範例的數值。
+
+以下為本批每個檔案的「檔名 + 摘要內容」：
+
+${composite}`;
   const report = (done2) => {
     if (typeof input?.onProgress === "function") {
-      input.onProgress({ done: done2, total: totalChunks });
+      input.onProgress({ done: done2, total: 1 });
     }
   };
-  const okRuns = [];
-  const rawResponses = [];
+  report(0);
+  let raw;
   try {
-    for (let i = 0; i < chunkJobs.length; i++) {
-      const job = chunkJobs[i];
-      const userPrompt = `本輪門檻 threshold = ${threshold}
-
-此為同一批上傳中的其中一段文字。請僅依下列「文件片段」輸出 JSON（規格見 system，僅 JSON、勿 markdown）。
-
-檔案：${path$1.basename(job.path)}（第 ${job.chunkIndex}/${job.chunkTotal} 段）
-
-${job.body}`;
-      const raw = await generate(userPrompt, {
-        system: ZH_CLASSIFY_SYSTEM_PROMPT,
-        temperature: typeof input?.temperature === "number" ? input.temperature : 0.1
-      });
-      rawResponses.push(raw);
-      const parsed = parseZhClassificationResponse(raw);
-      if (parsed.ok) okRuns.push({ labels: parsed.labels });
-      report(i + 1);
-    }
+    raw = await generate(userPrompt, {
+      system: ZH_CLASSIFY_SYSTEM_PROMPT,
+      temperature,
+      mode,
+      contextSize: ctxSize
+    });
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     return {
@@ -5536,18 +5628,20 @@ ${job.body}`;
       thresholdUsed: threshold
     };
   }
-  if (okRuns.length === 0) {
+  report(1);
+  const parsed = parseZhClassificationResponse(raw);
+  if (!parsed.ok) {
     return {
       supported: false,
       reason: "JSON_PARSE_FAILED",
       labels: [],
       final_labels: [],
       extraction,
-      llmRawText: rawResponses[0] ?? "",
+      llmRawText: raw,
       thresholdUsed: threshold
     };
   }
-  const balancedLabels = balanceZhLabelsFromRuns(okRuns);
+  const balancedLabels = parsed.labels;
   const final_labels = computeFinalLabelsFromBalanced(balancedLabels, threshold);
   return {
     supported: true,
@@ -5556,10 +5650,10 @@ ${job.body}`;
     classification: { labels: balancedLabels, final_labels },
     extraction: {
       ...extraction,
-      chunksClassified: chunkJobs.length,
-      parseSuccessRuns: okRuns.length
+      chunksClassified: 1,
+      parseSuccessRuns: 1
     },
-    llmRawText: input?.debug ? rawResponses.join("\n---\n") : void 0,
+    llmRawText: input?.debug ? raw : void 0,
     thresholdUsed: threshold
   };
 }
@@ -5632,20 +5726,6 @@ function snapshotForPostUploadDialog(classifierWanted, classifierEnabled, batchK
     classificationPreview: entry.result ?? { supported: false, reason: "NO_RESULT", labels: [], final_labels: [] },
     classifyBatchKey: batchKey
   };
-}
-let appClassifierEnabled = true;
-let uploadBatchSmartClassifyWanted = false;
-function setAppClassifierEnabled(v) {
-  appClassifierEnabled = Boolean(v);
-}
-function getAppClassifierEnabled() {
-  return appClassifierEnabled;
-}
-function setUploadBatchSmartClassifyWanted(v) {
-  uploadBatchSmartClassifyWanted = Boolean(v);
-}
-function getUploadBatchSmartClassifyWanted() {
-  return uploadBatchSmartClassifyWanted;
 }
 class FileManager {
   aesModule;
@@ -6563,10 +6643,17 @@ class FileManager {
     logger.info(`Searching with tags ${tags}`);
     try {
       tags = tags.filter((t) => t != null && t !== "").map((t) => t.trim().normalize("NFC")).filter((t) => t.length > 0).slice(0, 5);
-      const TK = await this.abseManager.Trapdoor(tags);
+      if (tags.length === 0) {
+        return [];
+      }
+      const TKs = [];
+      for (const tag of tags) {
+        const tk = await this.abseManager.Trapdoor([tag]);
+        TKs.push(tk);
+      }
       return new Promise((resolve, reject) => {
-        logger.info("Search payload", { tags });
-        socket.emit("search-files", { TK, tags }, (response) => {
+        logger.info("Search payload", { tags, TKsCount: TKs.length });
+        socket.emit("search-files", { TKs, tags }, (response) => {
           const { errorMsg, files } = response;
           if (errorMsg) {
             logger.error(`Failed to search files: ${errorMsg}`);
@@ -6955,12 +7042,13 @@ function registerClassifierIpcOnce() {
     setAppClassifierEnabled(Boolean(enabled));
     return { ok: true };
   });
-  electron.ipcMain.handle("classifier:set-upload-batch-smart-classify", (_, wanted) => {
-    setUploadBatchSmartClassifyWanted(Boolean(wanted));
+  electron.ipcMain.handle("classifier:set-upload-batch-smart-classify", (_, modeOrBool) => {
+    setUploadBatchSmartClassifyWanted(modeOrBool);
     return { ok: true };
   });
   electron.ipcMain.handle("classifier:get-upload-batch-smart-classify", () => ({
-    wanted: getUploadBatchSmartClassifyWanted()
+    wanted: getUploadBatchSmartClassifyWanted(),
+    mode: getSmartClassifyMode()
   }));
 }
 let fileManagerRef = null;
