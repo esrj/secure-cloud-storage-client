@@ -5,6 +5,10 @@ release/
 resources/ollama/darwin/ollama
 resources/ollama/linux/ollama
 resources/ollama/win32/ollama.exe
-resources/models/*.gguf
+
+# Local LLM model weights — large binary files, never push to GitHub
+*.gguf
+*.gguf.*
+resources/models/
 # API keys — copy agentApiKeys.example.json → agentApiKeys.json and fill in your key
 src/main/config/agentApiKeys.json
