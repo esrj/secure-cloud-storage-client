@@ -1,5 +1,6 @@
-import { app, shell, BrowserWindow, ipcMain } from 'electron'
+import { app, shell, BrowserWindow, ipcMain, dialog } from 'electron'
 import { join } from 'node:path'
+import { existsSync, statSync } from 'node:fs'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import icon from '../../resources/icon.png?asset'
 import { sendMessage } from './MessageManager'
@@ -22,6 +23,7 @@ import {
   registerAgentIpcOnce,
   setDatabaseManagerForAgentIpc
 } from './ipc/agentIpc.js'
+import BatchDownloadManager from './BatchDownloadManager'
 
 // Initilize class instances
 const keyManager = new KeyManager()
@@ -34,6 +36,7 @@ const abseManager = new ABSEManager(keyManager)
 abseManager.init()
 const databaseManager = new DatabaseManager(keyManager)
 const fileManager = new FileManager(aesModule, blockchainManager, abseManager, databaseManager)
+const batchDownloadManager = new BatchDownloadManager(fileManager)
 const loginManager = new LoginManager(
   blockchainManager,
   fileManager,
@@ -126,6 +129,42 @@ app.whenReady().then(() => {
   ipcMain.on('download-with-options', (_event, opts) =>
     fileManager.downloadFileWithOptionsProcess(opts)
   )
+
+  // Batch download — pick destination folder once, sequentially process all files.
+  ipcMain.handle('pick-download-folder', async (_event, defaultPath) => {
+    const useDefault =
+      typeof defaultPath === 'string' && defaultPath.length > 0 && existsSync(defaultPath)
+    const result = await dialog.showOpenDialog({
+      title: '選擇批次下載儲存資料夾',
+      properties: ['openDirectory', 'createDirectory'],
+      defaultPath: useDefault ? defaultPath : app.getPath('downloads')
+    })
+    if (result.canceled || result.filePaths.length === 0) return null
+    return result.filePaths[0]
+  })
+  ipcMain.handle('download-batch-with-options', async (_event, opts) => {
+    let destDir = opts?.destDir
+    // If no directory chosen yet, prompt now (skip extra round-trip from renderer).
+    if (!destDir || !existsSync(destDir) || !statSync(destDir).isDirectory()) {
+      const result = await dialog.showOpenDialog({
+        title: '選擇批次下載儲存資料夾',
+        properties: ['openDirectory', 'createDirectory'],
+        defaultPath: app.getPath('downloads')
+      })
+      if (result.canceled || result.filePaths.length === 0) {
+        return { canceled: true }
+      }
+      destDir = result.filePaths[0]
+    }
+    const batchId = batchDownloadManager.start({ ...opts, destDir })
+    return { batchId, destDir }
+  })
+  ipcMain.on('download-batch-cancel', (_event, batchId) => {
+    batchDownloadManager.cancel(batchId)
+  })
+  ipcMain.on('show-item-in-folder', (_event, p) => {
+    if (typeof p === 'string' && p.length > 0) shell.openPath(p)
+  })
   ipcMain.on('delete', (_event, fileId) => fileManager.deleteFileProcess(fileId))
   ipcMain.on('add-folder', (_event, curPath, folderName) =>
     fileManager.addFolderProcess(curPath, folderName)
@@ -161,6 +200,9 @@ app.whenReady().then(() => {
   })
   ipcMain.handle('search-files', async (_event, values) => {
     return await fileManager.searchFilesProcess(values)
+  })
+  ipcMain.handle('decode-watermark-uid', async (_event, value) => {
+    return await fileManager.decodeWatermarkUidProcess(value)
   })
   ipcMain.on('update-user-config', (_event, config) => {
     GlobalValueManager.updateUser(config)

@@ -3,7 +3,7 @@
  * All processing is local — no file is uploaded to the server.
  * Supports: PDF (invisible text), PNG/JPEG (LSB LSB), DOCX (custom property + body text), TXT (visible marker + ZWC).
  */
-import { useState, useRef, useCallback } from 'react'
+import { useState, useRef, useCallback, useEffect } from 'react'
 import {
   Card,
   Typography,
@@ -17,9 +17,11 @@ import {
   XMarkIcon,
   ClipboardDocumentIcon,
   CheckCircleIcon,
-  XCircleIcon
+  XCircleIcon,
+  UserIcon,
+  ShieldExclamationIcon
 } from '@heroicons/react/24/outline'
-import { detectWatermark } from '../watermarkDetector'
+import { detectWatermark, extractTrackedUidFromPayload } from '../watermarkDetector'
 import { bytesToSize } from './Types'
 import toast from 'react-hot-toast'
 
@@ -127,9 +129,10 @@ function WatermarkDetectPage() {
 
   // ── Copy payload ───────────────────────────────────────────
 
-  function copyPayload() {
-    if (!result?.payload) return
-    navigator.clipboard.writeText(result.payload).then(() => {
+  function copyPayload(payload) {
+    const value = payload ?? result?.payload
+    if (!value) return
+    navigator.clipboard.writeText(value).then(() => {
       toast.success('已複製到剪貼板')
     })
   }
@@ -243,13 +246,45 @@ function FileInfoCard({ file, onClear }) {
   )
 }
 
-function _isVisibleMethod(method) {
-  return method === 'txt-visible-marker' || method === 'docx-body-text'
+/**
+ * Build the headline label for a result, listing every kind of watermark found.
+ * One finding  → "偵測到可視浮水印" / "偵測到不可視浮水印"
+ * Two findings → "同時偵測到可視與不可視浮水印"
+ */
+function _buildHeadline(findings) {
+  const kinds = new Set(findings.map((f) => f.kind))
+  const hasVisible = kinds.has('visible')
+  const hasInvisible = kinds.has('invisible')
+  if (hasVisible && hasInvisible) return '同時偵測到可視與不可視浮水印'
+  if (hasInvisible) return '偵測到不可視浮水印'
+  if (hasVisible) return '偵測到可視浮水印'
+  return '偵測到浮水印'
 }
 
 function ResultCard({ result, onCopy }) {
   const isUnsupported = result.method === 'unsupported'
   const isError = result.method === 'error'
+  const findings = Array.isArray(result.findings) ? result.findings : []
+
+  // Reset tampered state whenever the file under inspection changes.
+  // The set holds indices of findings that auto-validation flagged as tampered.
+  const [tamperedIndices, setTamperedIndices] = useState(() => new Set())
+  useEffect(() => {
+    setTamperedIndices(new Set())
+  }, [result.fileName, result.mimeType])
+
+  const reportTampered = useCallback((idx, isTampered) => {
+    setTamperedIndices((prev) => {
+      const has = prev.has(idx)
+      if (isTampered === has) return prev
+      const next = new Set(prev)
+      if (isTampered) next.add(idx)
+      else next.delete(idx)
+      return next
+    })
+  }, [])
+
+  const anyTampered = tamperedIndices.size > 0
 
   return (
     <Card className="p-5 flex flex-col gap-4 border border-blue-gray-100">
@@ -268,7 +303,7 @@ function ResultCard({ result, onCopy }) {
             <>
               <CheckCircleIcon className="size-7 text-green-600 shrink-0" />
               <Typography color="green" className="font-bold">
-                ✅ 偵測到{_isVisibleMethod(result.method) ? '可視' : '不可視'}浮水印
+                ✅ {_buildHeadline(findings)}
               </Typography>
             </>
           ) : (
@@ -282,33 +317,46 @@ function ResultCard({ result, onCopy }) {
         </div>
       )}
 
-      {/* Method badge */}
-      <div className="flex items-center gap-2">
-        <Typography variant="small" color="gray">偵測方法：</Typography>
-        <MethodBadge method={result.method} />
-      </div>
-
-      {/* Payload */}
-      {result.detected && result.payload && (
-        <div className="flex flex-col gap-1">
-          <Typography variant="small" color="gray">浮水印內容（Payload）：</Typography>
-          <div className="relative bg-blue-gray-50 rounded-lg p-3 pr-12 break-all">
-            <Typography variant="small" className="font-mono text-blue-gray-800">
-              {result.payload}
+      {/* Top-level tampering banner — shown once, even if multiple findings flagged. */}
+      {anyTampered && (
+        <div className="rounded-md border border-red-300 bg-red-50 p-3 flex flex-row items-start gap-2">
+          <ShieldExclamationIcon className="size-6 text-red-700 shrink-0 mt-0.5" />
+          <div className="flex flex-col gap-0.5">
+            <Typography className="font-bold text-red-800">
+              ⚠ 不可視浮水印內容遭到竄改
             </Typography>
-            <button
-              onClick={onCopy}
-              className="absolute top-2 right-2 p-1.5 rounded hover:bg-blue-gray-200 transition-colors"
-              title="複製"
-            >
-              <ClipboardDocumentIcon className="size-4 text-blue-gray-600" />
-            </button>
+            <Typography variant="small" className="text-red-700">
+              其中 {tamperedIndices.size} 個不可視浮水印未通過伺服器密鑰驗證 — 表示該浮水印已遭竄改、或並非由本系統嵌入；嵌入的 uid 不可信任，請勿據此判定來源使用者。
+            </Typography>
           </div>
         </div>
       )}
 
-      {/* Stability warning for TXT ZWC */}
-      {result.method === 'txt-zwc-steganography' && result.detected && (
+      {/* Per-finding details (one section per visible / invisible) */}
+      {result.detected && findings.length > 0 && (
+        <div className="flex flex-col gap-3">
+          {findings.map((f, i) => (
+            <FindingBlock
+              key={`${f.method}-${i}`}
+              finding={f}
+              index={i}
+              onCopy={onCopy}
+              onTamperedChange={reportTampered}
+            />
+          ))}
+        </div>
+      )}
+
+      {/* Fallback: method badge for not-detected / unsupported / error */}
+      {(!result.detected || findings.length === 0) && (
+        <div className="flex items-center gap-2">
+          <Typography variant="small" color="gray">偵測方法：</Typography>
+          <MethodBadge method={result.method} />
+        </div>
+      )}
+
+      {/* Stability warning for TXT ZWC if any finding uses it */}
+      {findings.some((f) => f.method === 'txt-zwc-steganography') && (
         <div className="flex items-start gap-2 bg-amber-50 rounded-lg p-3">
           <Typography variant="small" color="amber">
             ⚠ TXT 零寬字元浮水印穩定性有限，部分文字編輯器在重新儲存後可能移除，建議以 DOCX 或 PDF 格式保存機敏文件。
@@ -316,8 +364,9 @@ function ResultCard({ result, onCopy }) {
         </div>
       )}
 
-      {/* Reason / explanation */}
-      {result.reason && (
+      {/* Reason / explanation — shown for not-detected/unsupported/error only,
+          since per-finding reasons already render inside FindingBlock. */}
+      {result.reason && !result.detected && (
         <div className="border-t border-blue-gray-50 pt-3">
           <Typography variant="small" color="gray">
             {isError ? '⚠ ' : ''}{result.reason}
@@ -333,9 +382,227 @@ function ResultCard({ result, onCopy }) {
   )
 }
 
+function FindingBlock({ finding, index, onCopy, onTamperedChange }) {
+  const isVisible = finding.kind === 'visible'
+  const trackedUid = finding.payload ? extractTrackedUidFromPayload(finding.payload) : null
+  // Heuristic for the trace button label: full v1... values can be decrypted
+  // directly; short hex prefixes require server-side prefix lookup.
+  const isFullTracked = !!trackedUid && /^v\d+/.test(trackedUid)
+
+  // Trace state. status: idle | loading | done | error
+  const [traceState, setTraceState] = useState({ status: 'idle' })
+
+  async function runTrace() {
+    if (!trackedUid) return
+    setTraceState({ status: 'loading' })
+    try {
+      const resp = await window.electronAPI.askDecodeWatermarkUid?.(trackedUid)
+      if (resp?.errorMsg) {
+        setTraceState({ status: 'error', error: resp.errorMsg })
+        return
+      }
+      setTraceState({
+        status: 'done',
+        matches: Array.isArray(resp?.matches) ? resp.matches : [],
+        reason: resp?.reason
+      })
+    } catch (e) {
+      setTraceState({ status: 'error', error: e?.message || String(e) })
+    }
+  }
+
+  // Tampering verdict for invisible watermarks
+  // ──────────────────────────────────────────
+  // There are two ways an invisible watermark fails authentication:
+  //
+  //   1) LOCAL — payload doesn't even carry a keyed-encrypted uid (no `v1...`
+  //      ciphertext). Either someone tampered with the content, or the file
+  //      predates the keyed-encoding scheme. We can decide this offline, so
+  //      no server round-trip is needed.
+  //
+  //   2) SERVER — payload looks like a `v1...` ciphertext, but the server's
+  //      AES decrypt fails (`decode_failed`). The keyed-encryption integrity
+  //      check rejects fabricated/edited values, so this is a high-confidence
+  //      tampering signal.
+  //
+  // Visible watermarks only carry an 8-char short prefix and can legitimately
+  // miss for non-tampering reasons (e.g. user deleted), so they never flip
+  // the tampering flag here.
+  const isLocallyTampered = finding.kind === 'invisible' && !isFullTracked
+  const isServerTampered =
+    finding.kind === 'invisible' &&
+    isFullTracked &&
+    traceState.status === 'done' &&
+    traceState.matches?.length === 0 &&
+    traceState.reason === 'decode_failed'
+  const isTampered = isLocallyTampered || isServerTampered
+
+  // Auto-verify on mount when, and ONLY when, we have a `v1` ciphertext to
+  // verify. Local tampering needs no server call; visible watermarks stay
+  // manual to avoid false alarms.
+  useEffect(() => {
+    if (finding.kind === 'invisible' && isFullTracked && traceState.status === 'idle') {
+      void runTrace()
+    }
+    // We deliberately fire this only once per mount; deps reflect that.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  // Bubble tampering state up so the page header can show one consolidated
+  // warning even when multiple findings are flagged. `onTamperedChange` is
+  // memoized in the parent (useCallback), so this effect only fires when the
+  // tampering verdict actually flips.
+  useEffect(() => {
+    if (typeof onTamperedChange === 'function') {
+      onTamperedChange(index, isTampered)
+    }
+  }, [isTampered, index, onTamperedChange])
+
+  // Card framing: tampering takes precedence over the kind colouring so users
+  // notice immediately.
+  let containerClass
+  if (isTampered) {
+    containerClass = 'border-red-300 bg-red-50/60'
+  } else if (isVisible) {
+    containerClass = 'border-emerald-200 bg-emerald-50/40'
+  } else {
+    containerClass = 'border-purple-200 bg-purple-50/40'
+  }
+
+  return (
+    <div className={`rounded-lg p-3 border ${containerClass}`}>
+      <div className="flex items-center gap-2 flex-wrap">
+        <Chip
+          value={isVisible ? '可視' : '不可視'}
+          size="sm"
+          color={isVisible ? 'green' : 'purple'}
+        />
+        <MethodBadge method={finding.method} />
+        {isTampered && (
+          <Chip
+            value="已被竄改"
+            size="sm"
+            color="red"
+            icon={<ShieldExclamationIcon className="size-3.5" />}
+          />
+        )}
+      </div>
+
+      {finding.reason && (
+        <Typography variant="small" color="gray" className="mt-2">
+          {finding.reason}
+        </Typography>
+      )}
+
+      {isTampered && (
+        <div className="mt-2 rounded-md border border-red-300 bg-red-100/70 p-2 flex flex-row items-start gap-2">
+          <ShieldExclamationIcon className="size-5 text-red-700 shrink-0 mt-0.5" />
+          <div className="flex flex-col gap-0.5">
+            <Typography variant="small" className="font-bold text-red-800">
+              浮水印內容遭到竄改
+            </Typography>
+            <Typography variant="small" className="text-red-700">
+              {isLocallyTampered
+                ? '此不可視浮水印未帶有伺服器加密的 uid（缺少 v1 密文格式），代表內容已被改寫，或並非本系統嵌入的版本。'
+                : '嵌入的 v1 密文無法以伺服器密鑰解密 — 表示浮水印已遭竄改、或並非本系統嵌入的版本。'}
+              <span className="font-bold"> 不可據此判定來源使用者。</span>
+            </Typography>
+          </div>
+        </div>
+      )}
+
+      {finding.payload && (
+        <div className="mt-2 flex flex-col gap-1">
+          <Typography variant="small" color="gray">浮水印內容（Payload）：</Typography>
+          <div className="relative bg-blue-gray-50 rounded-lg p-3 pr-12 break-all">
+            <Typography variant="small" className="font-mono text-blue-gray-800">
+              {finding.payload}
+            </Typography>
+            <button
+              onClick={() => onCopy(finding.payload)}
+              className="absolute top-2 right-2 p-1.5 rounded hover:bg-blue-gray-200 transition-colors"
+              title="複製"
+            >
+              <ClipboardDocumentIcon className="size-4 text-blue-gray-600" />
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Trace UI — hidden for locally-tampered invisible findings, because
+          looking up a non-encrypted "uid" prefix would only be misleading. */}
+      {trackedUid && !isLocallyTampered && (
+        <div className="mt-2 flex flex-col gap-2">
+          <div className="flex flex-row items-center gap-2 flex-wrap">
+            <Button
+              size="sm"
+              variant="outlined"
+              color="blue-gray"
+              className="flex flex-row items-center gap-1"
+              onClick={runTrace}
+              disabled={traceState.status === 'loading'}
+            >
+              {traceState.status === 'loading' ? (
+                <>
+                  <Spinner className="size-3.5" />
+                  查詢中…
+                </>
+              ) : (
+                <>
+                  <UserIcon className="size-3.5" />
+                  {traceState.status === 'done' ? '重新查詢' : '查詢來源使用者'}
+                </>
+              )}
+            </Button>
+            <Typography variant="small" color="gray">
+              {isFullTracked
+                ? '（完整不可視 ID — 載入時自動以伺服器密鑰驗證並解密）'
+                : '（短前綴 — 伺服器將比對所有使用者）'}
+            </Typography>
+          </div>
+
+          {traceState.status === 'error' && (
+            <Typography variant="small" color="red">
+              查詢失敗：{traceState.error}
+            </Typography>
+          )}
+
+          {/* "no match" messaging: distinguish sub-cases. Server-tampered is
+              handled by the dedicated red banner above, so we skip it here. */}
+          {traceState.status === 'done' && traceState.matches?.length === 0 && !isTampered && (
+            <Typography variant="small" color="amber">
+              ⚠ 無對應使用者
+              {!traceState.reason && isFullTracked && '（解密成功但對應使用者已不在系統中）'}
+              {!traceState.reason && !isFullTracked && '（前綴未對應到任何使用者，可視浮水印可能被改寫，或該使用者已刪除）'}
+              。
+            </Typography>
+          )}
+
+          {traceState.status === 'done' && traceState.matches?.length > 0 && (
+            <div className="bg-white rounded-md border border-blue-gray-200 p-2">
+              <Typography variant="small" className="font-bold text-blue-gray-800 mb-1">
+                {traceState.matches.length === 1
+                  ? '解密後的來源使用者：'
+                  : `解密後比對到 ${traceState.matches.length} 位可能的使用者：`}
+              </Typography>
+              {traceState.matches.map((u) => (
+                <div key={u.id} className="text-xs flex flex-col py-0.5 border-t border-blue-gray-50 first:border-t-0">
+                  <span className="font-mono text-blue-gray-800">{u.name || '(未知)'} &lt;{u.email || '—'}&gt;</span>
+                  <span className="font-mono text-blue-gray-400 text-[10px]">id: {u.id}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
 function MethodBadge({ method }) {
   const config = {
     'pdf-invisible-text': { label: 'PDF 不可視文字', color: 'purple' },
+    'pdf-visible-text': { label: 'PDF 可視文字', color: 'green' },
     'lsb-r-channel': { label: 'LSB R 通道隱寫', color: 'teal' },
     'docx-custom-property': { label: 'DOCX 自訂屬性', color: 'indigo' },
     'docx-body-text': { label: 'DOCX 文件文字', color: 'blue-gray' },

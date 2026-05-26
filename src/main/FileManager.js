@@ -7,6 +7,7 @@ import { socket } from './MessageManager'
 import { createReadStream, createWriteStream, unlinkSync } from 'node:fs'
 import { PassThrough } from 'node:stream'
 import { unlink, readFile, writeFile } from 'node:fs/promises'
+import { randomUUID } from 'node:crypto'
 import {
   applyVisibleWatermark,
   applyInvisibleWatermark,
@@ -43,17 +44,98 @@ import {
   getAppClassifierEnabled
 } from './services/classifierRuntime.js'
 
+// ──────────────────────────────────────────────────────────────────────
+// Watermark text composition
+//
+// We embed two distinct payloads:
+//
+//   • Visible watermark — a short, human-readable line shown on the document.
+//     Only the first 8 hex chars of the (server-keyed) tracked uid are used,
+//     mirroring the historical "uid:abc12345" format. This is enough for an
+//     operator to recognize "yep, this came from someone whose tracked uid
+//     starts with abc12345" but never reveals the plain user id.
+//     User-supplied `customNote` IS included here because the user can already
+//     see the visible watermark — there's no extra information leak.
+//
+//   • Invisible watermark — full machine-readable payload carrying the entire
+//     tracked uid. Decoding it server-side yields the exact plain user id
+//     directly, no DB lookup required. This is the forensic primary.
+//     We deliberately do NOT embed customNote here because:
+//       (1) The user-typed note may contain PII / classified annotations that
+//           shouldn't follow the file silently — uid/fid/ts is already enough
+//           to identify the source download event.
+//       (2) Notes can be CJK, which the bundled StandardFonts.Helvetica cannot
+//           encode and would throw on _invisiblePDF. By restricting the
+//           invisible payload to ASCII-only fields (hex uid, uuid fid, ISO ts)
+//           we side-step the throw entirely.
+//
+// Both share the same authenticated meta (server `download-file-with-watermark`
+// reply), so an attacker who tampers with one has to fake them consistently —
+// and without the server's watermark key they can't compute correct ciphertext
+// for someone else's uid.
+// ──────────────────────────────────────────────────────────────────────
+
+/** Strip the version prefix (e.g. "v1") and take the first 8 hex chars. */
+function _shortTrackedUid(trackedUid) {
+  return String(trackedUid || '').replace(/^v\d+/, '').slice(0, 8)
+}
+
+function _buildVisibleWmText(watermarkMeta, customNote) {
+  const shortUid = _shortTrackedUid(watermarkMeta?.userId)
+  const shortFid = String(watermarkMeta?.fileId || '').slice(0, 8)
+  const ts = watermarkMeta?.ts || new Date().toISOString()
+  const note = (customNote || '').trim()
+  return `uid:${shortUid} | fid:${shortFid} | ${ts}${note ? ' | ' + note : ''}`
+}
+
+function _buildInvisibleWmText(watermarkMeta /* , customNote — intentionally unused */) {
+  const fullUid = String(watermarkMeta?.userId || '')
+  const fid = String(watermarkMeta?.fileId || '')
+  const ts = watermarkMeta?.ts || new Date().toISOString()
+  // ASCII-only by construction (hex uid + uuid fid + ISO ts).
+  return `uid:${fullUid} | fid:${fid} | ts:${ts}`
+}
+
 class FileManager {
   aesModule
   blockchainManager
   uploadQueue
-  #uploadBatch = {
-    expected: 0,
-    fileIds: [],
-    pathsByFileId: {},
-    classifyBatchKey: null,
-    classifierWanted: false
-  }
+  /**
+   * Active upload batches keyed by batchId. Each call to `uploadFileProcess()`
+   * creates a new entry; entries are removed when their `expected` slot count
+   * reaches zero (whether by success or failure).
+   *
+   * Previously this was a single private field shared across all batches,
+   * which caused two foot-guns when the user kicked off uploads in quick
+   * succession:
+   *   1) The second uploadFileProcess() overwrote the first batch's state, so
+   *      the first batch's `expected` could never reach zero and its
+   *      post-upload dialog never fired.
+   *   2) Errors before the server reply (encryption failure, pre-upload
+   *      socket error) returned out of #uploadProcess without decrementing
+   *      `expected` at all, leaving the batch stuck forever.
+   *
+   * Per-batch state plus an explicit #markBatchSlotDone() call in every
+   * error path fix both.
+   *
+   * @type {Map<string, {
+   *   batchId: string,
+   *   expected: number,
+   *   fileIds: string[],
+   *   pathsByFileId: Record<string, string>,
+   *   classifyBatchKey: string | null,
+   *   classifierWanted: boolean
+   * }>}
+   */
+  #uploadBatches = new Map()
+  /**
+   * fileId → batchId routing table, populated when pre-upload returns a
+   * fileId and consumed when the corresponding upload-file-res arrives. Lets
+   * us deliver server replies to the right batch even when several batches
+   * are in flight.
+   * @type {Map<string, string>}
+   */
+  #fileIdToBatchId = new Map()
   /**
    * @param {AESModule} aesModule
    * @param {BlockchainManager} blockchainManager
@@ -78,21 +160,28 @@ class FileManager {
 
     /**
      * A message from server when upload verification finished.
+     *
+     * Server replies are routed back to their originating batch via
+     * #fileIdToBatchId. An orphaned reply (no batch entry — e.g. stale
+     * message after a client restart) is logged and dropped to avoid
+     * corrupting unrelated state.
      */
     socket.on('upload-file-res', (response) => {
-      if (response.errorMsg) {
+      const fileId = response?.fileId
+      const batchId = fileId ? this.#fileIdToBatchId.get(fileId) : undefined
+      if (fileId) this.#fileIdToBatchId.delete(fileId)
+
+      if (response?.errorMsg) {
         logger.error(
-          `Failed to upload file ${response.fileId}: ${response.errorMsg}. Upload aborted.`
+          `Failed to upload file ${fileId}: ${response.errorMsg}. Upload aborted.`
         )
         this.#sendUploadErrorNotice(response.errorMsg)
+        this.#markBatchSlotDone(batchId, null)
       } else {
-        GlobalValueManager.sendNotice(`Success to upload file ${response.fileId}`, 'success')
-        this.#uploadBatch.fileIds.push(response.fileId)
+        GlobalValueManager.sendNotice(`Success to upload file ${fileId}`, 'success')
         this.getFileListProcess(GlobalValueManager.curFolderId)
+        this.#markBatchSlotDone(batchId, fileId)
       }
-      // Decrement regardless of success/failure, then check if whole batch is done
-      this.#uploadBatch.expected = Math.max(0, this.#uploadBatch.expected - 1)
-      this.#checkUploadBatchDone()
     })
 
     /**
@@ -129,9 +218,37 @@ class FileManager {
    * Check if all files in the current upload batch have received a response.
    * If so, notify the renderer to open the post-upload settings dialog.
    */
-  #checkUploadBatchDone() {
-    if (this.#uploadBatch.expected === 0 && this.#uploadBatch.fileIds.length > 0) {
-      const { classifyBatchKey, classifierWanted, fileIds, pathsByFileId } = this.#uploadBatch
+  /**
+   * Decrement the given batch's remaining slot count by 1, record the fileId
+   * if it succeeded, and fire the post-upload dialog (then remove the batch)
+   * if no slots remain.
+   *
+   * Tolerates an undefined batchId — that happens when an `upload-file-res`
+   * arrives for a fileId we no longer track (server-late reply, batch already
+   * cleaned up, etc).
+   *
+   * @param {string | undefined} batchId
+   * @param {string | null} fileId  null ⇒ this slot failed; non-null ⇒ success
+   */
+  #markBatchSlotDone(batchId, fileId) {
+    if (!batchId) return
+    const batch = this.#uploadBatches.get(batchId)
+    if (!batch) return
+    batch.expected = Math.max(0, batch.expected - 1)
+    if (fileId) batch.fileIds.push(fileId)
+    this.#checkUploadBatchDone(batchId)
+  }
+
+  #checkUploadBatchDone(batchId) {
+    const batch = this.#uploadBatches.get(batchId)
+    if (!batch) return
+    if (batch.expected > 0) return
+
+    // All slots in this batch have resolved (success or fail). Fire the
+    // post-upload dialog only if at least one file actually made it to the
+    // server — there's nothing useful to show otherwise.
+    if (batch.fileIds.length > 0) {
+      const { classifyBatchKey, classifierWanted, fileIds, pathsByFileId } = batch
       const sourcePaths = fileIds.map((id) => pathsByFileId[id]).filter(Boolean)
       const { classificationPreview } = snapshotForPostUploadDialog(
         classifierWanted,
@@ -144,22 +261,26 @@ class FileManager {
         classificationPreview,
         classifyBatchKey
       })
-      this.#uploadBatch = {
-        expected: 0,
-        fileIds: [],
-        pathsByFileId: {},
-        classifyBatchKey: null,
-        classifierWanted: false
-      }
     }
+    this.#uploadBatches.delete(batchId)
   }
 
   /**
    * The process of actually uploading the file.
    * Properly awaits each stage so concurrent-queue concurrency control works correctly.
-   * @param {{ filePath: string, parentFolderId: string }} info
+   *
+   * Batch-tracking contract:
+   *   • Each invocation owns exactly one slot in `batch.expected`.
+   *   • If we reach Step 5 and enqueue successfully, the slot is closed later
+   *     by `socket.on('upload-file-res')` when the server confirms.
+   *   • Any earlier failure (encryption, pre-upload, write, transport) MUST
+   *     call `#markBatchSlotDone(batchId, null)` before returning — otherwise
+   *     the batch never reaches expected=0 and the post-upload dialog never
+   *     fires (regression A2).
+   *
+   * @param {{ filePath: string, parentFolderId: string, batchId: string }} info
    */
-  async #uploadProcess({ filePath, parentFolderId }) {
+  async #uploadProcess({ filePath, parentFolderId, batchId }) {
     let cipher = null
     let spk = null
     let encryptedStream = null
@@ -181,6 +302,7 @@ class FileManager {
         'File stream creation failed.',
         'Please check if file exists and try again.'
       )
+      this.#markBatchSlotDone(batchId, null)
       return
     }
 
@@ -197,12 +319,16 @@ class FileManager {
     } catch (error) {
       logger.error(`Failed to pre-upload: ${error.message}. Upload aborted.`)
       this.#sendUploadErrorNotice(error.message)
+      this.#markBatchSlotDone(batchId, null)
       return
     }
 
-    // Keep source path for post-upload dialog + retry classify flow
-    if (this.#uploadBatch.pathsByFileId) {
-      this.#uploadBatch.pathsByFileId[fileId] = filePath
+    // Wire this fileId back to its batch so upload-file-res routes correctly,
+    // and keep the source path for the post-upload dialog + retry classify flow.
+    this.#fileIdToBatchId.set(fileId, batchId)
+    const batch = this.#uploadBatches.get(batchId)
+    if (batch) {
+      batch.pathsByFileId[fileId] = filePath
     }
 
     // Step 3: Set up tee — split encryptedStream into hash stream and write stream
@@ -285,11 +411,17 @@ class FileManager {
         `Upload with ${GlobalValueManager.serverConfig.protocol} failed.`,
         CheckLogForDetailMsg
       )
+      // The server never received the file → no upload-file-res will come.
+      // Drop the routing entry and close the slot ourselves.
+      this.#fileIdToBatchId.delete(fileId)
+      this.#markBatchSlotDone(batchId, null)
       return
     }
 
     // Step 5: Enqueue blockchain upload to serialized queue (non-blocking for upload slots)
-    // blockchainQueue has concurrency: 1 to prevent Ethereum nonce collisions
+    // blockchainQueue has concurrency: 1 to prevent Ethereum nonce collisions.
+    // From here on the batch slot will be closed by socket.on('upload-file-res'),
+    // not by us — the server is now the authority on this fileId's outcome.
     this.blockchainQueue({ coordinator: fileUploadCoordinator }).catch((error) => {
       logger.error(error)
       this.#sendUploadErrorNotice('Blockchain upload failed.', ContactManagerOrTryAgainMsg)
@@ -311,13 +443,17 @@ class FileManager {
       const classifyBatchKey =
         classifierWanted && classifierEnabled ? makeUploadBatchClassifyKey(filePaths) : null
 
-      this.#uploadBatch = {
+      // Each call to this method spawns a fresh batch; old batches keep
+      // running independently until their own slots drain (fix A1).
+      const batchId = randomUUID()
+      this.#uploadBatches.set(batchId, {
+        batchId,
         expected: filePaths.length,
         fileIds: [],
         pathsByFileId: {},
         classifyBatchKey,
         classifierWanted
-      }
+      })
 
       // Fire LM classification in background; upload continues concurrently
       if (classifierWanted && classifierEnabled && classifyBatchKey) {
@@ -330,7 +466,7 @@ class FileManager {
       }
 
       for (const filePath of filePaths) {
-        this.uploadQueue({ filePath, parentFolderId })
+        this.uploadQueue({ filePath, parentFolderId, batchId })
       }
     } else {
       GlobalValueManager.sendNotice('File upload canceled.', 'error')
@@ -374,11 +510,32 @@ class FileManager {
   }
 
   /**
-   * Ask the server to download file.
+   * Ask the server to download file (legacy entry, no UI options).
+   *
+   * Routed through the unified `_performInteractiveDownload` so that callers
+   * such as the smart-search agent's "download" button still get an invisible
+   * watermark silently embedded when the format supports it. The user is
+   * never asked or notified about this — that's by design.
+   *
    * @param {string} fileId the file to download
    */
   downloadFileProcess(fileId) {
     logger.info(`Asking for file ${fileId}...`)
+    void this._performInteractiveDownload(fileId, 'original', null).catch((e) => {
+      logger.error(`[Download] interactive (legacy) failed: ${e?.message || e}`)
+    })
+  }
+
+  /**
+   * Legacy implementation kept around for the rare path that wants the raw
+   * server flow (no watermark, no extra round-trip). Currently unused — every
+   * UI entry point goes through `_performInteractiveDownload`.
+   *
+   * @deprecated Prefer `_performInteractiveDownload` for new callers.
+   * @param {string} fileId the file to download
+   */
+  _downloadFileProcessLegacy(fileId) {
+    logger.info(`Asking for file ${fileId} (legacy path)...`)
     /**
      * Pre-download request to get the fileInfo
      */
@@ -623,15 +780,92 @@ class FileManager {
   /**
    * Download a file with options (original or watermark).
    * Called by the IPC handler for 'download-with-options'.
+   *
+   * Both modes silently embed an invisible watermark when the file format
+   * supports it. The user-facing dialog only exposes original vs visible
+   * watermark; the invisible part is intentionally not surfaced.
+   *
    * @param {{ fileId: string, mode: 'original'|'watermark', watermarkOptions: object|null }} opts
    */
   downloadFileWithOptionsProcess({ fileId, mode, watermarkOptions }) {
-    if (mode !== 'watermark') {
-      // Original download: reuse existing flow
-      this.downloadFileProcess(fileId)
+    void this._performInteractiveDownload(fileId, mode, watermarkOptions).catch((e) => {
+      logger.error(`[Download] interactive failed: ${e?.message || e}`)
+    })
+  }
+
+  /**
+   * Unified single-file interactive download:
+   *   1. Resolve auth meta (server + blockchain)
+   *   2. Ask the user where to save the file
+   *   3. Build effective watermark options
+   *      - Format supports watermark → always invisible=true,
+   *        visible = (mode === 'watermark')
+   *      - Format does not          → no watermark at all (plain download)
+   *   4. Run the appropriate helper and emit a user-friendly notice that
+   *      never mentions the invisible watermark.
+   *
+   * @param {string} fileId
+   * @param {'original'|'watermark'} mode
+   * @param {object|null} userOptions visible-watermark style options from UI
+   */
+  async _performInteractiveDownload(fileId, mode, userOptions) {
+    // 1. Resolve metadata
+    let meta
+    try {
+      meta = await this.getDownloadMeta(fileId)
+    } catch (e) {
+      this.#sendDownloadErrorNotice(e?.message || 'Failed to fetch file metadata.', ContactManagerOrTryAgainMsg)
       return
     }
-    this.#downloadWithWatermark(fileId, watermarkOptions)
+
+    // 2. Save dialog
+    const { filePath, canceled } = await dialog.showSaveDialog({
+      defaultPath: meta.name,
+      properties: ['showOverwriteConfirmation', 'createDirectory']
+    })
+    if (canceled) {
+      logger.info('Download canceled.')
+      GlobalValueManager.sendNotice('Download canceled.', 'error')
+      return
+    }
+
+    const supportsWatermark = isWatermarkSupported(meta.name)
+
+    // 3a. Format does not support any watermark → plain download.
+    if (!supportsWatermark) {
+      try {
+        await this.downloadOriginalToPath(meta, filePath)
+        GlobalValueManager.sendNotice('Success to download file', 'success')
+      } catch (_e) {
+        // helper has already surfaced an error notice
+      }
+      return
+    }
+
+    // 3b. Build effective watermark options.
+    //
+    // visible  — only when the user explicitly chose 'watermark' mode
+    // invisible — ALWAYS, regardless of mode (silent forensic marker)
+    const effectiveOptions = {
+      visible: mode === 'watermark',
+      invisible: true,
+      customNote: userOptions?.customNote ?? '',
+      position: userOptions?.position ?? 'bottomRight',
+      opacity: userOptions?.opacity ?? 0.3,
+      fontSize: userOptions?.fontSize ?? 14,
+      mimeType: userOptions?.mimeType ?? getMimeFromFilename(meta.name)
+    }
+
+    try {
+      await this.downloadWatermarkedToPath(fileId, meta, filePath, effectiveOptions)
+      GlobalValueManager.sendNotice(
+        // Notice text intentionally never mentions invisible — it's silent.
+        mode === 'watermark' ? 'File downloaded with watermark.' : 'Success to download file',
+        'success'
+      )
+    } catch (_e) {
+      // helper has already surfaced an error notice
+    }
   }
 
   /**
@@ -758,19 +992,19 @@ class FileManager {
         try {
           const decryptedBuffer = await readFile(tempPath)
 
-          // Build watermark text from server-authenticated metadata + optional custom note
-          const shortUid = (watermarkMeta.userId || '').slice(0, 8)
-          const shortFid = (watermarkMeta.fileId || '').slice(0, 8)
-          const ts = watermarkMeta.ts || new Date().toISOString()
-          const customNote = (watermarkOptions?.customNote || '').trim()
-          const wmText = `uid:${shortUid} | fid:${shortFid} | ${ts}${customNote ? ' | ' + customNote : ''}`
+          // Build visible/invisible texts from server-authenticated metadata.
+          // (See module-level comments for why the two texts differ.)
+          const note = watermarkOptions?.customNote
+          const visibleText = _buildVisibleWmText(watermarkMeta, note)
+          // Invisible payload intentionally omits the user note (see _buildInvisibleWmText).
+          const invisibleText = _buildInvisibleWmText(watermarkMeta)
 
           // Apply visible watermark first (if requested), then invisible on top
           let processedBuffer = decryptedBuffer
 
           if (watermarkOptions?.visible === true) {
             processedBuffer = await applyVisibleWatermark(processedBuffer, mimeType, {
-              text: wmText,
+              text: visibleText,
               position: watermarkOptions?.position ?? 'bottomRight',
               opacity: watermarkOptions?.opacity ?? 0.3,
               fontSize: watermarkOptions?.fontSize ?? 14
@@ -779,7 +1013,7 @@ class FileManager {
 
           if (watermarkOptions?.invisible === true) {
             processedBuffer = await applyInvisibleWatermark(processedBuffer, mimeType, {
-              text: wmText
+              text: invisibleText
             })
           }
 
@@ -875,6 +1109,214 @@ class FileManager {
         this.#sendDownloadErrorNotice('Hash verification failed.')
       }
       throw error
+    }
+  }
+
+  // ──────────────────────────────────────────────────────────────────────
+  // Public helpers used by BatchDownloadManager.
+  //
+  // These mirror the per-file logic from `downloadFileProcess` /
+  // `#downloadWithWatermark` but accept an explicit output path, return a
+  // promise, and never spawn save/folder dialogs. Every helper throws on
+  // failure so the batch loop can record per-item errors.
+  // ──────────────────────────────────────────────────────────────────────
+
+  /**
+   * Resolve the per-file metadata required for a download:
+   *  - server-side fileInfo (cipher, spk, size, owner)
+   *  - blockchain verification + canonical fileInfo (for hash check)
+   * Throws on any failure with a human-readable message.
+   *
+   * Used by BatchDownloadManager so each file in a batch only goes through
+   * the verification dance once, regardless of mode (original/watermark).
+   *
+   * @param {string} fileId
+   * @returns {Promise<{
+   *   id: string, name: string, cipher: any, spk: any, size: number,
+   *   proxied: boolean, blockchainFileInfo: any
+   * }>}
+   */
+  async getDownloadMeta(fileId) {
+    const fileInfo = await new Promise((resolve, reject) => {
+      socket.emit('download-file-pre', { fileId }, (response) => {
+        if (response?.errorMsg) return reject(new Error(response.errorMsg))
+        if (!response?.fileInfo) return reject(new Error('File not found'))
+        resolve(response.fileInfo)
+      })
+    })
+
+    const bv = await this.blockchainManager.getFileVerification(
+      fileId,
+      fileInfo.verifyblocknumber
+    )
+    if (!bv || bv.verificationInfo !== 'success') {
+      throw new Error('File not verified on blockchain.')
+    }
+
+    const blockchainFileInfo = await this.blockchainManager.getFileInfo(
+      fileId,
+      fileInfo.infoblocknumber
+    )
+    if (!blockchainFileInfo) {
+      throw new Error('File info not on blockchain.')
+    }
+
+    const proxied = fileInfo.ownerId !== fileInfo.originOwnerId
+    const { id, name, cipher, spk, size } = fileInfo
+    return { id, name, cipher, spk, size, proxied, blockchainFileInfo }
+  }
+
+  /**
+   * Download + decrypt + verify hash, writing the plaintext bytes to
+   * `outputPath`. No watermark is applied; this is the batch-friendly
+   * counterpart of `downloadFileProcess2` minus the save dialog.
+   *
+   * @param {Awaited<ReturnType<FileManager['getDownloadMeta']>>} meta
+   * @param {string} outputPath
+   */
+  async downloadOriginalToPath(meta, outputPath) {
+    await this.#downloadDecryptToPath(
+      meta.id,
+      meta.name,
+      meta.cipher,
+      meta.spk,
+      meta.size,
+      meta.proxied,
+      meta.blockchainFileInfo,
+      outputPath
+    )
+  }
+
+  /**
+   * Download + decrypt to a temp path, apply visible/invisible watermark
+   * using the server-authenticated metadata, then write the result to
+   * `outputPath`. The temp file is cleaned up regardless of success.
+   *
+   * @param {string} fileId
+   * @param {Awaited<ReturnType<FileManager['getDownloadMeta']>>} meta
+   * @param {string} outputPath
+   * @param {object} watermarkOptions  same shape as DownloadOptionsDialog
+   */
+  async downloadWatermarkedToPath(fileId, meta, outputPath, watermarkOptions) {
+    // ── Phase 1 of two-phase commit ─────────────────────────────────
+    // Ask the server for authenticated watermark meta. Server stashes a
+    // pending download_logs row keyed by `requestId`; it won't be flushed
+    // to the DB until we send back `confirm-watermark-download` with
+    // success=true. See server FileManager.js pendingWatermarkDownloads
+    // comment for the full rationale.
+    const { requestId, watermarkMeta } = await new Promise((resolve, reject) => {
+      socket.emit(
+        'download-file-with-watermark',
+        {
+          fileId,
+          mode: 'watermark',
+          watermark: {
+            visible: watermarkOptions?.visible === true,
+            invisible: watermarkOptions?.invisible === true,
+            customNote: watermarkOptions?.customNote ?? '',
+            position: watermarkOptions?.position ?? 'bottomRight',
+            opacity: watermarkOptions?.opacity ?? 0.3,
+            fontSize: watermarkOptions?.fontSize ?? 14
+          }
+        },
+        (response) => {
+          if (response?.errorMsg) {
+            reject(new Error(response.errorMsg))
+          } else {
+            resolve({
+              requestId: response?.requestId,
+              watermarkMeta: response?.watermarkMeta
+            })
+          }
+        }
+      )
+    })
+
+    const mimeType = watermarkOptions?.mimeType ?? getMimeFromFilename(meta.name)
+    const tempPath = resolve(
+      GlobalValueManager.tempPath,
+      `${meta.id}_wmbatch_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
+    )
+
+    try {
+      // 2. Download + decrypt to temp path (with hash verify).
+      await this.#downloadDecryptToPath(
+        meta.id,
+        meta.name,
+        meta.cipher,
+        meta.spk,
+        meta.size,
+        meta.proxied,
+        meta.blockchainFileInfo,
+        tempPath
+      )
+
+      try {
+        // 3. Apply watermarks. Visible and invisible payloads are different on
+        // purpose — see comment block above _buildVisibleWmText / _buildInvisibleWmText.
+        const decryptedBuffer = await readFile(tempPath)
+        const note = watermarkOptions?.customNote
+        const visibleText = _buildVisibleWmText(watermarkMeta, note)
+        // Invisible payload intentionally omits the user note (see _buildInvisibleWmText).
+        const invisibleText = _buildInvisibleWmText(watermarkMeta)
+
+        let processedBuffer = decryptedBuffer
+        if (watermarkOptions?.visible === true) {
+          processedBuffer = await applyVisibleWatermark(processedBuffer, mimeType, {
+            text: visibleText,
+            position: watermarkOptions?.position ?? 'bottomRight',
+            opacity: watermarkOptions?.opacity ?? 0.3,
+            fontSize: watermarkOptions?.fontSize ?? 14
+          })
+        }
+        if (watermarkOptions?.invisible === true) {
+          processedBuffer = await applyInvisibleWatermark(processedBuffer, mimeType, {
+            text: invisibleText
+          })
+        }
+        // 4. Final writeFile — this is the moment the user actually has the
+        //    file. If it throws, the catch below will cancel the log entry.
+        await writeFile(outputPath, processedBuffer)
+      } finally {
+        try { await unlink(tempPath) } catch (_) { /* ignore */ }
+      }
+
+      // ── Phase 2: commit ───────────────────────────────────────────
+      // We reached here ⇒ the file is on disk. Fire-and-forget: if the
+      // confirm RPC fails we still keep the file (it's already written),
+      // and the pending entry will eventually TTL-expire on the server.
+      void this.#confirmWatermarkDownload(requestId, true)
+    } catch (err) {
+      // Phase 2: cancel. Best-effort tell the server to drop the pending
+      // log row immediately rather than waiting for TTL — keeps the audit
+      // log clean.
+      void this.#confirmWatermarkDownload(requestId, false, err?.message)
+      throw err
+    }
+  }
+
+  /**
+   * Send the two-phase commit confirmation. Resolves silently on any error
+   * — caller is fire-and-forget. See server's `confirm-watermark-download`
+   * handler for behaviour.
+   * @param {string | undefined} requestId
+   * @param {boolean} success
+   * @param {string} [errorMsg]
+   */
+  async #confirmWatermarkDownload(requestId, success, errorMsg) {
+    if (!requestId) return  // legacy server, nothing to confirm
+    try {
+      await new Promise((resolve) => {
+        // We don't propagate timeouts here — even if the ack never comes,
+        // the server-side TTL sweep will eventually reclaim the pending row.
+        socket.emit(
+          'confirm-watermark-download',
+          { requestId, success, errorMsg: errorMsg?.slice?.(0, 500) },
+          () => resolve()
+        )
+      })
+    } catch (e) {
+      logger.warn(`Failed to confirm watermark download ${requestId}: ${e?.message}`)
     }
   }
 
@@ -1109,6 +1551,27 @@ async searchFilesProcess({ tags }) {
     GlobalValueManager.sendNotice('Failed to search file because of trapdoor calculation', 'error')
   }
 }
+
+  /**
+   * Forensic helper: ask the server to decode a tracked watermark uid back to
+   * the original user (or list candidates when the value is only a short
+   * prefix from a visible watermark). Used by the WatermarkDetectPage.
+   *
+   * The server holds the watermark tracking key — without it nobody, including
+   * this client, can decode tracked uids. That's the whole point: an attacker
+   * who tampers with an invisible watermark can't fabricate a value that maps
+   * to a different real user.
+   *
+   * @param {string} value tracked uid (`v1...`) or short hex prefix
+   * @returns {Promise<{ matches?: Array<{id,name,email,status}>, errorMsg?: string, reason?: string }>}
+   */
+  decodeWatermarkUidProcess(value) {
+    return new Promise((resolve) => {
+      socket.emit('decode-watermark-uid', { value }, (response) => {
+        resolve(response || {})
+      })
+    })
+  }
 
   /**
    * Batch update permission/description/tags/attrs for multiple files at once.

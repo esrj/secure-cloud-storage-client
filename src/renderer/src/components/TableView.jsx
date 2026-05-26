@@ -13,6 +13,10 @@ export const TableHeadContent = Object.freeze({
   perm: { text: '權限', className: 'w-20' },
   end: { text: '', className: 'w-12' },
   icon: { text: '', className: 'w-10' },
+  // 'select' is a custom column; the column header content is rendered by the
+  // table's `headCell` slot so it can host a controlled checkbox bound to the
+  // SelectionContext. Width is fixed and intentionally narrow.
+  select: { text: '', className: 'w-10' },
   fileId: { text: '檔案ID', className: '' },
   reqDate: { text: '請求日期', className: 'w-24' },
   resDate: { text: '回覆日期', className: 'w-24' },
@@ -20,19 +24,20 @@ export const TableHeadContent = Object.freeze({
   userName: { text: '姓名', className: 'w-24' }
 })
 
-function TableView({ tableHead, children }) {
+function TableView({ tableHead, children, headCell }) {
   return (
     <Card className="flex w-full grow px-8 py-4 overflow-auto border-2 rounded-t-none">
       <table className="w-full text-left table-fixed overflow-auto">
         <thead>
           <tr>
             {tableHead.map((head) => {
+              const custom = headCell ? headCell(head) : undefined
               return (
                 <th
                   key={head}
                   className={TableHeadContent[head]['className'] + ' font-sans font-bold'}
                 >
-                  {TableHeadContent[head].text}
+                  {custom !== undefined ? custom : TableHeadContent[head].text}
                 </th>
               )
             })}
@@ -46,7 +51,8 @@ function TableView({ tableHead, children }) {
 
 TableView.propTypes = {
   tableHead: PropTypes.array.isRequired,
-  children: PropTypes.array.isRequired
+  children: PropTypes.array.isRequired,
+  headCell: PropTypes.func
 }
 
 export default TableView

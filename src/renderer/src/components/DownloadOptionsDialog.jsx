@@ -12,8 +12,7 @@ import {
   Input,
   Select,
   Option,
-  Typography,
-  Checkbox
+  Typography
 } from '@material-tailwind/react'
 import PropTypes from 'prop-types'
 
@@ -49,8 +48,6 @@ function DownloadOptionsDialog({ open, onClose, fileData }) {
   const watermarkSupported = SUPPORTED_MIMES.includes(mime)
 
   const [mode, setMode] = useState('original')
-  const [visibleWm, setVisibleWm] = useState(true)
-  const [invisibleWm, setInvisibleWm] = useState(false)
   const [customNote, setCustomNote] = useState('')
   const [position, setPosition] = useState('bottomRight')
   const [opacity, setOpacity] = useState(30) // 0–100, sent as /100
@@ -63,19 +60,18 @@ function DownloadOptionsDialog({ open, onClose, fileData }) {
 
   function handleDownload() {
     const effectiveMode = !watermarkSupported ? 'original' : mode
-    if (effectiveMode === 'watermark' && watermarkSupported && !visibleWm && !invisibleWm) {
-      window.alert('請至少選擇「可視浮水印」或「不可視浮水印」其中一種。')
-      return
-    }
     onClose()
+    // The watermark *visibility* is now derived from `mode` on the main side:
+    //   mode='watermark' → visible + (silent) invisible
+    //   mode='original'  → (silent) invisible only
+    // We still send the visible-watermark style options so they can be applied
+    // when mode='watermark'. The renderer never asks the user about invisible.
     window.electronAPI.askDownloadFileWithOptions({
       fileId: fileData.fileId,
       mode: effectiveMode,
       watermarkOptions:
         effectiveMode === 'watermark'
           ? {
-              visible: visibleWm,
-              invisible: invisibleWm,
               customNote: customNote.trim(),
               position,
               opacity: opacity / 100,
@@ -141,76 +137,45 @@ function DownloadOptionsDialog({ open, onClose, fileData }) {
 
         {/* ── Watermark options (only when mode=watermark and supported) ── */}
         {mode === 'watermark' && watermarkSupported && (
-          <div className="flex flex-col gap-3 border-t border-gray-200 pt-3">
+          <div className="flex flex-col gap-3 border-t border-gray-200 pt-3 border border-blue-gray-100 rounded-lg p-3">
+            <Typography variant="small" className="font-bold text-blue-gray-700">
+              浮水印設定
+            </Typography>
 
-            {/* Watermark type checkboxes */}
-            <div>
-              <Typography variant="h6" className="mb-1">浮水印類型</Typography>
-              <div className="flex flex-row gap-6 flex-wrap">
-                <Checkbox
-                  label="可視浮水印"
-                  checked={visibleWm}
-                  onChange={(e) => setVisibleWm(e.target.checked)}
-                  ripple={false}
-                />
-                <div className="flex flex-col">
-                  <Checkbox
-                    label="不可視浮水印"
-                    checked={invisibleWm}
-                    onChange={(e) => {
-                      const on = e.target.checked
-                      setInvisibleWm(on)
-                      // 多數使用者只要「不可視」時會忘記關閉可視，導致下載檔仍看得到字
-                      if (on) setVisibleWm(false)
-                    }}
-                    ripple={false}
-                  />
-                  {invisibleWm && mime === 'image/jpeg' && (
-                    <Typography variant="small" color="amber" className="ml-8 mt-0.5">
-                      ⚠ JPEG 為有損格式，不可視浮水印可能在二次壓縮後部分失效，建議使用 PNG。
-                    </Typography>
-                  )}
-
-
-                </div>
+            {/* Position
+                DOCX：渲染引擎不支援滿版斜線、左下、右下，最終都會落在文末段落，
+                      所以位置選單直接隱藏，僅顯示說明文字。
+                TXT ：純文字無位置概念，同樣隱藏。 */}
+            {mime !== 'text/plain' && mime !== DOCX_MIME && (
+              <div>
+                <Typography variant="h6" className="mb-1">位置</Typography>
+                <Select
+                  value={position}
+                  onChange={(v) => setPosition(v)}
+                  labelProps={{ className: 'peer-focus:hidden' }}
+                  className="focus:!border-t-gray-900"
+                >
+                  {Object.entries(POSITION_LABELS).map(([val, label]) => (
+                    <Option key={val} value={val}>{label}</Option>
+                  ))}
+                </Select>
               </div>
-            </div>
+            )}
+            {mime === DOCX_MIME && (
+              <Typography variant="small" color="gray">
+                DOCX 格式的浮水印將附加於文件末尾段落，位置設定不適用（不支援滿版斜線與左下／右下）。
+              </Typography>
+            )}
+            {mime === 'text/plain' && (
+              <Typography variant="small" color="gray">
+                TXT 為純文字格式，浮水印將以標記行形式附加於文件末尾。位置、透明度與字體大小設定不適用。
+              </Typography>
+            )}
 
-            {/* ── Visible watermark settings (position / opacity / font size) ── */}
-            {visibleWm && (
-              <div className="flex flex-col gap-3 border border-blue-gray-100 rounded-lg p-3">
-                <Typography variant="small" className="font-bold text-blue-gray-700">
-                  可視浮水印設定
-                </Typography>
-
-                {/* Position */}
-                {mime !== 'text/plain' && (
-                <div>
-                  <Typography variant="h6" className="mb-1">位置</Typography>
-                  <Select
-                    value={position}
-                    onChange={(v) => setPosition(v)}
-                    labelProps={{ className: 'peer-focus:hidden' }}
-                    className="focus:!border-t-gray-900"
-                  >
-                    {Object.entries(POSITION_LABELS).map(([val, label]) => (
-                      <Option key={val} value={val}>{label}</Option>
-                    ))}
-                  </Select>
-                  {mime === DOCX_MIME && (
-                    <Typography variant="small" color="gray" className="mt-1">
-                      DOCX 格式的浮水印將附加於文件末尾，位置設定不適用。
-                    </Typography>
-                  )}
-                </div>
-                )}
-                {mime === 'text/plain' && visibleWm && (
-                  <Typography variant="small" color="gray">
-                    TXT 為純文字格式，可視浮水印將以標記行形式附加於文件末尾。位置、透明度與字體大小設定不適用。
-                  </Typography>
-                )}
-
-                {/* Opacity slider */}
+            {/* Opacity & Font size sliders
+                TXT：純文字格式無樣式概念，固定值由後端決定，所以兩個 slider 直接隱藏。 */}
+            {mime !== 'text/plain' && (
+              <>
                 <div>
                   <Typography variant="h6">透明度：{opacity}%</Typography>
                   <input
@@ -224,7 +189,6 @@ function DownloadOptionsDialog({ open, onClose, fileData }) {
                   />
                 </div>
 
-                {/* Font size slider */}
                 <div>
                   <Typography variant="h6">字體大小：{fontSize}px</Typography>
                   <input
@@ -237,7 +201,7 @@ function DownloadOptionsDialog({ open, onClose, fileData }) {
                     className="w-full accent-blue-gray-900"
                   />
                 </div>
-              </div>
+              </>
             )}
 
             {/* Custom note */}
@@ -249,6 +213,23 @@ function DownloadOptionsDialog({ open, onClose, fileData }) {
               size="md"
               className="focus:!border-t-gray-900"
             />
+            {/*
+              Heads-up for users who type CJK/emoji into the visible note:
+              PDF (Helvetica) and image (Jimp bitmap fonts) only render
+              printable ASCII. _toAsciiSafe replaces any non-ASCII glyph
+              with '?'. DOCX renders fine because Word's font fallback
+              handles CJK. We only show the warning on formats that will
+              actually mangle the note.
+            */}
+            {customNote && /[^\x20-\x7E]/.test(customNote) &&
+              (mime === 'application/pdf' ||
+                mime === 'image/png' ||
+                mime === 'image/jpeg' ||
+                mime === 'text/plain') && (
+                <Typography variant="small" color="amber" className="-mt-1">
+                  ⚠ 此格式的可視浮水印只支援 ASCII 字元，非英文字將以 "?" 顯示
+                </Typography>
+              )}
           </div>
         )}
 
@@ -260,12 +241,12 @@ function DownloadOptionsDialog({ open, onClose, fileData }) {
           </Typography>
           {watermarkSupported && mime === DOCX_MIME && (
             <Typography variant="small" color="gray">
-              可視浮水印：✓（文件末尾段落）｜ 不可視浮水印：✓（自訂屬性，高穩定）
+              DOCX 浮水印將附加於文件末尾段落。
             </Typography>
           )}
           {watermarkSupported && mime === 'text/plain' && (
             <Typography variant="small" color="gray">
-              可視浮水印：✓（末尾標記行）｜ 不可視浮水印：✓（零寬字元，⚠ 穩定性有限）
+              TXT 浮水印將以末尾標記行附加。
             </Typography>
           )}
         </div>

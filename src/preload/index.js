@@ -31,12 +31,26 @@ if (process.contextIsolated) {
       askUploadFile: (curPath) => ipcRenderer.send('upload', curPath),
       askDownloadFile: (uuid) => ipcRenderer.send('download', uuid),
       askDownloadFileWithOptions: (opts) => ipcRenderer.send('download-with-options', opts),
+      // Batch download
+      askPickDownloadFolder: (defaultPath) =>
+        ipcRenderer.invoke('pick-download-folder', defaultPath),
+      askDownloadBatchWithOptions: (opts) =>
+        ipcRenderer.invoke('download-batch-with-options', opts),
+      cancelDownloadBatch: (batchId) => ipcRenderer.send('download-batch-cancel', batchId),
+      onBatchDownloadProgress: (cb) => {
+        const handler = (_e, payload) => cb(payload)
+        ipcRenderer.on('batch-download-progress', handler)
+        return () => ipcRenderer.removeListener('batch-download-progress', handler)
+      },
+      showItemInFolder: (path) => ipcRenderer.send('show-item-in-folder', path),
       askDeleteFile: (uuid) => ipcRenderer.send('delete', uuid),
       // Folders
       askAddFolder: (curPath, folderName) => ipcRenderer.send('add-folder', curPath, folderName),
       askDeleteFolder: (folderId) => ipcRenderer.send('delete-folder', folderId),
       askAllFolder: () => ipcRenderer.invoke('get-folders'),
       askMoveFile: (uuid, targetFolderId) => ipcRenderer.send('move-file', uuid, targetFolderId),
+      // Watermark forensic trace
+      askDecodeWatermarkUid: (value) => ipcRenderer.invoke('decode-watermark-uid', value),
       // Public files / search
       askAllPublicFile: () => ipcRenderer.invoke('get-public-files'),
       askSearchFiles: (values) => ipcRenderer.invoke('search-files', values),

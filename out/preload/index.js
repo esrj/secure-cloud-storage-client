@@ -66,12 +66,24 @@ if (process.contextIsolated) {
       askUploadFile: (curPath) => electron.ipcRenderer.send("upload", curPath),
       askDownloadFile: (uuid) => electron.ipcRenderer.send("download", uuid),
       askDownloadFileWithOptions: (opts) => electron.ipcRenderer.send("download-with-options", opts),
+      // Batch download
+      askPickDownloadFolder: (defaultPath) => electron.ipcRenderer.invoke("pick-download-folder", defaultPath),
+      askDownloadBatchWithOptions: (opts) => electron.ipcRenderer.invoke("download-batch-with-options", opts),
+      cancelDownloadBatch: (batchId) => electron.ipcRenderer.send("download-batch-cancel", batchId),
+      onBatchDownloadProgress: (cb) => {
+        const handler = (_e, payload) => cb(payload);
+        electron.ipcRenderer.on("batch-download-progress", handler);
+        return () => electron.ipcRenderer.removeListener("batch-download-progress", handler);
+      },
+      showItemInFolder: (path) => electron.ipcRenderer.send("show-item-in-folder", path),
       askDeleteFile: (uuid) => electron.ipcRenderer.send("delete", uuid),
       // Folders
       askAddFolder: (curPath, folderName) => electron.ipcRenderer.send("add-folder", curPath, folderName),
       askDeleteFolder: (folderId) => electron.ipcRenderer.send("delete-folder", folderId),
       askAllFolder: () => electron.ipcRenderer.invoke("get-folders"),
       askMoveFile: (uuid, targetFolderId) => electron.ipcRenderer.send("move-file", uuid, targetFolderId),
+      // Watermark forensic trace
+      askDecodeWatermarkUid: (value) => electron.ipcRenderer.invoke("decode-watermark-uid", value),
       // Public files / search
       askAllPublicFile: () => electron.ipcRenderer.invoke("get-public-files"),
       askSearchFiles: (values) => electron.ipcRenderer.invoke("search-files", values),

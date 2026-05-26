@@ -18,8 +18,9 @@ import {
   ClipboardDocumentListIcon,
   PaperAirplaneIcon,
   DocumentDuplicateIcon,
-  MagnifyingGlassIcon,
-  SparklesIcon
+  MagnifyingGlassIcon
+  // DEMO_HIDE_SMART_FEATURES: 智慧搜尋隱藏時 SparklesIcon 不再使用。要恢復時把下行的註解拿掉。
+  // , SparklesIcon
 } from '@heroicons/react/24/outline'
 import PropTypes from 'prop-types'
 import { useState, useContext } from 'react'
@@ -55,10 +56,13 @@ function NavBar({ pageType, setPageType, seenRequest, seenReply }) {
           </Typography>
         </div>
         <List>
-          {/* [DEMO_HIDE: smart-search] 智慧搜尋入口暫時隱藏，demo 結束後解除註解即可恢復。
-              對應後端：MainView.jsx renderTableView 的 PageType.agentSearch case，
-              以及 AgentPage / AgentMessageBubble 元件、Types.PageType.agentSearch。
-          <ListItem
+          {/* ── DEMO_HIDE_SMART_FEATURES ──────────────────────────────
+              智慧搜尋入口暫時隱藏以準備 demo。要恢復時：
+              1) 把下面整塊 ListItem 的註解標記移除
+              2) grep "DEMO_HIDE_SMART_FEATURES" 找其他關聯位置（MainView.jsx、FileViewButtonGroup.jsx）
+              不要刪除這個註解標記，留著方便下次再隱藏。
+          ──────────────────────────────────────────────────────────── */}
+          {/* <ListItem
             selected={pageType === PageType.agentSearch}
             onClick={() => setPageType(PageType.agentSearch)}
             ripple={false}
@@ -68,8 +72,7 @@ function NavBar({ pageType, setPageType, seenRequest, seenReply }) {
               <SparklesIcon className="h-5 w-5" />
             </ListItemPrefix>
             智慧搜尋
-          </ListItem>
-          */}
+          </ListItem> */}
           <ListItem
             selected={pageType === PageType.public}
             onClick={() => setPageType(PageType.public)}

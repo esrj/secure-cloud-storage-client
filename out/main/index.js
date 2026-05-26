@@ -23,14 +23,15 @@ var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__ge
 ));
 const electron = require("electron");
 const path$1 = require("node:path");
+const fs = require("node:fs");
 const utils = require("@electron-toolkit/utils");
 const path = require("path");
 const io = require("socket.io-client");
 const winston = require("winston");
-const fs = require("node:fs");
 const yaml = require("js-yaml");
 const promises = require("node:fs/promises");
 const node_stream = require("node:stream");
+const crypto$1 = require("node:crypto");
 const pdfLib = require("pdf-lib");
 const Jimp = require("jimp");
 const JSZip = require("jszip");
@@ -40,7 +41,6 @@ const basicFtp = require("basic-ftp");
 const cq = require("concurrent-queue");
 const crypto = require("crypto");
 const stream = require("stream");
-const crypto$1 = require("node:crypto");
 const ssh2 = require("ssh2");
 const mcl = require("mcl-wasm");
 const assert = require("node:assert");
@@ -3652,7 +3652,7 @@ async function applyVisibleWatermark(inputBuffer, mimeType, opts) {
   throw new Error("WATERMARK_UNSUPPORTED_FORMAT");
 }
 async function _watermarkPDF(inputBuffer, { text, position = "bottomRight", opacity = 0.3, fontSize = 14 }) {
-  const safeText = _toAsciiSafe(text) || text.replace(/[^\x20-\x7E]/g, "?");
+  const safeText = _toAsciiSafe(text);
   const pdfDoc = await pdfLib.PDFDocument.load(inputBuffer);
   const font = await pdfDoc.embedFont(pdfLib.StandardFonts.Helvetica);
   const color = pdfLib.rgb(0.4, 0.4, 0.4);
@@ -3680,7 +3680,7 @@ async function _watermarkPDF(inputBuffer, { text, position = "bottomRight", opac
   return Buffer.from(await pdfDoc.save());
 }
 async function _watermarkImage(inputBuffer, mimeType, { text, position = "bottomRight", opacity = 0.5, fontSize = 32 }) {
-  const safeText = _toAsciiSafe(text) || text.replace(/[^\x20-\x7E]/g, "?");
+  const safeText = _toAsciiSafe(text);
   const image = await Jimp.read(inputBuffer);
   const w = image.bitmap.width;
   const h = image.bitmap.height;
@@ -3763,12 +3763,13 @@ async function applyInvisibleWatermark(inputBuffer, mimeType, opts) {
   throw new Error("WATERMARK_UNSUPPORTED_FORMAT");
 }
 async function _invisiblePDF(inputBuffer, { text }) {
+  const safeText = _winAnsiSafe(text);
   const pdfDoc = await pdfLib.PDFDocument.load(inputBuffer);
   const font = await pdfDoc.embedFont(pdfLib.StandardFonts.Helvetica);
   const fontSize = 8;
   for (const page of pdfDoc.getPages()) {
     const { width, height } = page.getSize();
-    const encoded = font.encodeText(text);
+    const encoded = font.encodeText(safeText);
     for (let y = 30; y < height; y += 120) {
       for (let x = 10; x < width - 10; x += 180) {
         page.setFont(font);
@@ -3787,6 +3788,9 @@ async function _invisiblePDF(inputBuffer, { text }) {
     }
   }
   return Buffer.from(await pdfDoc.save());
+}
+function _winAnsiSafe(text) {
+  return String(text ?? "").replace(/[^\x20-\x7E]/g, "?");
 }
 function _encodeLSB(bitmapData, width, height, text) {
   const textBytes = Buffer.from(text, "utf8");
@@ -3906,7 +3910,7 @@ function _isValidUtf8(buf) {
   return true;
 }
 function _toAsciiSafe(text) {
-  return text.replace(/[^\x20-\x7E]/g, "").replace(/\s{2,}/g, " ").trim();
+  return String(text ?? "").replace(/[^\x20-\x7E]/g, "?").replace(/\s{2,}/g, " ").trim();
 }
 function _escapeXml(str) {
   return str.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&apos;");
@@ -5727,17 +5731,62 @@ function snapshotForPostUploadDialog(classifierWanted, classifierEnabled, batchK
     classifyBatchKey: batchKey
   };
 }
+function _shortTrackedUid(trackedUid) {
+  return String(trackedUid || "").replace(/^v\d+/, "").slice(0, 8);
+}
+function _buildVisibleWmText(watermarkMeta, customNote) {
+  const shortUid = _shortTrackedUid(watermarkMeta?.userId);
+  const shortFid = String(watermarkMeta?.fileId || "").slice(0, 8);
+  const ts = watermarkMeta?.ts || (/* @__PURE__ */ new Date()).toISOString();
+  const note = (customNote || "").trim();
+  return `uid:${shortUid} | fid:${shortFid} | ${ts}${note ? " | " + note : ""}`;
+}
+function _buildInvisibleWmText(watermarkMeta) {
+  const fullUid = String(watermarkMeta?.userId || "");
+  const fid = String(watermarkMeta?.fileId || "");
+  const ts = watermarkMeta?.ts || (/* @__PURE__ */ new Date()).toISOString();
+  return `uid:${fullUid} | fid:${fid} | ts:${ts}`;
+}
 class FileManager {
   aesModule;
   blockchainManager;
   uploadQueue;
-  #uploadBatch = {
-    expected: 0,
-    fileIds: [],
-    pathsByFileId: {},
-    classifyBatchKey: null,
-    classifierWanted: false
-  };
+  /**
+   * Active upload batches keyed by batchId. Each call to `uploadFileProcess()`
+   * creates a new entry; entries are removed when their `expected` slot count
+   * reaches zero (whether by success or failure).
+   *
+   * Previously this was a single private field shared across all batches,
+   * which caused two foot-guns when the user kicked off uploads in quick
+   * succession:
+   *   1) The second uploadFileProcess() overwrote the first batch's state, so
+   *      the first batch's `expected` could never reach zero and its
+   *      post-upload dialog never fired.
+   *   2) Errors before the server reply (encryption failure, pre-upload
+   *      socket error) returned out of #uploadProcess without decrementing
+   *      `expected` at all, leaving the batch stuck forever.
+   *
+   * Per-batch state plus an explicit #markBatchSlotDone() call in every
+   * error path fix both.
+   *
+   * @type {Map<string, {
+   *   batchId: string,
+   *   expected: number,
+   *   fileIds: string[],
+   *   pathsByFileId: Record<string, string>,
+   *   classifyBatchKey: string | null,
+   *   classifierWanted: boolean
+   * }>}
+   */
+  #uploadBatches = /* @__PURE__ */ new Map();
+  /**
+   * fileId → batchId routing table, populated when pre-upload returns a
+   * fileId and consumed when the corresponding upload-file-res arrives. Lets
+   * us deliver server replies to the right batch even when several batches
+   * are in flight.
+   * @type {Map<string, string>}
+   */
+  #fileIdToBatchId = /* @__PURE__ */ new Map();
   /**
    * @param {AESModule} aesModule
    * @param {BlockchainManager} blockchainManager
@@ -5755,18 +5804,20 @@ class FileManager {
       await coordinator.uploadToBlockchainWhenReady();
     });
     socket.on("upload-file-res", (response) => {
-      if (response.errorMsg) {
+      const fileId = response?.fileId;
+      const batchId = fileId ? this.#fileIdToBatchId.get(fileId) : void 0;
+      if (fileId) this.#fileIdToBatchId.delete(fileId);
+      if (response?.errorMsg) {
         logger.error(
-          `Failed to upload file ${response.fileId}: ${response.errorMsg}. Upload aborted.`
+          `Failed to upload file ${fileId}: ${response.errorMsg}. Upload aborted.`
         );
         this.#sendUploadErrorNotice(response.errorMsg);
+        this.#markBatchSlotDone(batchId, null);
       } else {
-        GlobalValueManager$1.sendNotice(`Success to upload file ${response.fileId}`, "success");
-        this.#uploadBatch.fileIds.push(response.fileId);
+        GlobalValueManager$1.sendNotice(`Success to upload file ${fileId}`, "success");
         this.getFileListProcess(GlobalValueManager$1.curFolderId);
+        this.#markBatchSlotDone(batchId, fileId);
       }
-      this.#uploadBatch.expected = Math.max(0, this.#uploadBatch.expected - 1);
-      this.#checkUploadBatchDone();
     });
     socket.on("partial-search-files", (response) => {
       const { files } = response;
@@ -5795,9 +5846,32 @@ class FileManager {
    * Check if all files in the current upload batch have received a response.
    * If so, notify the renderer to open the post-upload settings dialog.
    */
-  #checkUploadBatchDone() {
-    if (this.#uploadBatch.expected === 0 && this.#uploadBatch.fileIds.length > 0) {
-      const { classifyBatchKey, classifierWanted, fileIds, pathsByFileId } = this.#uploadBatch;
+  /**
+   * Decrement the given batch's remaining slot count by 1, record the fileId
+   * if it succeeded, and fire the post-upload dialog (then remove the batch)
+   * if no slots remain.
+   *
+   * Tolerates an undefined batchId — that happens when an `upload-file-res`
+   * arrives for a fileId we no longer track (server-late reply, batch already
+   * cleaned up, etc).
+   *
+   * @param {string | undefined} batchId
+   * @param {string | null} fileId  null ⇒ this slot failed; non-null ⇒ success
+   */
+  #markBatchSlotDone(batchId, fileId) {
+    if (!batchId) return;
+    const batch = this.#uploadBatches.get(batchId);
+    if (!batch) return;
+    batch.expected = Math.max(0, batch.expected - 1);
+    if (fileId) batch.fileIds.push(fileId);
+    this.#checkUploadBatchDone(batchId);
+  }
+  #checkUploadBatchDone(batchId) {
+    const batch = this.#uploadBatches.get(batchId);
+    if (!batch) return;
+    if (batch.expected > 0) return;
+    if (batch.fileIds.length > 0) {
+      const { classifyBatchKey, classifierWanted, fileIds, pathsByFileId } = batch;
       const sourcePaths = fileIds.map((id) => pathsByFileId[id]).filter(Boolean);
       const { classificationPreview } = snapshotForPostUploadDialog(
         classifierWanted,
@@ -5810,21 +5884,25 @@ class FileManager {
         classificationPreview,
         classifyBatchKey
       });
-      this.#uploadBatch = {
-        expected: 0,
-        fileIds: [],
-        pathsByFileId: {},
-        classifyBatchKey: null,
-        classifierWanted: false
-      };
     }
+    this.#uploadBatches.delete(batchId);
   }
   /**
    * The process of actually uploading the file.
    * Properly awaits each stage so concurrent-queue concurrency control works correctly.
-   * @param {{ filePath: string, parentFolderId: string }} info
+   *
+   * Batch-tracking contract:
+   *   • Each invocation owns exactly one slot in `batch.expected`.
+   *   • If we reach Step 5 and enqueue successfully, the slot is closed later
+   *     by `socket.on('upload-file-res')` when the server confirms.
+   *   • Any earlier failure (encryption, pre-upload, write, transport) MUST
+   *     call `#markBatchSlotDone(batchId, null)` before returning — otherwise
+   *     the batch never reaches expected=0 and the post-upload dialog never
+   *     fires (regression A2).
+   *
+   * @param {{ filePath: string, parentFolderId: string, batchId: string }} info
    */
-  async #uploadProcess({ filePath, parentFolderId }) {
+  async #uploadProcess({ filePath, parentFolderId, batchId }) {
     let cipher = null;
     let spk = null;
     let encryptedStream = null;
@@ -5844,6 +5922,7 @@ class FileManager {
         "File stream creation failed.",
         "Please check if file exists and try again."
       );
+      this.#markBatchSlotDone(batchId, null);
       return;
     }
     logger.info("Sending key and iv to server...");
@@ -5858,10 +5937,13 @@ class FileManager {
     } catch (error) {
       logger.error(`Failed to pre-upload: ${error.message}. Upload aborted.`);
       this.#sendUploadErrorNotice(error.message);
+      this.#markBatchSlotDone(batchId, null);
       return;
     }
-    if (this.#uploadBatch.pathsByFileId) {
-      this.#uploadBatch.pathsByFileId[fileId] = filePath;
+    this.#fileIdToBatchId.set(fileId, batchId);
+    const batch = this.#uploadBatches.get(batchId);
+    if (batch) {
+      batch.pathsByFileId[fileId] = filePath;
     }
     const tempEncryptedFilePath = path$1.resolve(GlobalValueManager$1.tempPath, fileId);
     const writeStream = fs.createWriteStream(tempEncryptedFilePath);
@@ -5935,6 +6017,8 @@ class FileManager {
         `Upload with ${GlobalValueManager$1.serverConfig.protocol} failed.`,
         CheckLogForDetailMsg
       );
+      this.#fileIdToBatchId.delete(fileId);
+      this.#markBatchSlotDone(batchId, null);
       return;
     }
     this.blockchainQueue({ coordinator: fileUploadCoordinator }).catch((error) => {
@@ -5955,13 +6039,15 @@ class FileManager {
       const classifierWanted = getUploadBatchSmartClassifyWanted();
       const classifierEnabled = getAppClassifierEnabled();
       const classifyBatchKey = classifierWanted && classifierEnabled ? makeUploadBatchClassifyKey(filePaths) : null;
-      this.#uploadBatch = {
+      const batchId = crypto$1.randomUUID();
+      this.#uploadBatches.set(batchId, {
+        batchId,
         expected: filePaths.length,
         fileIds: [],
         pathsByFileId: {},
         classifyBatchKey,
         classifierWanted
-      };
+      });
       if (classifierWanted && classifierEnabled && classifyBatchKey) {
         void runPreUploadClassification(
           (payload) => GlobalValueManager$1.mainWindow?.webContents.send("preupload-classify-status", payload),
@@ -5970,7 +6056,7 @@ class FileManager {
         );
       }
       for (const filePath of filePaths) {
-        this.uploadQueue({ filePath, parentFolderId });
+        this.uploadQueue({ filePath, parentFolderId, batchId });
       }
     } else {
       GlobalValueManager$1.sendNotice("File upload canceled.", "error");
@@ -6009,11 +6095,31 @@ class FileManager {
     });
   }
   /**
-   * Ask the server to download file.
+   * Ask the server to download file (legacy entry, no UI options).
+   *
+   * Routed through the unified `_performInteractiveDownload` so that callers
+   * such as the smart-search agent's "download" button still get an invisible
+   * watermark silently embedded when the format supports it. The user is
+   * never asked or notified about this — that's by design.
+   *
    * @param {string} fileId the file to download
    */
   downloadFileProcess(fileId) {
     logger.info(`Asking for file ${fileId}...`);
+    void this._performInteractiveDownload(fileId, "original", null).catch((e) => {
+      logger.error(`[Download] interactive (legacy) failed: ${e?.message || e}`);
+    });
+  }
+  /**
+   * Legacy implementation kept around for the rare path that wants the raw
+   * server flow (no watermark, no extra round-trip). Currently unused — every
+   * UI entry point goes through `_performInteractiveDownload`.
+   *
+   * @deprecated Prefer `_performInteractiveDownload` for new callers.
+   * @param {string} fileId the file to download
+   */
+  _downloadFileProcessLegacy(fileId) {
+    logger.info(`Asking for file ${fileId} (legacy path)...`);
     socket.emit("download-file-pre", { fileId }, async (response) => {
       try {
         if (response.errorMsg) {
@@ -6227,14 +6333,77 @@ class FileManager {
   /**
    * Download a file with options (original or watermark).
    * Called by the IPC handler for 'download-with-options'.
+   *
+   * Both modes silently embed an invisible watermark when the file format
+   * supports it. The user-facing dialog only exposes original vs visible
+   * watermark; the invisible part is intentionally not surfaced.
+   *
    * @param {{ fileId: string, mode: 'original'|'watermark', watermarkOptions: object|null }} opts
    */
   downloadFileWithOptionsProcess({ fileId, mode, watermarkOptions }) {
-    if (mode !== "watermark") {
-      this.downloadFileProcess(fileId);
+    void this._performInteractiveDownload(fileId, mode, watermarkOptions).catch((e) => {
+      logger.error(`[Download] interactive failed: ${e?.message || e}`);
+    });
+  }
+  /**
+   * Unified single-file interactive download:
+   *   1. Resolve auth meta (server + blockchain)
+   *   2. Ask the user where to save the file
+   *   3. Build effective watermark options
+   *      - Format supports watermark → always invisible=true,
+   *        visible = (mode === 'watermark')
+   *      - Format does not          → no watermark at all (plain download)
+   *   4. Run the appropriate helper and emit a user-friendly notice that
+   *      never mentions the invisible watermark.
+   *
+   * @param {string} fileId
+   * @param {'original'|'watermark'} mode
+   * @param {object|null} userOptions visible-watermark style options from UI
+   */
+  async _performInteractiveDownload(fileId, mode, userOptions) {
+    let meta;
+    try {
+      meta = await this.getDownloadMeta(fileId);
+    } catch (e) {
+      this.#sendDownloadErrorNotice(e?.message || "Failed to fetch file metadata.", ContactManagerOrTryAgainMsg);
       return;
     }
-    this.#downloadWithWatermark(fileId, watermarkOptions);
+    const { filePath, canceled } = await electron.dialog.showSaveDialog({
+      defaultPath: meta.name,
+      properties: ["showOverwriteConfirmation", "createDirectory"]
+    });
+    if (canceled) {
+      logger.info("Download canceled.");
+      GlobalValueManager$1.sendNotice("Download canceled.", "error");
+      return;
+    }
+    const supportsWatermark = isWatermarkSupported(meta.name);
+    if (!supportsWatermark) {
+      try {
+        await this.downloadOriginalToPath(meta, filePath);
+        GlobalValueManager$1.sendNotice("Success to download file", "success");
+      } catch (_e) {
+      }
+      return;
+    }
+    const effectiveOptions = {
+      visible: mode === "watermark",
+      invisible: true,
+      customNote: userOptions?.customNote ?? "",
+      position: userOptions?.position ?? "bottomRight",
+      opacity: userOptions?.opacity ?? 0.3,
+      fontSize: userOptions?.fontSize ?? 14,
+      mimeType: userOptions?.mimeType ?? getMimeFromFilename(meta.name)
+    };
+    try {
+      await this.downloadWatermarkedToPath(fileId, meta, filePath, effectiveOptions);
+      GlobalValueManager$1.sendNotice(
+        // Notice text intentionally never mentions invisible — it's silent.
+        mode === "watermark" ? "File downloaded with watermark." : "Success to download file",
+        "success"
+      );
+    } catch (_e) {
+    }
   }
   /**
    * Full watermark download flow.
@@ -6343,15 +6512,13 @@ class FileManager {
         GlobalValueManager$1.sendNotice("Applying watermark...", "normal");
         try {
           const decryptedBuffer = await promises.readFile(tempPath);
-          const shortUid = (watermarkMeta.userId || "").slice(0, 8);
-          const shortFid = (watermarkMeta.fileId || "").slice(0, 8);
-          const ts = watermarkMeta.ts || (/* @__PURE__ */ new Date()).toISOString();
-          const customNote = (watermarkOptions?.customNote || "").trim();
-          const wmText = `uid:${shortUid} | fid:${shortFid} | ${ts}${customNote ? " | " + customNote : ""}`;
+          const note = watermarkOptions?.customNote;
+          const visibleText = _buildVisibleWmText(watermarkMeta, note);
+          const invisibleText = _buildInvisibleWmText(watermarkMeta);
           let processedBuffer = decryptedBuffer;
           if (watermarkOptions?.visible === true) {
             processedBuffer = await applyVisibleWatermark(processedBuffer, mimeType, {
-              text: wmText,
+              text: visibleText,
               position: watermarkOptions?.position ?? "bottomRight",
               opacity: watermarkOptions?.opacity ?? 0.3,
               fontSize: watermarkOptions?.fontSize ?? 14
@@ -6359,7 +6526,7 @@ class FileManager {
           }
           if (watermarkOptions?.invisible === true) {
             processedBuffer = await applyInvisibleWatermark(processedBuffer, mimeType, {
-              text: wmText
+              text: invisibleText
             });
           }
           await promises.writeFile(filePath, processedBuffer);
@@ -6458,6 +6625,183 @@ class FileManager {
         this.#sendDownloadErrorNotice("Hash verification failed.");
       }
       throw error;
+    }
+  }
+  // ──────────────────────────────────────────────────────────────────────
+  // Public helpers used by BatchDownloadManager.
+  //
+  // These mirror the per-file logic from `downloadFileProcess` /
+  // `#downloadWithWatermark` but accept an explicit output path, return a
+  // promise, and never spawn save/folder dialogs. Every helper throws on
+  // failure so the batch loop can record per-item errors.
+  // ──────────────────────────────────────────────────────────────────────
+  /**
+   * Resolve the per-file metadata required for a download:
+   *  - server-side fileInfo (cipher, spk, size, owner)
+   *  - blockchain verification + canonical fileInfo (for hash check)
+   * Throws on any failure with a human-readable message.
+   *
+   * Used by BatchDownloadManager so each file in a batch only goes through
+   * the verification dance once, regardless of mode (original/watermark).
+   *
+   * @param {string} fileId
+   * @returns {Promise<{
+   *   id: string, name: string, cipher: any, spk: any, size: number,
+   *   proxied: boolean, blockchainFileInfo: any
+   * }>}
+   */
+  async getDownloadMeta(fileId) {
+    const fileInfo = await new Promise((resolve, reject) => {
+      socket.emit("download-file-pre", { fileId }, (response) => {
+        if (response?.errorMsg) return reject(new Error(response.errorMsg));
+        if (!response?.fileInfo) return reject(new Error("File not found"));
+        resolve(response.fileInfo);
+      });
+    });
+    const bv = await this.blockchainManager.getFileVerification(
+      fileId,
+      fileInfo.verifyblocknumber
+    );
+    if (!bv || bv.verificationInfo !== "success") {
+      throw new Error("File not verified on blockchain.");
+    }
+    const blockchainFileInfo = await this.blockchainManager.getFileInfo(
+      fileId,
+      fileInfo.infoblocknumber
+    );
+    if (!blockchainFileInfo) {
+      throw new Error("File info not on blockchain.");
+    }
+    const proxied = fileInfo.ownerId !== fileInfo.originOwnerId;
+    const { id, name, cipher, spk, size } = fileInfo;
+    return { id, name, cipher, spk, size, proxied, blockchainFileInfo };
+  }
+  /**
+   * Download + decrypt + verify hash, writing the plaintext bytes to
+   * `outputPath`. No watermark is applied; this is the batch-friendly
+   * counterpart of `downloadFileProcess2` minus the save dialog.
+   *
+   * @param {Awaited<ReturnType<FileManager['getDownloadMeta']>>} meta
+   * @param {string} outputPath
+   */
+  async downloadOriginalToPath(meta, outputPath) {
+    await this.#downloadDecryptToPath(
+      meta.id,
+      meta.name,
+      meta.cipher,
+      meta.spk,
+      meta.size,
+      meta.proxied,
+      meta.blockchainFileInfo,
+      outputPath
+    );
+  }
+  /**
+   * Download + decrypt to a temp path, apply visible/invisible watermark
+   * using the server-authenticated metadata, then write the result to
+   * `outputPath`. The temp file is cleaned up regardless of success.
+   *
+   * @param {string} fileId
+   * @param {Awaited<ReturnType<FileManager['getDownloadMeta']>>} meta
+   * @param {string} outputPath
+   * @param {object} watermarkOptions  same shape as DownloadOptionsDialog
+   */
+  async downloadWatermarkedToPath(fileId, meta, outputPath, watermarkOptions) {
+    const { requestId, watermarkMeta } = await new Promise((resolve, reject) => {
+      socket.emit(
+        "download-file-with-watermark",
+        {
+          fileId,
+          mode: "watermark",
+          watermark: {
+            visible: watermarkOptions?.visible === true,
+            invisible: watermarkOptions?.invisible === true,
+            customNote: watermarkOptions?.customNote ?? "",
+            position: watermarkOptions?.position ?? "bottomRight",
+            opacity: watermarkOptions?.opacity ?? 0.3,
+            fontSize: watermarkOptions?.fontSize ?? 14
+          }
+        },
+        (response) => {
+          if (response?.errorMsg) {
+            reject(new Error(response.errorMsg));
+          } else {
+            resolve({
+              requestId: response?.requestId,
+              watermarkMeta: response?.watermarkMeta
+            });
+          }
+        }
+      );
+    });
+    const mimeType = watermarkOptions?.mimeType ?? getMimeFromFilename(meta.name);
+    const tempPath = path$1.resolve(
+      GlobalValueManager$1.tempPath,
+      `${meta.id}_wmbatch_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
+    );
+    try {
+      await this.#downloadDecryptToPath(
+        meta.id,
+        meta.name,
+        meta.cipher,
+        meta.spk,
+        meta.size,
+        meta.proxied,
+        meta.blockchainFileInfo,
+        tempPath
+      );
+      try {
+        const decryptedBuffer = await promises.readFile(tempPath);
+        const note = watermarkOptions?.customNote;
+        const visibleText = _buildVisibleWmText(watermarkMeta, note);
+        const invisibleText = _buildInvisibleWmText(watermarkMeta);
+        let processedBuffer = decryptedBuffer;
+        if (watermarkOptions?.visible === true) {
+          processedBuffer = await applyVisibleWatermark(processedBuffer, mimeType, {
+            text: visibleText,
+            position: watermarkOptions?.position ?? "bottomRight",
+            opacity: watermarkOptions?.opacity ?? 0.3,
+            fontSize: watermarkOptions?.fontSize ?? 14
+          });
+        }
+        if (watermarkOptions?.invisible === true) {
+          processedBuffer = await applyInvisibleWatermark(processedBuffer, mimeType, {
+            text: invisibleText
+          });
+        }
+        await promises.writeFile(outputPath, processedBuffer);
+      } finally {
+        try {
+          await promises.unlink(tempPath);
+        } catch (_) {
+        }
+      }
+      void this.#confirmWatermarkDownload(requestId, true);
+    } catch (err) {
+      void this.#confirmWatermarkDownload(requestId, false, err?.message);
+      throw err;
+    }
+  }
+  /**
+   * Send the two-phase commit confirmation. Resolves silently on any error
+   * — caller is fire-and-forget. See server's `confirm-watermark-download`
+   * handler for behaviour.
+   * @param {string | undefined} requestId
+   * @param {boolean} success
+   * @param {string} [errorMsg]
+   */
+  async #confirmWatermarkDownload(requestId, success, errorMsg) {
+    if (!requestId) return;
+    try {
+      await new Promise((resolve) => {
+        socket.emit(
+          "confirm-watermark-download",
+          { requestId, success, errorMsg: errorMsg?.slice?.(0, 500) },
+          () => resolve()
+        );
+      });
+    } catch (e) {
+      logger.warn(`Failed to confirm watermark download ${requestId}: ${e?.message}`);
     }
   }
   /**
@@ -6668,6 +7012,26 @@ class FileManager {
       logger.error(error);
       GlobalValueManager$1.sendNotice("Failed to search file because of trapdoor calculation", "error");
     }
+  }
+  /**
+   * Forensic helper: ask the server to decode a tracked watermark uid back to
+   * the original user (or list candidates when the value is only a short
+   * prefix from a visible watermark). Used by the WatermarkDetectPage.
+   *
+   * The server holds the watermark tracking key — without it nobody, including
+   * this client, can decode tracked uids. That's the whole point: an attacker
+   * who tampers with an invisible watermark can't fabricate a value that maps
+   * to a different real user.
+   *
+   * @param {string} value tracked uid (`v1...`) or short hex prefix
+   * @returns {Promise<{ matches?: Array<{id,name,email,status}>, errorMsg?: string, reason?: string }>}
+   */
+  decodeWatermarkUidProcess(value) {
+    return new Promise((resolve) => {
+      socket.emit("decode-watermark-uid", { value }, (response) => {
+        resolve(response || {});
+      });
+    });
   }
   /**
    * Batch update permission/description/tags/attrs for multiple files at once.
@@ -7481,6 +7845,169 @@ function registerAgentIpcOnce() {
     }
   });
 }
+class BatchDownloadManager {
+  /** @param {import('./FileManager').default} fileManager */
+  constructor(fileManager2) {
+    this.fileManager = fileManager2;
+    this._batches = /* @__PURE__ */ new Map();
+  }
+  /**
+   * Start a new batch. Returns the batch id immediately; work runs async and
+   * progress is reported through `batch-download-progress` IPC events.
+   *
+   * @param {{
+   *   files: Array<{ fileId: string, name: string, mime?: string, watermarkSupported?: boolean }>,
+   *   destDir: string,
+   *   mode: 'original'|'watermark',
+   *   watermarkOptions: object|null
+   * }} opts
+   * @returns {string} batchId
+   */
+  start(opts) {
+    const batchId = crypto$1.randomUUID();
+    const files = Array.isArray(opts?.files) ? opts.files : [];
+    const state = {
+      batchId,
+      files,
+      destDir: opts.destDir,
+      mode: opts.mode === "watermark" ? "watermark" : "original",
+      watermarkOptions: opts.watermarkOptions || null,
+      cancelled: false,
+      startedAt: Date.now(),
+      results: []
+    };
+    this._batches.set(batchId, state);
+    logger.info(
+      `[BatchDownload] start id=${batchId} count=${files.length} mode=${state.mode} dest=${state.destDir}`
+    );
+    setImmediate(() => this._run(state));
+    return batchId;
+  }
+  cancel(batchId) {
+    const state = this._batches.get(batchId);
+    if (!state) return;
+    state.cancelled = true;
+    logger.info(`[BatchDownload] cancel requested id=${batchId}`);
+    this._emit({
+      type: "batch-cancelled",
+      batchId
+    });
+  }
+  // ─────────────────────────────────────────────────────────────
+  // Internal
+  // ─────────────────────────────────────────────────────────────
+  async _run(state) {
+    this._emit({
+      type: "batch-started",
+      batchId: state.batchId,
+      total: state.files.length,
+      destDir: state.destDir,
+      files: state.files.map((f) => ({ fileId: f.fileId, name: f.name }))
+    });
+    let ok = 0;
+    let fail = 0;
+    let skipped = 0;
+    for (let i = 0; i < state.files.length; i++) {
+      if (state.cancelled) {
+        for (let j = i; j < state.files.length; j++) {
+          this._emit({
+            type: "item-done",
+            batchId: state.batchId,
+            index: j,
+            status: "skipped"
+          });
+          skipped++;
+        }
+        break;
+      }
+      const file = state.files[i];
+      const formatSupportsWatermark = file.watermarkSupported ?? isWatermarkSupported(file.name);
+      this._emit({
+        type: "item-started",
+        batchId: state.batchId,
+        index: i,
+        fileId: file.fileId,
+        name: file.name,
+        phase: "running"
+      });
+      try {
+        const meta = await this.fileManager.getDownloadMeta(file.fileId);
+        const outputPath = this._resolveUniquePath(state.destDir, meta.name);
+        if (formatSupportsWatermark) {
+          const effective = {
+            ...state.watermarkOptions || {},
+            visible: state.mode === "watermark",
+            invisible: true
+          };
+          this._emit({
+            type: "item-progress",
+            batchId: state.batchId,
+            index: i,
+            phase: "watermarking"
+          });
+          await this.fileManager.downloadWatermarkedToPath(
+            file.fileId,
+            meta,
+            outputPath,
+            effective
+          );
+        } else {
+          await this.fileManager.downloadOriginalToPath(meta, outputPath);
+        }
+        ok++;
+        this._emit({
+          type: "item-done",
+          batchId: state.batchId,
+          index: i,
+          status: "success",
+          outPath: outputPath
+        });
+      } catch (err) {
+        fail++;
+        const message = err?.message || String(err);
+        logger.error(
+          `[BatchDownload] item failed id=${state.batchId} idx=${i} fileId=${file.fileId}: ${message}`
+        );
+        this._emit({
+          type: "item-done",
+          batchId: state.batchId,
+          index: i,
+          status: "error",
+          error: message
+        });
+      }
+    }
+    this._emit({
+      type: "batch-done",
+      batchId: state.batchId,
+      summary: { ok, fail, skipped, destDir: state.destDir }
+    });
+    setTimeout(() => this._batches.delete(state.batchId), 5 * 60 * 1e3);
+  }
+  /**
+   * Walk `destDir/name`, `destDir/name (2)`, `destDir/name (3)`, … until we
+   * find a non-existent path. existsSync is best-effort against parallel
+   * batches but is fine for v1's single-window assumption.
+   */
+  _resolveUniquePath(destDir, name) {
+    const candidate = path$1.join(destDir, name);
+    if (!fs.existsSync(candidate)) return candidate;
+    const ext = path$1.extname(name);
+    const stem = path$1.basename(name, ext);
+    for (let n = 2; n < 1e4; n++) {
+      const p = path$1.join(destDir, `${stem} (${n})${ext}`);
+      if (!fs.existsSync(p)) return p;
+    }
+    return path$1.join(destDir, `${stem}-${Date.now()}${ext}`);
+  }
+  _emit(payload) {
+    try {
+      GlobalValueManager$1.mainWindow?.webContents.send("batch-download-progress", payload);
+    } catch (e) {
+      logger.error(`[BatchDownload] emit failed: ${e?.message || e}`);
+    }
+  }
+}
 const keyManager = new KeyManager();
 keyManager.initKeys();
 const requestManager = new RequestManager(keyManager);
@@ -7490,6 +8017,7 @@ const abseManager = new ABSEManager(keyManager);
 abseManager.init();
 const databaseManager = new DatabaseManager(keyManager);
 const fileManager = new FileManager(aesModule, blockchainManager, abseManager, databaseManager);
+const batchDownloadManager = new BatchDownloadManager(fileManager);
 const loginManager = new LoginManager(
   blockchainManager,
   fileManager,
@@ -7571,6 +8099,38 @@ electron.app.whenReady().then(() => {
     "download-with-options",
     (_event, opts) => fileManager.downloadFileWithOptionsProcess(opts)
   );
+  electron.ipcMain.handle("pick-download-folder", async (_event, defaultPath) => {
+    const useDefault = typeof defaultPath === "string" && defaultPath.length > 0 && fs.existsSync(defaultPath);
+    const result = await electron.dialog.showOpenDialog({
+      title: "選擇批次下載儲存資料夾",
+      properties: ["openDirectory", "createDirectory"],
+      defaultPath: useDefault ? defaultPath : electron.app.getPath("downloads")
+    });
+    if (result.canceled || result.filePaths.length === 0) return null;
+    return result.filePaths[0];
+  });
+  electron.ipcMain.handle("download-batch-with-options", async (_event, opts) => {
+    let destDir = opts?.destDir;
+    if (!destDir || !fs.existsSync(destDir) || !fs.statSync(destDir).isDirectory()) {
+      const result = await electron.dialog.showOpenDialog({
+        title: "選擇批次下載儲存資料夾",
+        properties: ["openDirectory", "createDirectory"],
+        defaultPath: electron.app.getPath("downloads")
+      });
+      if (result.canceled || result.filePaths.length === 0) {
+        return { canceled: true };
+      }
+      destDir = result.filePaths[0];
+    }
+    const batchId = batchDownloadManager.start({ ...opts, destDir });
+    return { batchId, destDir };
+  });
+  electron.ipcMain.on("download-batch-cancel", (_event, batchId) => {
+    batchDownloadManager.cancel(batchId);
+  });
+  electron.ipcMain.on("show-item-in-folder", (_event, p) => {
+    if (typeof p === "string" && p.length > 0) electron.shell.openPath(p);
+  });
   electron.ipcMain.on("delete", (_event, fileId) => fileManager.deleteFileProcess(fileId));
   electron.ipcMain.on(
     "add-folder",
@@ -7608,6 +8168,9 @@ electron.app.whenReady().then(() => {
   });
   electron.ipcMain.handle("search-files", async (_event, values) => {
     return await fileManager.searchFilesProcess(values);
+  });
+  electron.ipcMain.handle("decode-watermark-uid", async (_event, value) => {
+    return await fileManager.decodeWatermarkUidProcess(value);
   });
   electron.ipcMain.on("update-user-config", (_event, config2) => {
     GlobalValueManager$1.updateUser(config2);

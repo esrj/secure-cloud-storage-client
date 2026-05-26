@@ -2,12 +2,13 @@
  * This component is a wrapper to render the main view
  */
 import { useContext, useState, useEffect, useMemo } from 'react'
+import PropTypes from 'prop-types'
 import { PageType, parseFileList, parseRequestList } from './Types'
 import PublicTable from './PublicTable'
 import FileTable from './FileTable'
 import ReplyTable from './ReplyTable'
 import WatermarkDetectPage from './WatermarkDetectPage'
-// [DEMO_HIDE: smart-search] 智慧搜尋頁面暫時隱藏，demo 結束後解除註解即可恢復。
+// DEMO_HIDE_SMART_FEATURES: AgentPage（智慧搜尋）暫時隱藏。要恢復時把下行的註解拿掉。
 // import AgentPage from './AgentPage'
 import { Card } from '@material-tailwind/react'
 import SearchBar from './SearchBar'
@@ -22,6 +23,9 @@ import {
   PageContext,
   SearchContext
 } from './Contexts'
+import { SelectionContext, SelectionProvider } from './SelectionContext'
+import BatchActionBar from './BatchActionBar'
+import BatchDownloadProgress from './BatchDownloadProgress'
 import toast from 'react-hot-toast'
 import { Validators } from './Validator'
 import PostUploadDialog from './PostUploadDialog'
@@ -146,7 +150,8 @@ function MainView() {
         return <RequestTable requestedList={requestedList} />
       case PageType.watermarkDetect:
         return <WatermarkDetectPage />
-      // [DEMO_HIDE: smart-search] 智慧搜尋頁面暫時隱藏，demo 結束後解除註解即可恢復。
+      // DEMO_HIDE_SMART_FEATURES: 智慧搜尋路由隱藏。NavBar 已拿掉入口；
+      // 這個 case 也一併註解，以免有 stale state 把使用者卡在空白頁。
       // case PageType.agentSearch:
       //   return <AgentPage />
       default:
@@ -157,24 +162,43 @@ function MainView() {
   return (
     <CurPathContext.Provider value={curPathContextValue}>
       <UserListContext.Provider value={userListContextValue}>
-        <Card className="flex grow gap-2 pt-2 items-start overflow-auto">
-          {pageType !== PageType.watermarkDetect && pageType !== PageType.agentSearch && (
-            <div className="flex flex-row w-full gap-4 px-2 items-center">
-              <SearchBar />
-              {pageType === PageType.file && <FileViewButtonGroup curPath={curPath} />}
-              {pageType === PageType.request && <RequestViewButtonGroup />}
-            </div>
-          )}
+        <SelectionProvider>
+          <Card className="flex grow gap-2 pt-2 items-start overflow-auto">
+            {/* DEMO_HIDE_SMART_FEATURES: 原本還有 `&& pageType !== PageType.agentSearch`
+                來隱藏 SearchBar，因為 AgentPage 已隱藏路由，不再需要這個條件。
+                要恢復時把條件加回去。 */}
+            {pageType !== PageType.watermarkDetect && (
+              <div className="flex flex-row w-full gap-4 px-2 items-center">
+                <SearchBar />
+                {pageType === PageType.file && <FileViewButtonGroup curPath={curPath} />}
+                {pageType === PageType.request && <RequestViewButtonGroup />}
+              </div>
+            )}
 
-          {pageType === PageType.file && (
-            <div className="px-2">
-              <CurPathBreadcrumbs />
-            </div>
-          )}
+            {pageType === PageType.file && (
+              <div className="px-2">
+                <CurPathBreadcrumbs />
+              </div>
+            )}
 
-          {renderTableView(pageType)}
-        </Card>
+            {/* Batch action bar — only meaningful on the user's own files page,
+                where individual rows have a checkbox bound to SelectionContext. */}
+            {pageType === PageType.file && (
+              <div className="w-full px-2">
+                <BatchActionBar />
+              </div>
+            )}
+
+            <SelectionResetOnPageOrPathChange pageType={pageType} curPath={curPath} />
+
+            {renderTableView(pageType)}
+          </Card>
+        </SelectionProvider>
       </UserListContext.Provider>
+      {/* Floating batch-download progress (lives outside the card so it can
+          overlay the entire window). Mounting at the top-level means progress
+          stays visible even if the user navigates between pages. */}
+      <BatchDownloadProgress />
       {uploadBatch && uploadBatch.fileIds && uploadBatch.fileIds.length > 0 && (
         <PostUploadDialog
           key={uploadBatch.fileIds.join('\0')}
@@ -187,6 +211,25 @@ function MainView() {
       )}
     </CurPathContext.Provider>
   )
+}
+
+/**
+ * Sibling helper that subscribes to SelectionContext and clears the selection
+ * whenever the user changes page or navigates into a different folder.
+ * Kept separate so MainView itself doesn't need to consume SelectionContext.
+ */
+function SelectionResetOnPageOrPathChange({ pageType, curPath }) {
+  const { clear } = useContext(SelectionContext)
+  const folderId = curPath?.at(-1)?.folderId ?? null
+  useEffect(() => {
+    clear()
+  }, [pageType, folderId, clear])
+  return null
+}
+
+SelectionResetOnPageOrPathChange.propTypes = {
+  pageType: PropTypes.string,
+  curPath: PropTypes.array
 }
 
 export default MainView

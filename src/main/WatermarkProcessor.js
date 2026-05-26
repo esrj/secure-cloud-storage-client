@@ -108,9 +108,10 @@ export async function applyVisibleWatermark(inputBuffer, mimeType, opts) {
 // PDF visible
 // ──────────────────────────────────────────────────────────────
 async function _watermarkPDF(inputBuffer, { text, position = 'bottomRight', opacity = 0.3, fontSize = 14 }) {
-  // Helvetica only covers printable ASCII. Strip non-ASCII chars (e.g. CJK custom notes)
-  // to prevent missing glyphs. The base uid/fid/ts payload is always ASCII.
-  const safeText = _toAsciiSafe(text) || text.replace(/[^\x20-\x7E]/g, '?')
+  // Helvetica covers printable ASCII only. Non-ASCII characters (CJK custom
+  // notes etc.) are replaced with '?' by _toAsciiSafe so the user can see
+  // *something* changed. The base uid/fid/ts payload is always ASCII.
+  const safeText = _toAsciiSafe(text)
   const pdfDoc = await PDFDocument.load(inputBuffer)
   const font = await pdfDoc.embedFont(StandardFonts.Helvetica)
   const color = rgb(0.4, 0.4, 0.4)
@@ -145,9 +146,11 @@ async function _watermarkPDF(inputBuffer, { text, position = 'bottomRight', opac
 // Images (PNG / JPEG) visible
 // ──────────────────────────────────────────────────────────────
 async function _watermarkImage(inputBuffer, mimeType, { text, position = 'bottomRight', opacity = 0.5, fontSize = 32 }) {
-  // Jimp bitmap fonts only cover printable ASCII. Strip non-ASCII chars to prevent
-  // rendering gaps. The base uid/fid/ts payload is always ASCII.
-  const safeText = _toAsciiSafe(text) || text.replace(/[^\x20-\x7E]/g, '?')
+  // Jimp bitmap fonts cover printable ASCII only. Non-ASCII characters are
+  // replaced with '?' by _toAsciiSafe so the user can see *something* changed
+  // instead of a silently truncated note. The base uid/fid/ts payload is
+  // always ASCII.
+  const safeText = _toAsciiSafe(text)
 
   const image = await Jimp.read(inputBuffer)
   const w = image.bitmap.width
@@ -275,15 +278,23 @@ export async function applyInvisibleWatermark(inputBuffer, mimeType, opts) {
 // ──────────────────────────────────────────────────────────────
 // PDF invisible: TextRenderingMode.Invisible (PDF spec mode 3).
 // pdf-lib's drawText() ignores renderingMode, so we emit operators explicitly.
+//
+// Defence-in-depth: caller (`_buildInvisibleWmText`) already produces an
+// ASCII-only string, but we sanitize here too — the bundled Helvetica
+// (StandardFonts) can only encode WinAnsi, and one non-ASCII char anywhere
+// in `text` makes `font.encodeText(text)` throw. Replacing rather than
+// stripping preserves text length so the existing detector heuristics still
+// work and the failure mode is "garbled char" instead of "vanished".
 // ──────────────────────────────────────────────────────────────
 async function _invisiblePDF(inputBuffer, { text }) {
+  const safeText = _winAnsiSafe(text)
   const pdfDoc = await PDFDocument.load(inputBuffer)
   const font = await pdfDoc.embedFont(StandardFonts.Helvetica)
   const fontSize = 8
 
   for (const page of pdfDoc.getPages()) {
     const { width, height } = page.getSize()
-    const encoded = font.encodeText(text)
+    const encoded = font.encodeText(safeText)
     for (let y = 30; y < height; y += 120) {
       for (let x = 10; x < width - 10; x += 180) {
         page.setFont(font)
@@ -302,6 +313,14 @@ async function _invisiblePDF(inputBuffer, { text }) {
     }
   }
   return Buffer.from(await pdfDoc.save())
+}
+
+/**
+ * Replace any non-WinAnsi codepoint with '?' so pdf-lib's StandardFonts.Helvetica
+ * never throws on encodeText. Keeps the string length stable.
+ */
+function _winAnsiSafe(text) {
+  return String(text ?? '').replace(/[^\x20-\x7E]/g, '?')
 }
 
 // ──────────────────────────────────────────────────────────────
@@ -471,14 +490,25 @@ function _isValidUtf8(buf) {
 
 /**
  * Sanitize text for fonts that only support printable ASCII (Helvetica, Jimp bitmap).
- * Non-ASCII characters (e.g. Chinese/CJK) are removed.
- * The core watermark payload (uid:/fid:/ts:) is pure ASCII and is always preserved.
- * Chinese custom notes will be invisible in PDF/image visible watermarks, but are
- * preserved in invisible watermark payloads (which store raw UTF-8 bytes, no font needed).
+ * Non-ASCII characters (e.g. CJK) are replaced with '?' rather than removed.
+ *
+ * Why replace, not strip:
+ *   Previously this function stripped non-ASCII silently. Combined with the
+ *   `|| text.replace(...)` fallback in the call sites it meant CJK custom
+ *   notes vanished entirely from the rendered watermark — the user saw a
+ *   clean watermark with no clue their note had been dropped. Replacement
+ *   surfaces the issue: the user sees "??????" where their note should be,
+ *   and the UI warns them up front (see DownloadOptionsDialog / BatchDownloadDialog).
+ *
+ * The core watermark payload (uid:/fid:/ts:) is pure ASCII and is always
+ * preserved verbatim. Invisible watermark payloads (where present) store the
+ * raw UTF-8 bytes and don't go through this function.
  */
 function _toAsciiSafe(text) {
-  // Keep printable ASCII (0x20–0x7E) plus common symbols; strip everything else
-  return text.replace(/[^\x20-\x7E]/g, '').replace(/\s{2,}/g, ' ').trim()
+  return String(text ?? '')
+    .replace(/[^\x20-\x7E]/g, '?')
+    .replace(/\s{2,}/g, ' ')
+    .trim()
 }
 
 function _escapeXml(str) {
