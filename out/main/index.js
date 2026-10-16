@@ -33,7 +33,8 @@ const promises = require("node:fs/promises");
 const node_stream = require("node:stream");
 const crypto$1 = require("node:crypto");
 const pdfLib = require("pdf-lib");
-const Jimp = require("jimp");
+const jimp = require("jimp");
+const fonts = require("jimp/fonts");
 const JSZip = require("jszip");
 const FormData = require("form-data");
 const ethers = require("ethers");
@@ -49,6 +50,7 @@ const node_module = require("node:module");
 const mammoth = require("mammoth");
 const sss = require("shamirs-secret-sharing");
 const fs$1 = require("fs");
+const node_child_process = require("node:child_process");
 function _interopNamespaceDefault(e) {
   const n = Object.create(null, { [Symbol.toStringTag]: { value: "Module" } });
   if (e) {
@@ -66,6 +68,15 @@ function _interopNamespaceDefault(e) {
   return Object.freeze(n);
 }
 const mcl__namespace = /* @__PURE__ */ _interopNamespaceDefault(mcl);
+const profile = (process.env.CLIENT_PROFILE || "").trim();
+if (profile && profile !== "default") {
+  const safe = profile.replace(/[^\w.-]+/g, "_");
+  const userData = `${electron.app.getPath("userData")}-${safe}`;
+  electron.app.setPath("userData", userData);
+  electron.app.setPath("sessionData", userData);
+  electron.app.setPath("logs", `${electron.app.getPath("logs")}-${safe}`);
+  console.log(`[profile] CLIENT_PROFILE=${safe} → userData=${userData}`);
+}
 const icon = path.join(__dirname, "../../resources/icon.png");
 const Transport = require("winston-transport");
 const { BrowserWindow } = require("electron");
@@ -3643,6 +3654,13 @@ function getMimeFromFilename(filename = "") {
 function isWatermarkSupported(filename) {
   return WATERMARK_SUPPORTED_MIMES.includes(getMimeFromFilename(filename));
 }
+function getMimeFromBuffer(buf) {
+  if (!buf || buf.length < 4) return null;
+  if (buf[0] === 37 && buf[1] === 80 && buf[2] === 68 && buf[3] === 70) return "application/pdf";
+  if (buf[0] === 137 && buf[1] === 80 && buf[2] === 78 && buf[3] === 71) return "image/png";
+  if (buf[0] === 255 && buf[1] === 216 && buf[2] === 255) return "image/jpeg";
+  return null;
+}
 async function applyVisibleWatermark(inputBuffer, mimeType, opts) {
   logger.info(`[WatermarkProcessor] Applying visible watermark: mime=${mimeType}, position=${opts.position}, opacity=${opts.opacity}`);
   if (mimeType === "application/pdf") return _watermarkPDF(inputBuffer, opts);
@@ -3653,7 +3671,7 @@ async function applyVisibleWatermark(inputBuffer, mimeType, opts) {
 }
 async function _watermarkPDF(inputBuffer, { text, position = "bottomRight", opacity = 0.3, fontSize = 14 }) {
   const safeText = _toAsciiSafe(text);
-  const pdfDoc = await pdfLib.PDFDocument.load(inputBuffer);
+  const pdfDoc = await pdfLib.PDFDocument.load(inputBuffer, { ignoreEncryption: true });
   const font = await pdfDoc.embedFont(pdfLib.StandardFonts.Helvetica);
   const color = pdfLib.rgb(0.4, 0.4, 0.4);
   for (const page of pdfDoc.getPages()) {
@@ -3681,17 +3699,17 @@ async function _watermarkPDF(inputBuffer, { text, position = "bottomRight", opac
 }
 async function _watermarkImage(inputBuffer, mimeType, { text, position = "bottomRight", opacity = 0.5, fontSize = 32 }) {
   const safeText = _toAsciiSafe(text);
-  const image = await Jimp.read(inputBuffer);
+  const image = await jimp.Jimp.read(inputBuffer);
   const w = image.bitmap.width;
   const h = image.bitmap.height;
-  let fontKey;
-  if (fontSize >= 32) fontKey = Jimp.FONT_SANS_32_WHITE;
-  else if (fontSize >= 16) fontKey = Jimp.FONT_SANS_16_WHITE;
-  else fontKey = Jimp.FONT_SANS_8_WHITE;
-  const font = await Jimp.loadFont(fontKey);
-  const textW = Jimp.measureText(font, safeText);
-  const textH = Jimp.measureTextHeight(font, safeText, w + 1);
-  const overlay = new Jimp(w, h, 0);
+  let fontDef;
+  if (fontSize >= 32) fontDef = fonts.SANS_32_WHITE;
+  else if (fontSize >= 16) fontDef = fonts.SANS_16_WHITE;
+  else fontDef = fonts.SANS_8_WHITE;
+  const font = await jimp.loadFont(fontDef);
+  const textW = jimp.measureText(font, safeText);
+  const textH = jimp.measureTextHeight(font, safeText, w + 1);
+  const overlay = new jimp.Jimp({ width: w, height: h, color: 0 });
   let x = 20;
   let y = Math.max(0, h - textH - 20);
   if (position === "bottomRight") {
@@ -3700,7 +3718,7 @@ async function _watermarkImage(inputBuffer, mimeType, { text, position = "bottom
     x = Math.max(0, (w - textW) / 2);
     y = Math.max(0, (h - textH) / 2);
   }
-  overlay.print(font, x, y, safeText);
+  overlay.print({ font, x, y, text: safeText });
   const clampedOpacity = Math.min(1, Math.max(0, opacity));
   overlay.scan(0, 0, w, h, function(px, py, idx) {
     const origAlpha = this.bitmap.data[idx + 3];
@@ -3709,12 +3727,14 @@ async function _watermarkImage(inputBuffer, mimeType, { text, position = "bottom
     }
   });
   image.composite(overlay, 0, 0, {
-    mode: Jimp.BLEND_SOURCE_OVER,
+    mode: jimp.BlendMode.SRC_OVER,
     opacitySource: 1,
     opacityDest: 1
   });
-  const jimpMime = mimeType === "image/png" ? Jimp.MIME_PNG : Jimp.MIME_JPEG;
-  return image.getBufferAsync(jimpMime);
+  if (mimeType === "image/png") {
+    return image.getBuffer(jimp.JimpMime.png);
+  }
+  return image.getBuffer(jimp.JimpMime.jpeg, { quality: 95 });
 }
 async function _visibleDocx(inputBuffer, { text, opacity = 0.3, fontSize = 14 }) {
   const zip = await JSZip.loadAsync(inputBuffer);
@@ -3757,40 +3777,138 @@ async function applyInvisibleWatermark(inputBuffer, mimeType, opts) {
   logger.info(`[WatermarkProcessor] Applying invisible watermark: mime=${mimeType}`);
   if (mimeType === "application/pdf") return _invisiblePDF(inputBuffer, opts);
   if (mimeType === "image/png") return _lsbPNG(inputBuffer, opts);
-  if (mimeType === "image/jpeg") return _lsbJPEG(inputBuffer, opts);
+  if (mimeType === "image/jpeg") return _lsbJPEG(inputBuffer);
   if (mimeType === DOCX_MIME) return _invisibleDocx(inputBuffer, opts);
   if (mimeType === TXT_MIME) return _invisibleTxt(inputBuffer, opts);
   throw new Error("WATERMARK_UNSUPPORTED_FORMAT");
 }
 async function _invisiblePDF(inputBuffer, { text }) {
   const safeText = _winAnsiSafe(text);
-  const pdfDoc = await pdfLib.PDFDocument.load(inputBuffer);
+  const pdfDoc = await pdfLib.PDFDocument.load(inputBuffer, { ignoreEncryption: true });
+  try {
+    pdfDoc.setKeywords([text]);
+  } catch (e) {
+    logger.warn(`[WatermarkProcessor] PDF setKeywords failed: ${e?.message || e}`);
+  }
   const font = await pdfDoc.embedFont(pdfLib.StandardFonts.Helvetica);
   const fontSize = 8;
   for (const page of pdfDoc.getPages()) {
     const { width, height } = page.getSize();
-    const encoded = font.encodeText(safeText);
     for (let y = 30; y < height; y += 120) {
       for (let x = 10; x < width - 10; x += 180) {
-        page.setFont(font);
-        page.pushOperators(
-          pdfLib.pushGraphicsState(),
-          pdfLib.beginText(),
-          pdfLib.setFillingColor(pdfLib.rgb(0, 0, 0)),
-          pdfLib.setFontAndSize(page.fontKey, fontSize),
-          pdfLib.setTextRenderingMode(pdfLib.TextRenderingMode.Invisible),
-          pdfLib.rotateAndSkewTextRadiansAndTranslate(0, 0, 0, x, y),
-          pdfLib.showText(encoded),
-          pdfLib.endText(),
-          pdfLib.popGraphicsState()
-        );
+        page.drawText(safeText, { x, y, size: fontSize, font, opacity: 0 });
       }
     }
   }
-  return Buffer.from(await pdfDoc.save());
+  return Buffer.from(await pdfDoc.save({ useObjectStreams: false }));
 }
 function _winAnsiSafe(text) {
   return String(text ?? "").replace(/[^\x20-\x7E]/g, "?");
+}
+const WM_KEY_INVISIBLE = "scs-wm-inv";
+const WM_KEY_VISIBLE = "scs-wm-vis";
+const _CRC_TABLE = (() => {
+  const t = new Int32Array(256);
+  for (let n = 0; n < 256; n++) {
+    let c = n;
+    for (let k = 0; k < 8; k++) c = c & 1 ? 3988292384 ^ c >>> 1 : c >>> 1;
+    t[n] = c;
+  }
+  return t;
+})();
+function _crc32(buf) {
+  let c = -1;
+  for (let i = 0; i < buf.length; i++) c = _CRC_TABLE[(c ^ buf[i]) & 255] ^ c >>> 8;
+  return (c ^ -1) >>> 0;
+}
+function _pngWithText(pngBuf, keyword, text) {
+  const data = Buffer.concat([
+    Buffer.from(keyword, "latin1"),
+    Buffer.from([0]),
+    Buffer.from(text, "latin1")
+  ]);
+  const type = Buffer.from("tEXt", "latin1");
+  const len = Buffer.alloc(4);
+  len.writeUInt32BE(data.length, 0);
+  const crc = Buffer.alloc(4);
+  crc.writeUInt32BE(_crc32(Buffer.concat([type, data])), 0);
+  const chunk = Buffer.concat([len, type, data, crc]);
+  const iendIdx = pngBuf.length - 12;
+  return Buffer.concat([pngBuf.subarray(0, iendIdx), chunk, pngBuf.subarray(iendIdx)]);
+}
+function _jpegWithComment(jpgBuf, text) {
+  const payload = Buffer.from(text, "utf8");
+  const segLen = payload.length + 2;
+  const com = Buffer.concat([
+    Buffer.from([255, 254, segLen >> 8 & 255, segLen & 255]),
+    payload
+  ]);
+  let off = 2;
+  while (off + 4 < jpgBuf.length && jpgBuf[off] === 255 && jpgBuf[off + 1] >= 224 && jpgBuf[off + 1] <= 239) {
+    off += 2 + jpgBuf.readUInt16BE(off + 2);
+  }
+  return Buffer.concat([jpgBuf.subarray(0, off), com, jpgBuf.subarray(off)]);
+}
+function _pngStripWmText(pngBuf) {
+  const parts = [pngBuf.subarray(0, 8)];
+  let off = 8;
+  while (off + 8 <= pngBuf.length) {
+    const len = pngBuf.readUInt32BE(off);
+    const type = pngBuf.toString("latin1", off + 4, off + 8);
+    const end = off + 12 + len;
+    let drop = false;
+    if (type === "tEXt") {
+      const seg = pngBuf.subarray(off + 8, off + 8 + len);
+      const z = seg.indexOf(0);
+      const kw = z >= 0 ? seg.toString("latin1", 0, z) : "";
+      drop = kw === WM_KEY_INVISIBLE || kw === WM_KEY_VISIBLE;
+    }
+    if (!drop) parts.push(pngBuf.subarray(off, end));
+    off = end;
+    if (type === "IEND") break;
+  }
+  return Buffer.concat(parts);
+}
+function _jpegStripWmComments(jpgBuf) {
+  const parts = [jpgBuf.subarray(0, 2)];
+  let off = 2;
+  while (off + 4 <= jpgBuf.length) {
+    if (jpgBuf[off] !== 255) break;
+    const marker = jpgBuf[off + 1];
+    if (marker === 217 || marker >= 208 && marker <= 215 || marker === 1) {
+      parts.push(jpgBuf.subarray(off, off + 2));
+      off += 2;
+      continue;
+    }
+    if (marker === 218) {
+      parts.push(jpgBuf.subarray(off));
+      return Buffer.concat(parts);
+    }
+    const segLen = jpgBuf.readUInt16BE(off + 2);
+    const end = off + 2 + segLen;
+    let drop = false;
+    if (marker === 254) {
+      const content = jpgBuf.toString("utf8", off + 4, end);
+      drop = content.startsWith(`${WM_KEY_INVISIBLE}:`) || content.startsWith(`${WM_KEY_VISIBLE}:`);
+    }
+    if (!drop) parts.push(jpgBuf.subarray(off, end));
+    off = end;
+  }
+  if (off < jpgBuf.length) parts.push(jpgBuf.subarray(off));
+  return Buffer.concat(parts);
+}
+function applyImageWatermarkMarkers(buffer, mimeType, { invisibleText, visibleText }) {
+  let buf = Buffer.from(buffer);
+  if (mimeType === "image/png") {
+    buf = _pngStripWmText(buf);
+    if (invisibleText) buf = _pngWithText(buf, WM_KEY_INVISIBLE, invisibleText);
+    if (visibleText) buf = _pngWithText(buf, WM_KEY_VISIBLE, visibleText);
+  } else if (mimeType === "image/jpeg") {
+    buf = _jpegStripWmComments(buf);
+    if (invisibleText) buf = _jpegWithComment(buf, `${WM_KEY_INVISIBLE}:${invisibleText}`);
+    if (visibleText) buf = _jpegWithComment(buf, `${WM_KEY_VISIBLE}:${visibleText}`);
+  }
+  return buf;
 }
 function _encodeLSB(bitmapData, width, height, text) {
   const textBytes = Buffer.from(text, "utf8");
@@ -3814,15 +3932,16 @@ function _encodeLSB(bitmapData, width, height, text) {
   }
 }
 async function _lsbPNG(inputBuffer, { text }) {
-  const image = await Jimp.read(inputBuffer);
-  _encodeLSB(image.bitmap.data, image.bitmap.width, image.bitmap.height, text);
-  return image.getBufferAsync(Jimp.MIME_PNG);
+  const image = await jimp.Jimp.read(inputBuffer);
+  try {
+    _encodeLSB(image.bitmap.data, image.bitmap.width, image.bitmap.height, text);
+  } catch (e) {
+    logger.warn(`[WatermarkProcessor] PNG LSB skipped (${e?.message || e}); using metadata marker only.`);
+  }
+  return image.getBuffer(jimp.JimpMime.png);
 }
-async function _lsbJPEG(inputBuffer, { text }) {
-  const image = await Jimp.read(inputBuffer);
-  _encodeLSB(image.bitmap.data, image.bitmap.width, image.bitmap.height, text);
-  image.quality(95);
-  return image.getBufferAsync(Jimp.MIME_JPEG);
+async function _lsbJPEG(inputBuffer) {
+  return Buffer.from(inputBuffer);
 }
 async function _invisibleDocx(inputBuffer, { text }) {
   const zip = await JSZip.loadAsync(inputBuffer);
@@ -4992,7 +5111,21 @@ class DatabaseManager {
   }
 }
 const REASON_UNSUPPORTED = "FORMAT_NOT_SUPPORTED_OR_EMPTY";
-const MAX_EXTRACT_BYTES = 100 * 1024 * 1024;
+const MAX_EXTRACT_BYTES = 30 * 1024 * 1024;
+const EXTRACT_TIMEOUT_MS = 2e4;
+const MAX_RAW_TEXT_CHARS = 2e5;
+function withTimeout(promise, ms, label) {
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${label}_TIMEOUT_${ms}ms`)), ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+function clampRawHeadTail(raw) {
+  if (typeof raw !== "string" || raw.length <= MAX_RAW_TEXT_CHARS) return raw;
+  const half = Math.floor(MAX_RAW_TEXT_CHARS / 2);
+  return raw.slice(0, half) + "\n…\n" + raw.slice(-half);
+}
 let _cjsRequire = null;
 try {
   const base = typeof __filename !== "undefined" ? __filename : require("url").pathToFileURL(__filename).href;
@@ -5186,13 +5319,13 @@ async function extractTextFromFiles(paths) {
     const ext = path$1.extname(filePath).toLowerCase();
     let raw = null;
     try {
-      raw = await extractOne(filePath, ext);
+      raw = await withTimeout(extractOne(filePath, ext), EXTRACT_TIMEOUT_MS, "EXTRACT");
     } catch (e) {
       logger.warn(`[TextExtract] Failed to extract "${filePath}": ${e.message}`);
       raw = null;
     }
     if (raw === null) continue;
-    const text = cleanExtractedText(raw);
+    const text = cleanExtractedText(clampRawHeadTail(raw));
     if (isEffectivelyEmpty(text)) {
       logger.warn(
         `[TextExtract] "${filePath}" extracted but text is empty (ext=${ext}; possibly a scanned/image-only PDF with no text layer)`
@@ -5230,19 +5363,17 @@ const MODEL_MAP = {
   medium: "Qwen3.5-9B-q4_k_m.gguf"
   // high:   'Qwen3.5-27B-q4_k_m.gguf'
 };
-const OVERHEAD_TOKENS = 1024;
-const CONTEXT_TIERS = [
-  [2048 - OVERHEAD_TOKENS, 2048],
-  [4096 - OVERHEAD_TOKENS, 4096]
-];
-const MAX_CONTEXT_SIZE = 4096;
-const MAX_CHUNK_CHARS = MAX_CONTEXT_SIZE - OVERHEAD_TOKENS;
-function pickContextSize(charLen) {
-  for (const [maxChars, ctx] of CONTEXT_TIERS) {
-    if (charLen <= maxChars) return ctx;
-  }
-  return MAX_CONTEXT_SIZE;
-}
+const RESPONSE_TOKENS = 512;
+const GENERATE_TIMEOUT_MS = {
+  fast: 9e4,
+  medium: 18e4
+};
+const DEFAULT_GENERATE_TIMEOUT_MS = 12e4;
+const TEMPLATE_MARGIN_TOKENS = 320;
+const CONTEXT_TIERS_SIZES = [2048, 4096, 8192];
+const MIN_CONTEXT_SIZE = CONTEXT_TIERS_SIZES[0];
+const HARD_CONTEXT_CAP = CONTEXT_TIERS_SIZES[CONTEXT_TIERS_SIZES.length - 1];
+const MAX_CHUNK_CHARS = 3e3;
 const CLASSIFY_JSON_SCHEMA = {
   type: "object",
   properties: {
@@ -5302,19 +5433,9 @@ async function teardown() {
   _loadedMode = null;
   _loadedCtxSize = 0;
 }
-async function ensureReady(mode, ctxSize) {
-  const needReloadModel = _loadedMode !== mode;
-  const needReloadCtx = ctxSize > _loadedCtxSize;
-  if (!needReloadModel && !needReloadCtx && _context) return;
-  if (needReloadModel) {
-    await teardown();
-  } else if (needReloadCtx && _context) {
-    try {
-      await _context.dispose();
-    } catch {
-    }
-    _context = null;
-  }
+async function ensureModel(mode) {
+  if (_model && _loadedMode === mode) return;
+  await teardown();
   const modelPath = getModelPath(mode);
   if (!fs.existsSync(modelPath)) {
     throw new Error(
@@ -5325,32 +5446,94 @@ Place ${MODEL_MAP[mode] || MODEL_MAP.fast} inside resources/models/ or set the L
   }
   const { getLlama } = await getNLC();
   if (!_llama) _llama = await getLlama();
-  if (!_model || needReloadModel) {
-    let sizeMB = "unknown";
+  let sizeMB = "unknown";
+  try {
+    sizeMB = (fs.statSync(modelPath).size / (1024 * 1024)).toFixed(1);
+  } catch {
+  }
+  logger.info(`[LLM] Loading model mode="${mode}", path="${modelPath}", size=${sizeMB} MB`);
+  _model = await _llama.loadModel({ modelPath });
+  _loadedMode = mode;
+  logger.info(`[LLM] Model loaded successfully (mode="${mode}", trainCtx=${_safeTrainCtx()})`);
+}
+async function ensureContext(ctxSize) {
+  if (_context && _loadedCtxSize >= ctxSize && _loadedCtxSize <= ctxSize * 2) return;
+  if (_context) {
     try {
-      sizeMB = (fs.statSync(modelPath).size / (1024 * 1024)).toFixed(1);
+      await _context.dispose();
     } catch {
     }
-    logger.info(`[LLM] Loading model mode="${mode}", path="${modelPath}", size=${sizeMB} MB`);
-    _model = await _llama.loadModel({ modelPath });
-    _loadedMode = mode;
-    logger.info(`[LLM] Model loaded successfully (mode="${mode}")`);
+    _context = null;
   }
-  logger.info(`[LLM] Creating context mode="${mode}" contextSize=${ctxSize}`);
+  logger.info(`[LLM] Creating context mode="${_loadedMode}" contextSize=${ctxSize}`);
   _context = await _model.createContext({ contextSize: ctxSize, sequences: 1 });
   _loadedCtxSize = ctxSize;
   if (!_grammar) {
     _grammar = await _llama.createGrammarForJsonSchema(CLASSIFY_JSON_SCHEMA);
   }
 }
+function _safeTrainCtx() {
+  try {
+    const t = _model?.trainContextSize;
+    if (typeof t === "number" && t > 0) return t;
+  } catch {
+  }
+  return HARD_CONTEXT_CAP;
+}
+function modelMaxContext() {
+  return Math.min(HARD_CONTEXT_CAP, Math.max(MIN_CONTEXT_SIZE, _safeTrainCtx()));
+}
+function countTokens(text) {
+  if (!_model || !text) return 0;
+  try {
+    return _model.tokenize(text).length;
+  } catch (e) {
+    logger.warn(`[LLM] tokenize failed, falling back to char estimate: ${e.message}`);
+    return text.length;
+  }
+}
+function fitPromptToContext(systemPrompt, userPrompt) {
+  const maxCtx = modelMaxContext();
+  const sysTokens = countTokens(systemPrompt);
+  const promptBudget = maxCtx - RESPONSE_TOKENS - TEMPLATE_MARGIN_TOKENS;
+  const allowedUser = Math.max(0, promptBudget - sysTokens);
+  let finalUser = userPrompt;
+  let userTokens = countTokens(userPrompt);
+  let trimmed = false;
+  if (userTokens > allowedUser && _model) {
+    try {
+      const toks = _model.tokenize(userPrompt);
+      const kept = toks.slice(0, allowedUser);
+      finalUser = _model.detokenize(kept);
+      userTokens = kept.length;
+      trimmed = true;
+      logger.warn(
+        `[LLM] User prompt exceeds context budget; trimmed ${toks.length} → ${userTokens} tokens (sys=${sysTokens}, maxCtx=${maxCtx}, reserve=${RESPONSE_TOKENS}+${TEMPLATE_MARGIN_TOKENS}).`
+      );
+    } catch (e) {
+      logger.warn(`[LLM] token trim failed: ${e.message}`);
+    }
+  }
+  const required = sysTokens + userTokens + RESPONSE_TOKENS + TEMPLATE_MARGIN_TOKENS;
+  let ctxSize = CONTEXT_TIERS_SIZES.find((t) => t >= required) ?? maxCtx;
+  ctxSize = Math.max(MIN_CONTEXT_SIZE, Math.min(maxCtx, ctxSize));
+  return { userPrompt: finalUser, ctxSize, sysTokens, userTokens, trimmed };
+}
 async function _doGenerate(prompt, opts) {
   const mode = opts.mode || "fast";
-  const ctxSize = opts.contextSize || pickContextSize(prompt.length);
-  await ensureReady(mode, ctxSize);
-  const { LlamaChatSession } = await getNLC();
+  await ensureModel(mode);
   const systemPrompt = `/no_think
 
 ${opts.system ?? ""}`.trim();
+  const fit = fitPromptToContext(systemPrompt, prompt);
+  await ensureContext(fit.ctxSize);
+  const { LlamaChatSession } = await getNLC();
+  const timeoutMs = GENERATE_TIMEOUT_MS[mode] ?? DEFAULT_GENERATE_TIMEOUT_MS;
+  const abort = new AbortController();
+  const timer = setTimeout(
+    () => abort.abort(new Error(`LLM generation timed out after ${timeoutMs}ms (mode="${mode}")`)),
+    timeoutMs
+  );
   const sequence = _context.getSequence();
   try {
     const session = new LlamaChatSession({
@@ -5359,16 +5542,31 @@ ${opts.system ?? ""}`.trim();
       autoDisposeSequence: false
     });
     const t0 = Date.now();
-    const out = await session.prompt(prompt, {
+    const out = await session.prompt(fit.userPrompt, {
       temperature: typeof opts.temperature === "number" ? opts.temperature : 0.1,
-      maxTokens: 512,
-      grammar: _grammar
+      maxTokens: RESPONSE_TOKENS,
+      grammar: _grammar,
+      signal: abort.signal
     });
     const dur = Date.now() - t0;
     const preview = String(out).replace(/\s+/g, " ").slice(0, 240);
-    logger.info(`[LLM] generate done mode="${mode}" ctx=${ctxSize} ${dur}ms outLen=${out.length} preview="${preview}"`);
+    logger.info(
+      `[LLM] generate done mode="${mode}" ctx=${fit.ctxSize} sysTok=${fit.sysTokens} userTok=${fit.userTokens}${fit.trimmed ? " (trimmed)" : ""} ${dur}ms outLen=${out.length} preview="${preview}"`
+    );
     return out;
+  } catch (e) {
+    if (abort.signal.aborted) {
+      logger.warn(`[LLM] generation aborted (timeout ${timeoutMs}ms, mode="${mode}"); tearing down context`);
+      try {
+        await _context?.dispose();
+      } catch {
+      }
+      _context = null;
+      _loadedCtxSize = 0;
+    }
+    throw e;
   } finally {
+    clearTimeout(timer);
     try {
       await sequence.dispose();
     } catch {
@@ -5469,14 +5667,40 @@ function parseZhClassificationResponse(rawText) {
   });
   return { ok: true, labels };
 }
+function mergeZhLabelRunsByMax(okRuns) {
+  const runs = okRuns.filter((r) => r && Array.isArray(r.labels) && r.labels.length > 0);
+  if (runs.length === 0) {
+    return ZH_LABEL_ORDER.map((name) => ({ name, score: 0, evidence: [] }));
+  }
+  return ZH_LABEL_ORDER.map((name) => {
+    let best = -1;
+    let bestEv = [];
+    const pool = [];
+    for (const run of runs) {
+      const L = run.labels.find((l) => l.name === name);
+      if (!L) continue;
+      const ev = Array.isArray(L.evidence) ? L.evidence : [];
+      for (const x of ev) {
+        const s = typeof x === "string" ? x.trim() : "";
+        if (s && !pool.includes(s)) pool.push(s);
+      }
+      if (L.score > best) {
+        best = L.score;
+        bestEv = ev.length > 0 ? ev.filter((x) => typeof x === "string" && x.trim()).slice(0, 3) : [];
+      }
+    }
+    const score = roundScore2(best < 0 ? 0 : best);
+    const evidence = (bestEv.length > 0 ? bestEv : pool).slice(0, 3);
+    return { name, score, evidence };
+  });
+}
 function computeFinalLabelsFromBalanced(labels, threshold) {
   const th = clampThreshold(threshold);
-  const finals = [];
-  for (const l of labels) {
-    if (l.score >= th && l.evidence.length > 0) finals.push(l.name);
-  }
-  if (finals.length === 0) return ["其他"];
-  return finals;
+  const withEvidence = labels.filter((l) => l.score >= th && l.evidence.length > 0).map((l) => l.name);
+  if (withEvidence.length > 0) return withEvidence;
+  const scoreOnly = labels.filter((l) => l.score >= th).map((l) => l.name);
+  if (scoreOnly.length > 0) return scoreOnly;
+  return ["其他"];
 }
 const VALID_MODES = ["off", "fast", "medium"];
 let appClassifierEnabled = true;
@@ -5522,24 +5746,43 @@ function perFileBudgetForBatch(fileCount) {
   const raw = Math.floor(totalBudget / N);
   return Math.max(MIN_PER_FILE_CHARS, Math.min(MAX_PER_FILE_CHARS, raw));
 }
+const MAX_FILENAME_CHARS = 120;
+function sanitizeBodyForPrompt(text) {
+  if (typeof text !== "string" || text.length === 0) return "";
+  return text.replace(/[\u0000-\u0008\u000B-\u001F\u007F-\u009F]/g, " ").replace(/^(\s*)#\s*檔案/gm, "$1＃ 檔案").replace(/^(\s*)-{3,}(\s*)$/gm, "$1—（分隔）$2");
+}
+function sanitizeFilenameForPrompt(name) {
+  const oneLine = String(name || "").replace(/[\u0000-\u001F\u007F-\u009F]/g, " ").replace(/[#`]/g, "＃").replace(/-{3,}/g, "—").replace(/\s+/g, " ").trim();
+  return oneLine.length > MAX_FILENAME_CHARS ? oneLine.slice(0, MAX_FILENAME_CHARS) + "…" : oneLine;
+}
 function buildCompositeBody(files, perFileBudget) {
   return files.map((f, idx) => {
-    const header = `# 檔案 ${idx + 1}：${path$1.basename(f.path)}`;
+    const header = `# 檔案 ${idx + 1}：${sanitizeFilenameForPrompt(path$1.basename(f.path))}`;
     if (!f.extracted || !f.text) {
       return `${header}
 （無法擷取內文，請僅依檔名判斷）`;
     }
-    const body = condenseToBudget(f.text, perFileBudget);
+    const body = sanitizeBodyForPrompt(condenseToBudget(f.text, perFileBudget));
     return `${header}
 ${body}`;
   }).join("\n\n---\n\n");
+}
+const MAX_FILES_PER_RUN = Math.max(
+  1,
+  Math.floor(MAX_CHUNK_CHARS / (MIN_PER_FILE_CHARS + PER_FILE_FRAME_OVERHEAD))
+);
+function chunkArray(arr, size) {
+  const out = [];
+  const step = Math.max(1, size);
+  for (let i = 0; i < arr.length; i += step) out.push(arr.slice(i, i + step));
+  return out;
 }
 async function classifyDocuments(input) {
   const enable = input?.enable !== false;
   if (!enable) {
     return { supported: false, reason: "DISABLED", labels: [], final_labels: [] };
   }
-  const mode = getSmartClassifyMode();
+  const mode = input?.mode === "fast" || input?.mode === "medium" || input?.mode === "off" ? input.mode : getSmartClassifyMode();
   if (mode === "off") {
     return { supported: false, reason: "DISABLED", labels: [], final_labels: [] };
   }
@@ -5579,73 +5822,86 @@ async function classifyDocuments(input) {
       extracted: f.extracted
     }))
   };
-  const perFileBudget = perFileBudgetForBatch(files.length);
-  let composite = buildCompositeBody(files, perFileBudget);
-  if (composite.length > MAX_CHUNK_CHARS) {
-    const TAIL = "\n…（後續檔案內容因長度超過模型上限而省略，已盡量保留檔名與前段內容）";
-    composite = composite.slice(0, MAX_CHUNK_CHARS - TAIL.length) + TAIL;
-  }
-  if (composite.length === 0) {
-    return {
-      supported: false,
-      reason: "EMPTY_CONTENT",
-      labels: [],
-      final_labels: [],
-      extraction
-    };
-  }
-  logger.info(
-    `[Classify] Batch composite: files=${files.length}, withText=${filesWithText}, perFileBudget=${perFileBudget}, compositeLen=${composite.length}, mode=${mode}`
-  );
-  const ctxSize = pickContextSize(composite.length);
+  const groups = chunkArray(files, MAX_FILES_PER_RUN);
   const temperature = typeof input?.temperature === "number" ? input.temperature : mode === "medium" ? 0.25 : 0.1;
-  const userPrompt = `本輪門檻 threshold = ${threshold}
-本批共 ${files.length} 個檔案，請針對「整批檔案」綜合判斷並輸出一組嚴格 JSON（規格見 system，僅 JSON、勿 markdown、勿 <think>）。
-注意：score 必須真實反映你對「整批」的判斷，不可全部填 0、也不可照抄 system 範例的數值。
-
-以下為本批每個檔案的「檔名 + 摘要內容」：
-
-${composite}`;
+  logger.info(
+    `[Classify] Batch: files=${files.length}, withText=${filesWithText}, groups=${groups.length}, maxPerRun=${MAX_FILES_PER_RUN}, mode=${mode}`
+  );
   const report = (done2) => {
     if (typeof input?.onProgress === "function") {
-      input.onProgress({ done: done2, total: 1 });
+      input.onProgress({ done: done2, total: groups.length });
     }
   };
   report(0);
-  let raw;
-  try {
-    raw = await generate(userPrompt, {
-      system: ZH_CLASSIFY_SYSTEM_PROMPT,
-      temperature,
-      mode,
-      contextSize: ctxSize
-    });
-  } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e);
+  const okRuns = [];
+  let lastRaw = "";
+  let generateError = null;
+  let anyParseFail = false;
+  for (let gi = 0; gi < groups.length; gi++) {
+    const group = groups[gi];
+    const perFileBudget = perFileBudgetForBatch(group.length);
+    let composite = buildCompositeBody(group, perFileBudget);
+    if (composite.length > MAX_CHUNK_CHARS) {
+      const TAIL = "\n…（內容因長度超過模型上限而省略）";
+      composite = composite.slice(0, MAX_CHUNK_CHARS - TAIL.length) + TAIL;
+    }
+    if (composite.length === 0) {
+      report(gi + 1);
+      continue;
+    }
+    const userPrompt = `本輪門檻 threshold = ${threshold}
+本組共 ${group.length} 個檔案（整批第 ${gi + 1}/${groups.length} 組），請綜合判斷並輸出一組嚴格 JSON（規格見 system，僅 JSON、勿 markdown、勿 <think>）。
+注意：score 必須真實反映你對這些檔案的判斷，不可全部填 0、也不可照抄 system 範例的數值。
+
+以下為每個檔案的「檔名 + 摘要內容」：
+
+${composite}`;
+    let raw;
+    try {
+      raw = await generate(userPrompt, {
+        system: ZH_CLASSIFY_SYSTEM_PROMPT,
+        temperature,
+        mode
+      });
+    } catch (e) {
+      generateError = e instanceof Error ? e.message : String(e);
+      logger.warn(`[Classify] group ${gi + 1}/${groups.length} generate failed: ${generateError}`);
+      report(gi + 1);
+      continue;
+    }
+    lastRaw = raw;
+    const parsed = parseZhClassificationResponse(raw);
+    if (parsed.ok) {
+      okRuns.push({ labels: parsed.labels });
+    } else {
+      anyParseFail = true;
+      logger.warn(`[Classify] group ${gi + 1}/${groups.length} JSON parse failed`);
+    }
+    report(gi + 1);
+  }
+  if (okRuns.length === 0) {
+    if (generateError) {
+      return {
+        supported: false,
+        reason: "LLM_GENERATE_FAILED",
+        labels: [],
+        final_labels: [],
+        extraction,
+        llmError: generateError,
+        thresholdUsed: threshold
+      };
+    }
     return {
       supported: false,
-      reason: "LLM_GENERATE_FAILED",
+      reason: anyParseFail ? "JSON_PARSE_FAILED" : "EMPTY_CONTENT",
       labels: [],
       final_labels: [],
       extraction,
-      llmError: msg,
+      llmRawText: lastRaw || void 0,
       thresholdUsed: threshold
     };
   }
-  report(1);
-  const parsed = parseZhClassificationResponse(raw);
-  if (!parsed.ok) {
-    return {
-      supported: false,
-      reason: "JSON_PARSE_FAILED",
-      labels: [],
-      final_labels: [],
-      extraction,
-      llmRawText: raw,
-      thresholdUsed: threshold
-    };
-  }
-  const balancedLabels = parsed.labels;
+  const balancedLabels = mergeZhLabelRunsByMax(okRuns);
   const final_labels = computeFinalLabelsFromBalanced(balancedLabels, threshold);
   return {
     supported: true,
@@ -5654,14 +5910,28 @@ ${composite}`;
     classification: { labels: balancedLabels, final_labels },
     extraction: {
       ...extraction,
-      chunksClassified: 1,
-      parseSuccessRuns: 1
+      groups: groups.length,
+      chunksClassified: okRuns.length,
+      parseSuccessRuns: okRuns.length
     },
-    llmRawText: input?.debug ? raw : void 0,
+    llmRawText: input?.debug ? lastRaw : void 0,
     thresholdUsed: threshold
   };
 }
+const MAX_CACHE_ENTRIES = 50;
+const CACHE_TTL_MS = 30 * 60 * 1e3;
 const cache = /* @__PURE__ */ new Map();
+function evictIfNeeded() {
+  const now = Date.now();
+  for (const [key, entry] of cache) {
+    if (entry?.ts && now - entry.ts > CACHE_TTL_MS) cache.delete(key);
+  }
+  while (cache.size > MAX_CACHE_ENTRIES) {
+    const oldest = cache.keys().next().value;
+    if (oldest === void 0) break;
+    cache.delete(oldest);
+  }
+}
 function makeUploadBatchClassifyKey(paths) {
   const sorted = [...paths].filter((p) => typeof p === "string" && p.trim()).sort();
   return crypto$1.createHash("sha256").update(sorted.join("\0"), "utf8").digest("hex").slice(0, 32);
@@ -5669,18 +5939,24 @@ function makeUploadBatchClassifyKey(paths) {
 function getPreUploadClassifyEntry(batchKey) {
   return cache.get(batchKey);
 }
-async function runPreUploadClassification(notify, batchKey, paths) {
-  cache.set(batchKey, { state: "running" });
+function clearPreUploadClassifyEntry(batchKey) {
+  cache.delete(batchKey);
+}
+async function runPreUploadClassification(notify, batchKey, paths, mode) {
+  cache.set(batchKey, { state: "running", ts: Date.now() });
+  evictIfNeeded();
   notify({ batchKey, phase: "running" });
   try {
     const { classifierThreshold } = getClassifierSettings();
     const result = await classifyDocuments({
       enable: true,
       paths,
+      mode,
       threshold: classifierThreshold,
       onProgress: (p) => notify({ batchKey, phase: "running", progress: p })
     });
-    cache.set(batchKey, { state: "done", result });
+    cache.set(batchKey, { state: "done", result, ts: Date.now() });
+    evictIfNeeded();
     notify({ batchKey, phase: "finished", result });
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
@@ -5694,7 +5970,8 @@ async function runPreUploadClassification(notify, batchKey, paths) {
       labels: [],
       final_labels: []
     };
-    cache.set(batchKey, { state: "done", result: errResult });
+    cache.set(batchKey, { state: "done", result: errResult, ts: Date.now() });
+    evictIfNeeded();
     notify({ batchKey, phase: "finished", result: errResult });
   }
 }
@@ -6038,6 +6315,7 @@ class FileManager {
     if (filePaths.length > 0) {
       const classifierWanted = getUploadBatchSmartClassifyWanted();
       const classifierEnabled = getAppClassifierEnabled();
+      const classifyMode = getSmartClassifyMode();
       const classifyBatchKey = classifierWanted && classifierEnabled ? makeUploadBatchClassifyKey(filePaths) : null;
       const batchId = crypto$1.randomUUID();
       this.#uploadBatches.set(batchId, {
@@ -6052,7 +6330,8 @@ class FileManager {
         void runPreUploadClassification(
           (payload) => GlobalValueManager$1.mainWindow?.webContents.send("preupload-classify-status", payload),
           classifyBatchKey,
-          filePaths
+          filePaths,
+          classifyMode
         );
       }
       for (const filePath of filePaths) {
@@ -6093,6 +6372,31 @@ class FileManager {
         GlobalValueManager$1.sendNotice("Failed to get file list", "error");
       }
     });
+  }
+  /**
+   * Smart-search scope: all of the user's own files (every folder) plus all
+   * public files of other users, metadata only. Resolves with parsed arrays
+   * and deliberately does NOT broadcast `file-list-res`, so the file list
+   * page keeps showing the folder the user is browsing.
+   * @returns {Promise<{ files: object[], folders: object[] }>}
+   */
+  async getAgentFileScopeProcess() {
+    const response = await new Promise((resolve, reject) => {
+      socket.timeout(15e3).emit("get-agent-file-scope", {}, (timeoutErr, res) => {
+        if (timeoutErr) return reject(new Error("Server did not respond."));
+        if (res?.errorMsg) return reject(new Error(res.errorMsg));
+        resolve(res);
+      });
+    });
+    const globalAttrs = (await this.abseManager.getPP())?.U || [];
+    const files = JSON.parse(response.files);
+    const folders = JSON.parse(response.folders);
+    files.forEach((file) => {
+      file.tags = Array.isArray(file.tags) ? file.tags : [];
+      file.attrs = Array.isArray(file.attrIds) ? file.attrIds.map((id) => globalAttrs.at(id)).filter(Boolean) : [];
+    });
+    logger.info(`[Agent] file scope: ${files.length} file(s), ${folders.length} folder(s)`);
+    return { files, folders };
   }
   /**
    * Ask the server to download file (legacy entry, no UI options).
@@ -6368,17 +6672,24 @@ class FileManager {
       this.#sendDownloadErrorNotice(e?.message || "Failed to fetch file metadata.", ContactManagerOrTryAgainMsg);
       return;
     }
-    const { filePath, canceled } = await electron.dialog.showSaveDialog({
+    const saveOpts = {
       defaultPath: meta.name,
       properties: ["showOverwriteConfirmation", "createDirectory"]
-    });
+    };
+    const { filePath, canceled } = GlobalValueManager$1.mainWindow ? await electron.dialog.showSaveDialog(GlobalValueManager$1.mainWindow, saveOpts) : await electron.dialog.showSaveDialog(saveOpts);
     if (canceled) {
       logger.info("Download canceled.");
       GlobalValueManager$1.sendNotice("Download canceled.", "error");
       return;
     }
     const supportsWatermark = isWatermarkSupported(meta.name);
+    logger.info(
+      `[Download][diag] fileId=${fileId} serverName="${meta.name}" mode=${mode} mime=${getMimeFromFilename(meta.name) || "null"} supportsWatermark=${supportsWatermark}`
+    );
     if (!supportsWatermark) {
+      logger.warn(
+        `[Download][diag] NO watermark embedded — server filename "${meta.name}" did not resolve to a supported mime, so this download skips the (silent) invisible watermark.`
+      );
       try {
         await this.downloadOriginalToPath(meta, filePath);
         GlobalValueManager$1.sendNotice("Success to download file", "success");
@@ -6403,6 +6714,11 @@ class FileManager {
         "success"
       );
     } catch (_e) {
+      logger.error(`[Download] watermarked download failed: ${_e?.message || _e}`);
+      this.#sendDownloadErrorNotice(
+        _e?.message === "WATERMARK_UNSUPPORTED_FORMAT" ? "This file format does not support watermarking." : "Failed to apply watermark; the file was not saved.",
+        ContactManagerOrTryAgainMsg
+      );
     }
   }
   /**
@@ -6652,7 +6968,8 @@ class FileManager {
    */
   async getDownloadMeta(fileId) {
     const fileInfo = await new Promise((resolve, reject) => {
-      socket.emit("download-file-pre", { fileId }, (response) => {
+      socket.timeout(15e3).emit("download-file-pre", { fileId }, (timeoutErr, response) => {
+        if (timeoutErr) return reject(new Error("Server did not respond (connection lost?)."));
         if (response?.errorMsg) return reject(new Error(response.errorMsg));
         if (!response?.fileInfo) return reject(new Error("File not found"));
         resolve(response.fileInfo);
@@ -6755,9 +7072,19 @@ class FileManager {
         const note = watermarkOptions?.customNote;
         const visibleText = _buildVisibleWmText(watermarkMeta, note);
         const invisibleText = _buildInvisibleWmText(watermarkMeta);
+        const sniffedMime = getMimeFromBuffer(decryptedBuffer);
+        const effectiveMime = sniffedMime || mimeType;
+        if (sniffedMime && sniffedMime !== mimeType) {
+          logger.warn(
+            `[Download] content type ${sniffedMime} differs from filename type ${mimeType} for "${meta.name}" — watermarking as ${sniffedMime}.`
+          );
+        }
         let processedBuffer = decryptedBuffer;
+        logger.info(
+          `[Download][diag] watermarking fileId=${fileId} mime=${effectiveMime || "null"} visible=${watermarkOptions?.visible === true} invisible=${watermarkOptions?.invisible === true} decryptedBytes=${decryptedBuffer.length}`
+        );
         if (watermarkOptions?.visible === true) {
-          processedBuffer = await applyVisibleWatermark(processedBuffer, mimeType, {
+          processedBuffer = await applyVisibleWatermark(processedBuffer, effectiveMime, {
             text: visibleText,
             position: watermarkOptions?.position ?? "bottomRight",
             opacity: watermarkOptions?.opacity ?? 0.3,
@@ -6765,8 +7092,17 @@ class FileManager {
           });
         }
         if (watermarkOptions?.invisible === true) {
-          processedBuffer = await applyInvisibleWatermark(processedBuffer, mimeType, {
+          processedBuffer = await applyInvisibleWatermark(processedBuffer, effectiveMime, {
             text: invisibleText
+          });
+          logger.info(
+            `[Download][diag] invisible watermark applied — bytes ${decryptedBuffer.length} → ${processedBuffer.length}`
+          );
+        }
+        if (effectiveMime === "image/png" || effectiveMime === "image/jpeg") {
+          processedBuffer = applyImageWatermarkMarkers(processedBuffer, effectiveMime, {
+            invisibleText: watermarkOptions?.invisible === true ? invisibleText : null,
+            visibleText: watermarkOptions?.visible === true ? visibleText : null
           });
         }
         await promises.writeFile(outputPath, processedBuffer);
@@ -7280,12 +7616,19 @@ class LoginManager {
    * @param {*} param0
    * @returns
    */
+  /**
+   * The secrets a backup protects: wallet private key and PRE keys.
+   * Used by the password backup and by security-key binding (RecoveryManager).
+   */
+  getSecretKeys() {
+    return {
+      walletKey: this.blockchainManager.wallet.privateKey,
+      preKeys: this.keyManager.getKeyStrings()
+    };
+  }
   async shareSecret({ extraKey }) {
     try {
-      const secretKeys = {
-        walletKey: this.blockchainManager.wallet.privateKey,
-        preKeys: this.keyManager.getKeyStrings()
-      };
+      const secretKeys = this.getSecretKeys();
       logger.info("Generating secret shares...");
       const shares = await encryptDataShareKey(extraKey, JSON.stringify(secretKeys));
       const sharesStr = [];
@@ -7354,7 +7697,8 @@ class LoginManager {
               deserializedShares.push(Buffer.from(share, "base64"));
             }
             this.shares = deserializedShares;
-            resolve({ purpose: "recover" });
+            this.recoveryMethods = Array.isArray(response.methods) ? response.methods : [{ id: "password", type: "password" }];
+            resolve({ purpose: "recover", methods: this.recoveryMethods });
           } else if (response.userId) {
             await this.login();
             this.fileManager.getFileListProcess(null);
@@ -7374,8 +7718,17 @@ class LoginManager {
    * @returns
    */
   async onRecoverExtraKey({ extraKey }) {
+    return this.restoreFromShares(extraKey, this.shares);
+  }
+  /**
+   * Decrypt secret shares with an extra key, restore the secret keys and log in.
+   * Shared by the password method and security-key recovery (RecoveryManager).
+   * @param {string} extraKey
+   * @param {Array<Buffer>} shares
+   */
+  async restoreFromShares(extraKey, shares) {
     try {
-      const decryptedStr = await recoverDataShareKey(extraKey, this.shares);
+      const decryptedStr = await recoverDataShareKey(extraKey, shares);
       if (!decryptedStr) {
         logger.info("Secret key recover failed.");
         throw new Error(
@@ -7428,6 +7781,11 @@ function registerUploadPostIpcOnce() {
     if (typeof batchKey !== "string" || !batchKey.trim()) return null;
     return getPreUploadClassifyEntry(batchKey.trim()) ?? null;
   });
+  electron.ipcMain.handle("preupload-classify-clear", async (_, batchKey) => {
+    if (typeof batchKey !== "string" || !batchKey.trim()) return false;
+    clearPreUploadClassifyEntry(batchKey.trim());
+    return true;
+  });
   electron.ipcMain.handle("file-manager:start-upload", async (_, folderId) => {
     if (!fileManagerRef || typeof fileManagerRef.uploadFileProcess !== "function") {
       throw new Error("FileManager is not ready for upload");
@@ -7458,7 +7816,26 @@ function bytesToSize(bytes) {
   const i = Math.min(Math.floor(Math.log(n) / Math.log(1e3)), units.length - 1);
   return `${(n / Math.pow(1e3, i)).toFixed(2)} ${units[i]}`;
 }
-function enrichFile(rawFile, databaseManager2, uploaderName) {
+function buildFolderPathMap(folders) {
+  const byId = /* @__PURE__ */ new Map();
+  for (const f of Array.isArray(folders) ? folders : []) {
+    const id = f.id ?? f.folderId;
+    if (id) byId.set(id, f);
+  }
+  const cache2 = /* @__PURE__ */ new Map();
+  const pathOf = (id, depth = 0) => {
+    if (!id || depth > 32) return "";
+    if (cache2.has(id)) return cache2.get(id);
+    const f = byId.get(id);
+    if (!f) return "";
+    const parent = pathOf(f.parentFolderId ?? f.parentfolderid ?? null, depth + 1);
+    const p = parent ? `${parent}/${f.name}` : String(f.name ?? "");
+    cache2.set(id, p);
+    return p;
+  };
+  return { pathOf };
+}
+function enrichFile(rawFile, databaseManager2, ctx) {
   const fileId = rawFile.fileId ?? rawFile.id ?? "";
   const name = rawFile.name ?? "";
   const ext = path$1.extname(name).replace(".", "").toLowerCase();
@@ -7467,6 +7844,10 @@ function enrichFile(rawFile, databaseManager2, uploaderName) {
   const perm = rawFile.perm ?? rawFile.permissions ?? 0;
   const desc = rawFile.desc ?? rawFile.description ?? "";
   const ownerId = rawFile.owner ?? rawFile.ownerId ?? "";
+  const isOwn = ctx.currentUserId ? ownerId === ctx.currentUserId : true;
+  const uploaderName = typeof rawFile.ownerName === "string" && rawFile.ownerName.trim() || (isOwn ? ctx.uploaderName : "") || "未知";
+  const folderPath = isOwn ? ctx.folderPaths.pathOf(rawFile.parentFolderId ?? rawFile.parentfolderid) || "/" : "";
+  const location = isOwn ? `我的檔案/${folderPath === "/" ? "" : folderPath}` : `公開檔案（${uploaderName}）`;
   let tags = [];
   if (Array.isArray(rawFile.tags) && rawFile.tags.length > 0) {
     tags = rawFile.tags.filter((t) => typeof t === "string" && t.trim());
@@ -7493,13 +7874,22 @@ function enrichFile(rawFile, databaseManager2, uploaderName) {
     security_level: permLabel,
     desc,
     tags,
-    uploader_name: uploaderName || "未知",
-    uploader_id: ownerId
+    uploader_name: uploaderName,
+    uploader_id: ownerId,
+    is_own: isOwn,
+    folder_path: folderPath,
+    location
   };
 }
-function buildSearchableMetadata(rawFiles, databaseManager2, uploaderName = "") {
+function buildSearchableMetadata(rawFiles, databaseManager2, options = "") {
   if (!Array.isArray(rawFiles)) return [];
-  return rawFiles.map((f) => enrichFile(f, databaseManager2, uploaderName));
+  const opts = typeof options === "string" ? { uploaderName: options } : options || {};
+  const ctx = {
+    uploaderName: opts.uploaderName ?? "",
+    currentUserId: opts.currentUserId ?? "",
+    folderPaths: buildFolderPathMap(opts.folders)
+  };
+  return rawFiles.map((f) => enrichFile(f, databaseManager2, ctx));
 }
 const MODEL = "gemini-3-flash-preview";
 const BASE_URL = `https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent`;
@@ -7548,6 +7938,88 @@ async function geminiGenerateContent({ messages, systemInstruction, temperature 
   logger.debug(`[GeminiClient] response length=${text.length}`);
   return text;
 }
+const DEFAULTS = {
+  url: "http://localhost:11434",
+  model: "",
+  numCtx: 8192
+};
+function loadSettings() {
+  const settings = { ...DEFAULTS };
+  try {
+    const config2 = require("config");
+    if (config2.has("agent.ollama.url")) settings.url = config2.get("agent.ollama.url");
+    if (config2.has("agent.ollama.model")) settings.model = config2.get("agent.ollama.model");
+    if (config2.has("agent.ollama.numCtx")) settings.numCtx = config2.get("agent.ollama.numCtx");
+  } catch (e) {
+    logger.warn(`[OllamaClient] config unavailable, using defaults: ${e.message}`);
+  }
+  if (process.env.OLLAMA_URL) settings.url = process.env.OLLAMA_URL;
+  if (process.env.OLLAMA_MODEL) settings.model = process.env.OLLAMA_MODEL;
+  return settings;
+}
+let _autoModel = null;
+async function resolveModel(url, configuredModel) {
+  if (configuredModel) return configuredModel;
+  if (_autoModel) return _autoModel;
+  const res = await fetch(`${url}/api/tags`);
+  if (!res.ok) {
+    throw new Error(`Ollama /api/tags error ${res.status}`);
+  }
+  const data = await res.json();
+  const names = (data.models ?? []).map((m) => m.name);
+  if (names.length === 0) {
+    throw new Error("Ollama 已啟動但沒有安裝任何模型（ollama pull <model>）");
+  }
+  _autoModel = names.find((n) => n.toLowerCase().includes("qwen")) ?? names[0];
+  logger.info(`[OllamaClient] auto-selected model: ${_autoModel} (installed: ${names.join(", ")})`);
+  return _autoModel;
+}
+async function ollamaGenerateContent({ messages, systemInstruction, temperature = 0 }) {
+  const { url, model: configuredModel, numCtx } = loadSettings();
+  let model;
+  try {
+    model = await resolveModel(url, configuredModel);
+  } catch (e) {
+    throw new Error(`無法使用本地 Ollama（${url}）：${e.message}`);
+  }
+  const body = {
+    model,
+    stream: false,
+    // Reasoning models must not interleave thinking with the JSON/text output.
+    think: false,
+    messages: [{ role: "system", content: systemInstruction }, ...messages],
+    options: { temperature, num_ctx: numCtx }
+  };
+  logger.debug(`[OllamaClient] POST ${url}/api/chat model=${model} — ${messages.length} message(s)`);
+  const res = await fetch(`${url}/api/chat`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body)
+  });
+  if (!res.ok) {
+    const errText = await res.text();
+    throw new Error(`Ollama API error ${res.status}: ${errText}`);
+  }
+  const data = await res.json();
+  const text = (data.message?.content ?? "").replace(/<think>[\s\S]*?<\/think>/g, "").trim();
+  logger.debug(`[OllamaClient] response length=${text.length}`);
+  return text;
+}
+function resolveProvider() {
+  if (process.env.AGENT_PROVIDER) return process.env.AGENT_PROVIDER;
+  try {
+    const config2 = require("config");
+    if (config2.has("agent.provider")) return config2.get("agent.provider");
+  } catch (e) {
+    logger.warn(`[LlmClient] config unavailable, defaulting to ollama: ${e.message}`);
+  }
+  return "ollama";
+}
+async function llmGenerateContent(opts) {
+  const provider = resolveProvider();
+  if (provider === "gemini") return geminiGenerateContent(opts);
+  return ollamaGenerateContent(opts);
+}
 const PARSE_SYSTEM = `你是一個檔案搜尋助手。將使用者的自然語言查詢轉換成結構化 JSON 過濾條件。
 
 【可用欄位】
@@ -7562,11 +8034,14 @@ const PARSE_SYSTEM = `你是一個檔案搜尋助手。將使用者的自然語�
 - size.min / size.max (bytes): 檔案大小
 - desc.contains (string): 說明欄位關鍵字
 - uploader_name.contains (string): 上傳者名稱
-- any_text    (string): 跨欄位模糊搜尋（同時比對 name、desc、tags）
+- is_own      (true/false): true = 使用者自己的檔案；false = 別人分享的公開檔案
+- folder_path.contains (string): 自己檔案所在的資料夾路徑（別人的檔案沒有路徑）
+- any_text    (string): 跨欄位模糊搜尋（同時比對 name、desc、tags、folder_path）
 
 【重要規則】
 1. 分類標籤（海軍/陸軍/空軍等）一定要放在 tags.any，不要放在 name.contains
 2. 若使用者說「只找公開」→ is_public: true；說「私人/機密」→ is_public: false
+   說「我的/自己的檔案」→ is_own: true；說「別人的/其他人分享的」→ is_own: false
 3. 若使用者要求「不要某類型」，用 tags.none 排除
 4. 排序預設按相關度（不需指定），只有使用者明確說「按日期/大小」才用 sort
 
@@ -7582,12 +8057,14 @@ const PARSE_SYSTEM = `你是一個檔案搜尋助手。將使用者的自然語�
     "size":          { "min": 0, "max": 10485760 },
     "desc":          { "contains": "..." },
     "uploader_name": { "contains": "..." },
+    "is_own":        true,
+    "folder_path":   { "contains": "..." },
     "any_text":      "..."
   },
   "sort": { "field": "date", "order": "desc" }
 }
 只填有意義的欄位，其餘省略。無法判斷條件時回傳 { "intent": "...", "filters": {}, "sort": null }。`;
-const SUMMARY_SYSTEM = `你是一個友善的檔案搜尋助手，只能分析 metadata（檔名、標籤、日期、大小、公開狀態、說明、上傳者），不能讀取文件內容。
+const SUMMARY_SYSTEM = `你是一個友善的檔案搜尋助手，只能分析 metadata（檔名、標籤、日期、大小、公開狀態、說明、上傳者、位置：自己的資料夾或別人的公開檔案），不能讀取文件內容。
 用繁體中文、對話語氣（3-5句）總結搜尋結果：說明找到幾份檔案、最相關的是哪些、符合的原因是什麼（依相關度評分排序）。
 若無結果，說明可能原因並給出修改建議。簡潔回答，不要用 markdown 清單格式。`;
 function applyFilters(files, filters) {
@@ -7621,6 +8098,13 @@ function applyFilters(files, filters) {
     if (filters.desc?.contains) {
       if (!(f.desc ?? "").toLowerCase().includes(filters.desc.contains.toLowerCase())) return false;
     }
+    if (typeof filters.is_own === "boolean") {
+      if (f.is_own !== filters.is_own) return false;
+    }
+    if (filters.folder_path?.contains) {
+      if (!(f.folder_path ?? "").toLowerCase().includes(filters.folder_path.contains.toLowerCase()))
+        return false;
+    }
     if (filters.uploader_name?.contains) {
       if (!f.uploader_name.toLowerCase().includes(filters.uploader_name.contains.toLowerCase()))
         return false;
@@ -7630,7 +8114,9 @@ function applyFilters(files, filters) {
       const inName = f.name.toLowerCase().includes(q);
       const inDesc = (f.desc ?? "").toLowerCase().includes(q);
       const inTags = f.tags.some((t) => t.toLowerCase().includes(q));
-      if (!inName && !inDesc && !inTags) return false;
+      const inFolder = (f.folder_path ?? "").toLowerCase().includes(q);
+      const inOwner = (f.uploader_name ?? "").toLowerCase().includes(q);
+      if (!inName && !inDesc && !inTags && !inFolder && !inOwner) return false;
     }
     if (Array.isArray(filters.keywords) && filters.keywords.length > 0) {
       const matchesAny = filters.keywords.some((kw) => {
@@ -7755,6 +8241,23 @@ function parseJsonFromText(text) {
   const cleaned = text.replace(/^```[a-z]*\n?/i, "").replace(/\n?```$/i, "").trim();
   return JSON.parse(cleaned);
 }
+function normalizeFilters(filters) {
+  if (!filters || typeof filters !== "object") return filters;
+  for (const key of Object.keys(filters)) {
+    const dot = key.indexOf(".");
+    if (dot <= 0) continue;
+    const parent = key.slice(0, dot);
+    const child = key.slice(dot + 1);
+    if (typeof filters[parent] !== "object" || filters[parent] === null) {
+      filters[parent] = {};
+    }
+    if (filters[parent][child] === void 0) {
+      filters[parent][child] = filters[key];
+    }
+    delete filters[key];
+  }
+  return filters;
+}
 async function runAgentTurn({ userMessage, history, files }) {
   const parseMessages = [
     ...history.slice(-6),
@@ -7763,12 +8266,13 @@ async function runAgentTurn({ userMessage, history, files }) {
   let parsedQuery = { intent: userMessage, filters: {}, sort: null };
   let llmAvailable = true;
   try {
-    const parseRaw = await geminiGenerateContent({
+    const parseRaw = await llmGenerateContent({
       messages: parseMessages,
       systemInstruction: PARSE_SYSTEM,
       temperature: 0
     });
     parsedQuery = parseJsonFromText(parseRaw);
+    parsedQuery.filters = normalizeFilters(parsedQuery.filters);
     logger.debug(`[AgentService] parsed query: ${JSON.stringify(parsedQuery)}`);
   } catch (e) {
     llmAvailable = false;
@@ -7788,7 +8292,7 @@ async function runAgentTurn({ userMessage, history, files }) {
     `[AgentService] filter: ${files.length} → ${filtered.length}, top scores: ${topResults.slice(0, 3).map((f) => f._score).join(", ")}`
   );
   const resultSummaryForLlm = topResults.length === 0 ? "查無符合條件的檔案。" : topResults.map(
-    (f, i) => `${i + 1}. [相關分:${f._score}] ${f.name} | 類型:${f.file_type.toUpperCase() || "未知"} | 大小:${f.sizeLabel} | 上傳:${f.upload_time} | 公開:${f.is_public ? "是" : "否"} | 上傳者:${f.uploader_name}` + (f.tags.length ? ` | 標籤:${f.tags.join(",")}` : "") + (f.desc ? ` | 說明:${f.desc.slice(0, 80)}` : "")
+    (f, i) => `${i + 1}. [相關分:${f._score}] ${f.name} | 類型:${f.file_type.toUpperCase() || "未知"} | 大小:${f.sizeLabel} | 上傳:${f.upload_time} | 公開:${f.is_public ? "是" : "否"} | 上傳者:${f.uploader_name} | 位置:${f.location ?? ""}` + (f.tags.length ? ` | 標籤:${f.tags.join(",")}` : "") + (f.desc ? ` | 說明:${f.desc.slice(0, 80)}` : "")
   ).join("\n");
   const summaryUserMsg = `使用者查詢：「${userMessage}」
 解析意圖：${parsedQuery.intent ?? ""}
@@ -7805,7 +8309,7 @@ ${resultSummaryForLlm}`;
     }
   } else {
     try {
-      summary = await geminiGenerateContent({
+      summary = await llmGenerateContent({
         messages: [{ role: "user", content: summaryUserMsg }],
         systemInstruction: SUMMARY_SYSTEM,
         temperature: 0.3
@@ -7823,27 +8327,564 @@ ${resultSummaryForLlm}`;
     parsedQuery
   };
 }
+const ACK_TIMEOUT_MS = 15e3;
+function emitWithAck(event, payload) {
+  return new Promise((resolve, reject) => {
+    socket.timeout(ACK_TIMEOUT_MS).emit(event, payload, (timeoutErr, response) => {
+      if (timeoutErr) return reject(new Error("Server did not respond."));
+      if (response?.errorMsg) return reject(new Error(response.errorMsg));
+      resolve(response ?? {});
+    });
+  });
+}
+function safeFilePart(value) {
+  return String(value || "user").replace(/[\\/:*?"<>|\s]+/g, "_").slice(0, 40);
+}
+let _registered$2 = false;
+function registerAdminIpcOnce() {
+  if (_registered$2) return;
+  _registered$2 = true;
+  electron.ipcMain.handle("admin:list-users", async () => {
+    try {
+      const { users } = await emitWithAck("admin-list-users", {});
+      return { ok: true, users: Array.isArray(users) ? users : [] };
+    } catch (e) {
+      logger.error(`[AdminIpc] list-users: ${e.message}`);
+      return { ok: false, error: e.message };
+    }
+  });
+  electron.ipcMain.handle("admin:export-conversations", async (_event, { userId, userName } = {}) => {
+    try {
+      const data = await emitWithAck("admin-export-conversations", { userId });
+      const date = (/* @__PURE__ */ new Date()).toISOString().slice(0, 10);
+      const defaultName = `對話紀錄_${safeFilePart(userName || data.user?.name)}_${date}.json`;
+      const opts = {
+        title: "儲存對話紀錄",
+        defaultPath: path$1.join(electron.app.getPath("downloads"), defaultName),
+        filters: [{ name: "JSON", extensions: ["json"] }]
+      };
+      const win = GlobalValueManager$1.mainWindow;
+      const { canceled, filePath } = win ? await electron.dialog.showSaveDialog(win, opts) : await electron.dialog.showSaveDialog(opts);
+      if (canceled || !filePath) return { ok: true, canceled: true };
+      await promises.writeFile(filePath, JSON.stringify(data, null, 2), "utf8");
+      const count = Array.isArray(data.messages) ? data.messages.length : 0;
+      logger.info(`[AdminIpc] exported ${count} message(s) of ${userId} to ${filePath}`);
+      return { ok: true, path: filePath, count };
+    } catch (e) {
+      logger.error(`[AdminIpc] export-conversations: ${e.message}`);
+      return { ok: false, error: e.message };
+    }
+  });
+  electron.ipcMain.handle("admin:user-download-logs", async (_event, { userId } = {}) => {
+    try {
+      const { logs } = await emitWithAck("admin-user-download-logs", { userId });
+      return { ok: true, logs: Array.isArray(logs) ? logs : [] };
+    } catch (e) {
+      logger.error(`[AdminIpc] user-download-logs: ${e.message}`);
+      return { ok: false, error: e.message };
+    }
+  });
+}
 let _databaseManager = null;
-let _registered = false;
+let _fileManager = null;
+let _registered$1 = false;
+function setFileManagerForAgentIpc(fileManager2) {
+  _fileManager = fileManager2;
+}
 function setDatabaseManagerForAgentIpc(databaseManager2) {
   _databaseManager = databaseManager2;
 }
 function registerAgentIpcOnce() {
-  if (_registered) return;
-  _registered = true;
-  electron.ipcMain.handle("agent:query", async (_event, { userMessage, history = [], rawFiles = [], uploaderName = "" }) => {
+  if (_registered$1) return;
+  _registered$1 = true;
+  electron.ipcMain.handle("agent:log", async (_event, payload) => {
+    try {
+      await emitWithAck("agent-log", payload);
+      return { ok: true };
+    } catch (e) {
+      logger.warn(`[AgentIpc] agent:log failed: ${e.message}`);
+      return { ok: false, error: e.message };
+    }
+  });
+  electron.ipcMain.handle("agent:my-history", async (_event, { limit } = {}) => {
+    try {
+      const { conversations } = await emitWithAck("agent-my-history", limit ? { limit } : {});
+      return { ok: true, conversations: Array.isArray(conversations) ? conversations : [] };
+    } catch (e) {
+      logger.warn(`[AgentIpc] agent:my-history failed: ${e.message}`);
+      return { ok: false, error: e.message };
+    }
+  });
+  electron.ipcMain.handle("agent:file-scope", async () => {
+    try {
+      if (!_fileManager) throw new Error("FileManager not ready");
+      const { files, folders } = await _fileManager.getAgentFileScopeProcess();
+      return { ok: true, files, folders };
+    } catch (e) {
+      logger.warn(`[AgentIpc] agent:file-scope failed: ${e.message}`);
+      return { ok: false, error: e.message };
+    }
+  });
+  electron.ipcMain.handle("agent:query", async (_event, { userMessage, history = [], rawFiles = [], folders = [], uploaderName = "", currentUserId = "" }) => {
     try {
       logger.info(`[AgentIpc] agent:query — "${userMessage.slice(0, 80)}"`);
-      const publicOnly = rawFiles.filter((f) => (f.perm ?? f.permissions ?? 0) === 1);
-      logger.debug(`[AgentIpc] total=${rawFiles.length}, public=${publicOnly.length}`);
-      const files = buildSearchableMetadata(publicOnly, _databaseManager, uploaderName);
+      const provider = resolveProvider();
+      const searchable = provider === "gemini" ? rawFiles.filter((f) => (f.perm ?? f.permissions ?? 0) === 1) : rawFiles;
+      logger.debug(
+        `[AgentIpc] provider=${provider}, total=${rawFiles.length}, searchable=${searchable.length}`
+      );
+      const files = buildSearchableMetadata(searchable, _databaseManager, {
+        uploaderName,
+        folders,
+        currentUserId
+      });
       const result = await runAgentTurn({ userMessage, history, files });
-      return { ok: true, ...result };
+      return { ok: true, provider, ...result };
     } catch (e) {
       logger.error(`[AgentIpc] agent:query error: ${e.message}`);
       return { ok: false, error: e.message };
     }
   });
+}
+const DEFAULT_RP_ID = "secure-cloud-storage.local";
+const DEFAULT_TIMEOUT_MS = 12e4;
+const EXTRA_KEY_INFO = "secure-cloud-storage/recovery/fido-v1";
+class FidoError extends Error {
+  /**
+   * @param {string} code e.g. NO_DEVICE, PIN_INVALID, UV_FAILED, WRONG_KEY, CANCELLED, TIMEOUT
+   * @param {string} message
+   */
+  constructor(code, message) {
+    super(message);
+    this.name = "FidoError";
+    this.code = code;
+  }
+}
+function resolveHelperPath({ appPath, resourcesPath }) {
+  const candidates = [
+    path$1.join(appPath.replace(/app\.asar$/, "app.asar.unpacked"), "resources", "fido", "fido_helper.py"),
+    path$1.join(appPath, "resources", "fido", "fido_helper.py")
+  ];
+  if (resourcesPath) candidates.push(path$1.join(resourcesPath, "fido", "fido_helper.py"));
+  return candidates.find((p) => fs.existsSync(p)) ?? candidates[0];
+}
+function resolvePythonPath(env = process.env) {
+  if (env.SCS_FIDO_PYTHON) return env.SCS_FIDO_PYTHON;
+  const candidates = [
+    "/Library/Frameworks/Python.framework/Versions/Current/bin/python3",
+    "/opt/homebrew/bin/python3",
+    "/usr/local/bin/python3"
+  ];
+  return candidates.find((p) => fs.existsSync(p)) ?? "python3";
+}
+function deriveExtraKeyFromFidoSecret(secret) {
+  if (!Buffer.isBuffer(secret) || secret.length < 32) {
+    throw new FidoError("BAD_SECRET", "FIDO secret must be a Buffer of at least 32 bytes");
+  }
+  const okm = Buffer.from(crypto$1.hkdfSync("sha256", secret, Buffer.alloc(0), EXTRA_KEY_INFO, 32));
+  const hex = okm.toString("hex");
+  okm.fill(0);
+  return hex;
+}
+const b64u = (buf) => Buffer.from(buf).toString("base64url");
+class FidoProvider {
+  /**
+   * @param {{ helperPath: string, pythonPath?: string, rpId?: string, timeoutMs?: number,
+   *           logger?: { info: Function, warn: Function, error: Function } }} opts
+   */
+  constructor({
+    helperPath,
+    pythonPath,
+    rpId = DEFAULT_RP_ID,
+    timeoutMs = DEFAULT_TIMEOUT_MS,
+    logger: logger2
+  } = {}) {
+    if (!helperPath) throw new Error("FidoProvider requires helperPath");
+    this.helperPath = helperPath;
+    this.pythonPath = pythonPath ?? resolvePythonPath();
+    this.rpId = rpId;
+    this.timeoutMs = timeoutMs;
+    this.logger = logger2 ?? console;
+    this._current = null;
+  }
+  /** Key capabilities and PIN / fingerprint state. No touch needed. */
+  async getInfo() {
+    return this._run({ cmd: "info" });
+  }
+  /**
+   * Binding: create a credential on the key and derive the device secret.
+   * @param {{ challenge: Buffer, userId: Buffer, userName: string, salt: Buffer, rpId?: string }} params
+   *   rpId defaults to the one given to the constructor; the server's value should be passed.
+   * @param {FidoHandlers} [handlers]
+   * @returns {Promise<{ credential: { id: string, clientDataJSON: string, attestationObject: string }, secret: Buffer }>}
+   *   `credential` goes to the server; `secret` stays in memory on the client.
+   */
+  async register({ challenge, userId, userName, salt, rpId = this.rpId }, handlers) {
+    const res = await this._run(
+      {
+        cmd: "register",
+        rpId,
+        challenge: b64u(challenge),
+        userId: b64u(userId),
+        userName,
+        salt: b64u(salt)
+      },
+      handlers
+    );
+    return { credential: res.credential, secret: Buffer.from(res.secret, "base64url") };
+  }
+  /**
+   * Recovery: fingerprint on the key and re-derive the same device secret.
+   * @param {{ challenge: Buffer, credentialIds: string[], salt: Buffer, rpId?: string }} params credentialIds are base64url
+   * @param {FidoHandlers} [handlers]
+   * @returns {Promise<{ assertion: { id: string, clientDataJSON: string, authenticatorData: string, signature: string, userHandle: string|null }, secret: Buffer }>}
+   */
+  async authenticate({ challenge, credentialIds, salt, rpId = this.rpId }, handlers) {
+    const res = await this._run(
+      {
+        cmd: "authenticate",
+        rpId,
+        challenge: b64u(challenge),
+        credentialIds,
+        salt: b64u(salt)
+      },
+      handlers
+    );
+    return { assertion: res.assertion, secret: Buffer.from(res.secret, "base64url") };
+  }
+  /** Set the PIN on a key that has none. */
+  async setPin(pin) {
+    return this._run({ cmd: "set-pin", pin });
+  }
+  /**
+   * Enroll one fingerprint. The helper asks for the PIN through handlers.requestPin.
+   * @param {{ name?: string }} params
+   * @param {FidoHandlers} handlers
+   */
+  async enrollFingerprint({ name } = {}, handlers) {
+    return this._run({ cmd: "enroll", name }, handlers);
+  }
+  /** Abort the running operation, e.g. when the user closes the dialog. */
+  cancel() {
+    if (this._current) this._current.kill("CANCELLED", "Operation cancelled");
+  }
+  _run(request, handlers = {}) {
+    if (this._current) {
+      return Promise.reject(new FidoError("BUSY", "Another security key operation is running"));
+    }
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      let stdoutBuf = "";
+      let stderrBuf = "";
+      const child = node_child_process.spawn(this.pythonPath, [this.helperPath], {
+        stdio: ["pipe", "pipe", "pipe"],
+        env: { ...process.env, PYTHONUNBUFFERED: "1", PYTHONIOENCODING: "utf-8" }
+      });
+      const finish = (err, value) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        this._current = null;
+        if (child.exitCode === null) child.kill();
+        err ? reject(err) : resolve(value);
+      };
+      const timer = setTimeout(
+        () => finish(new FidoError("TIMEOUT", "Security key operation timed out")),
+        this.timeoutMs
+      );
+      this._current = { kill: (code, msg) => finish(new FidoError(code, msg)) };
+      const write = (obj) => {
+        if (!child.stdin.destroyed) child.stdin.write(JSON.stringify(obj) + "\n");
+      };
+      const onMessage = async (msg) => {
+        switch (msg.type) {
+          case "event":
+            try {
+              handlers.onEvent?.(msg);
+            } catch (e) {
+              this.logger.warn?.(`FidoProvider onEvent handler threw: ${e}`);
+            }
+            break;
+          case "pin-request": {
+            let pin = null;
+            try {
+              pin = handlers.requestPin ? await handlers.requestPin({ retries: msg.retries }) : null;
+            } catch {
+              pin = null;
+            }
+            write({ pin: pin || null });
+            break;
+          }
+          case "result": {
+            const { type, ...rest } = msg;
+            finish(null, rest);
+            break;
+          }
+          case "error":
+            finish(new FidoError(msg.code || "HELPER_ERROR", msg.message || "FIDO helper error"));
+            break;
+          default:
+            this.logger.warn?.(`FidoProvider: unknown helper message type ${msg.type}`);
+        }
+      };
+      child.stdout.setEncoding("utf8");
+      child.stdout.on("data", (chunk) => {
+        stdoutBuf += chunk;
+        let idx;
+        while ((idx = stdoutBuf.indexOf("\n")) >= 0) {
+          const line = stdoutBuf.slice(0, idx).trim();
+          stdoutBuf = stdoutBuf.slice(idx + 1);
+          if (!line) continue;
+          let msg;
+          try {
+            msg = JSON.parse(line);
+          } catch {
+            this.logger.warn?.("FidoProvider: non-JSON line from helper ignored");
+            continue;
+          }
+          onMessage(msg);
+        }
+      });
+      child.stderr.setEncoding("utf8");
+      child.stderr.on("data", (chunk) => {
+        stderrBuf = (stderrBuf + chunk).slice(-4e3);
+      });
+      child.on("error", (err) => {
+        finish(
+          new FidoError(
+            "HELPER_START_FAILED",
+            `Could not start FIDO helper with ${this.pythonPath}: ${err.message}`
+          )
+        );
+      });
+      child.on("close", (code) => {
+        if (!settled) {
+          if (stderrBuf) this.logger.error?.(`FIDO helper stderr: ${stderrBuf}`);
+          finish(
+            new FidoError("HELPER_CRASHED", `FIDO helper exited with code ${code} without a result`)
+          );
+        }
+      });
+      child.stdin.on("error", () => {
+      });
+      write(request);
+    });
+  }
+}
+const SHARE_THRESHOLD = 2;
+const RP_ID_PATTERN = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$/i;
+const fromB64u = (value) => Buffer.from(value, "base64url");
+class RecoveryFlowError extends Error {
+  constructor(code, message) {
+    super(message);
+    this.name = "RecoveryFlowError";
+    this.code = code;
+  }
+}
+function checkRpId(rpId) {
+  if (typeof rpId !== "string" || rpId.length > 253 || !RP_ID_PATTERN.test(rpId)) {
+    throw new RecoveryFlowError("BAD_SERVER_RESPONSE", "Server sent an invalid rpId");
+  }
+}
+function toExtraKey(secret) {
+  try {
+    return deriveExtraKeyFromFidoSecret(secret);
+  } finally {
+    secret.fill(0);
+  }
+}
+class RecoveryManager {
+  /**
+   * @param {object} deps
+   * @param {(event: string, payload?: object) => Promise<object>} deps.emit
+   *   Socket emit with ack. Must reject when the server answers with errorMsg.
+   * @param {import('./FidoProvider.js').default} deps.fido
+   * @param {() => { walletKey: string, preKeys: object }} deps.getSecretKeys
+   *   Secrets of the logged-in user, the same object the password backup encrypts.
+   * @param {(extraKey: string, dataStr: string) => Promise<Buffer[]>} deps.encryptShares
+   *   SecretSharing.encryptDataShareKey
+   * @param {(extraKey: string, shares: Buffer[]) => Promise<void>} deps.restoreFromShares
+   *   LoginManager.restoreFromShares: decrypt, restore keys, log in
+   */
+  constructor({ emit, fido, getSecretKeys, encryptShares, restoreFromShares }) {
+    this.emit = emit;
+    this.fido = fido;
+    this.getSecretKeys = getSecretKeys;
+    this.encryptShares = encryptShares;
+    this.restoreFromShares = restoreFromShares;
+  }
+  /** Recovery methods of the logged-in user: [{ id, type, label, createdAt, lastUsedAt, sharesAvailable }]. */
+  async listMethods() {
+    const { methods } = await this.emit("recovery-methods", {});
+    return Array.isArray(methods) ? methods : [];
+  }
+  /**
+   * Bind the connected security key as a recovery method.
+   * @param {{ label?: string }} params
+   * @param {import('./FidoProvider.js').FidoHandlers} [handlers] progress events and PIN requests
+   * @returns {Promise<{ id: string, type: string, label: string, sharesStored: number }>}
+   */
+  async bindSecurityKey({ label } = {}, handlers) {
+    const labelPayload = label ? { label } : {};
+    const begin = await this.emit("fido-bind-begin", labelPayload);
+    checkRpId(begin.rpId);
+    const { credential, secret } = await this.fido.register(
+      {
+        rpId: begin.rpId,
+        challenge: fromB64u(begin.challenge),
+        userId: fromB64u(begin.userId),
+        userName: begin.userName,
+        salt: fromB64u(begin.salt)
+      },
+      handlers
+    );
+    const extraKey = toExtraKey(secret);
+    const shares = await this.encryptShares(extraKey, JSON.stringify(this.getSecretKeys()));
+    const { method } = await this.emit("fido-bind-finish", {
+      credential,
+      shares: shares.map((share) => Buffer.from(share).toString("base64")),
+      ...labelPayload
+    });
+    return method;
+  }
+  /** Remove a bound security key and its shares. */
+  async deleteMethod({ methodId }) {
+    await this.emit("recovery-method-delete", { methodId });
+  }
+  /**
+   * Recover the account with a bound security key. Call after the email OTP of
+   * secret-recover succeeded on this connection.
+   * @param {{ methodId: string }} params one of the fido methods returned with the OTP result
+   * @param {import('./FidoProvider.js').FidoHandlers} [handlers]
+   */
+  async recoverWithSecurityKey({ methodId }, handlers) {
+    const begin = await this.emit("fido-recover-begin", { methodId });
+    checkRpId(begin.rpId);
+    const { assertion, secret } = await this.fido.authenticate(
+      {
+        rpId: begin.rpId,
+        challenge: fromB64u(begin.challenge),
+        credentialIds: begin.credentialIds,
+        salt: fromB64u(begin.salt)
+      },
+      handlers
+    );
+    const extraKey = toExtraKey(secret);
+    const { shares } = await this.emit("fido-recover-finish", { assertion });
+    if (!Array.isArray(shares) || shares.length < SHARE_THRESHOLD) {
+      throw new RecoveryFlowError(
+        "NOT_ENOUGH_SHARES",
+        "Not enough secret shares are available. Please contact the server manager."
+      );
+    }
+    try {
+      await this.restoreFromShares(
+        extraKey,
+        shares.map((share) => Buffer.from(share, "base64"))
+      );
+    } catch (error) {
+      throw new RecoveryFlowError("RESTORE_FAILED", error?.message || "Could not restore the keys.");
+    }
+  }
+  // Key management used by the setup UI (stage 4).
+  getKeyInfo() {
+    return this.fido.getInfo();
+  }
+  setPin({ pin }) {
+    return this.fido.setPin(pin);
+  }
+  enrollFingerprint({ name } = {}, handlers) {
+    return this.fido.enrollFingerprint({ name }, handlers);
+  }
+  cancel() {
+    this.fido.cancel();
+  }
+}
+const PIN_REQUEST_TIMEOUT_MS = 12e4;
+const pendingPinRequests = /* @__PURE__ */ new Map();
+function sendToRenderer(channel, payload) {
+  const win = GlobalValueManager$1.mainWindow;
+  if (win && !win.isDestroyed()) win.webContents.send(channel, payload);
+}
+function requestPinFromRenderer({ retries }) {
+  const win = GlobalValueManager$1.mainWindow;
+  if (!win || win.isDestroyed()) return Promise.resolve(null);
+  const requestId = crypto$1.randomUUID();
+  return new Promise((resolve) => {
+    const finish = (pin) => {
+      clearTimeout(timer);
+      pendingPinRequests.delete(requestId);
+      resolve(pin);
+    };
+    const timer = setTimeout(() => finish(null), PIN_REQUEST_TIMEOUT_MS);
+    pendingPinRequests.set(requestId, finish);
+    win.webContents.send("recovery:pin-request", { requestId, retries });
+  });
+}
+const keyHandlers = {
+  onEvent: (evt) => sendToRenderer("recovery:fido-event", evt),
+  requestPin: requestPinFromRenderer
+};
+function toFailure(error) {
+  if (error instanceof FidoError || error instanceof RecoveryFlowError) {
+    return { ok: false, code: error.code, error: error.message };
+  }
+  return { ok: false, code: "SERVER", error: error?.message || "Unexpected error." };
+}
+function handle(channel, fn) {
+  electron.ipcMain.handle(channel, async (_event, values = {}) => {
+    try {
+      return { ok: true, ...await fn(values ?? {}) ?? {} };
+    } catch (error) {
+      logger.error(`[RecoveryIpc] ${channel}: ${error?.code ?? ""} ${error?.message}`);
+      return toFailure(error);
+    }
+  });
+}
+let _registered = false;
+function registerRecoveryIpcOnce(loginManager2) {
+  if (_registered) return;
+  _registered = true;
+  const fido = new FidoProvider({
+    helperPath: resolveHelperPath({
+      appPath: electron.app.getAppPath(),
+      resourcesPath: process.resourcesPath
+    }),
+    logger
+  });
+  const recovery = new RecoveryManager({
+    emit: emitWithAck,
+    fido,
+    getSecretKeys: () => loginManager2.getSecretKeys(),
+    encryptShares: encryptDataShareKey,
+    restoreFromShares: (extraKey, shares) => loginManager2.restoreFromShares(extraKey, shares)
+  });
+  handle("recovery:list-methods", async () => ({ methods: await recovery.listMethods() }));
+  handle("recovery:bind-key", async ({ label }) => ({
+    method: await recovery.bindSecurityKey({ label }, keyHandlers)
+  }));
+  handle("recovery:delete-method", async ({ methodId }) => {
+    await recovery.deleteMethod({ methodId });
+  });
+  handle("recovery:recover-with-key", async ({ methodId }) => {
+    await recovery.recoverWithSecurityKey({ methodId }, keyHandlers);
+  });
+  handle("recovery:key-info", async () => ({ info: await recovery.getKeyInfo() }));
+  handle("recovery:set-pin", async ({ pin }) => {
+    await recovery.setPin({ pin });
+  });
+  handle(
+    "recovery:enroll-fingerprint",
+    async ({ name }) => recovery.enrollFingerprint({ name }, keyHandlers)
+  );
+  electron.ipcMain.on("recovery:cancel", () => {
+    for (const finish of pendingPinRequests.values()) finish(null);
+    recovery.cancel();
+  });
+  electron.ipcMain.on("recovery:pin-response", (_event, { requestId, pin } = {}) => {
+    pendingPinRequests.get(requestId)?.(typeof pin === "string" && pin.length > 0 ? pin : null);
+  });
+  logger.info(`[RecoveryIpc] registered, helper: ${fido.helperPath}`);
 }
 class BatchDownloadManager {
   /** @param {import('./FileManager').default} fileManager */
@@ -8099,9 +9140,13 @@ electron.app.whenReady().then(() => {
     "download-with-options",
     (_event, opts) => fileManager.downloadFileWithOptionsProcess(opts)
   );
+  const showOpenDialogModal = (opts) => {
+    const win = GlobalValueManager$1.mainWindow;
+    return win ? electron.dialog.showOpenDialog(win, opts) : electron.dialog.showOpenDialog(opts);
+  };
   electron.ipcMain.handle("pick-download-folder", async (_event, defaultPath) => {
     const useDefault = typeof defaultPath === "string" && defaultPath.length > 0 && fs.existsSync(defaultPath);
-    const result = await electron.dialog.showOpenDialog({
+    const result = await showOpenDialogModal({
       title: "選擇批次下載儲存資料夾",
       properties: ["openDirectory", "createDirectory"],
       defaultPath: useDefault ? defaultPath : electron.app.getPath("downloads")
@@ -8112,7 +9157,7 @@ electron.app.whenReady().then(() => {
   electron.ipcMain.handle("download-batch-with-options", async (_event, opts) => {
     let destDir = opts?.destDir;
     if (!destDir || !fs.existsSync(destDir) || !fs.statSync(destDir).isDirectory()) {
-      const result = await electron.dialog.showOpenDialog({
+      const result = await showOpenDialogModal({
         title: "選擇批次下載儲存資料夾",
         properties: ["openDirectory", "createDirectory"],
         defaultPath: electron.app.getPath("downloads")
@@ -8205,6 +9250,9 @@ electron.app.whenReady().then(() => {
   setFileManagerForUploadPostIpc(fileManager);
   registerAgentIpcOnce();
   setDatabaseManagerForAgentIpc(databaseManager);
+  setFileManagerForAgentIpc(fileManager);
+  registerAdminIpcOnce();
+  registerRecoveryIpcOnce(loginManager);
   createWindow();
   electron.app.on("activate", function() {
     if (electron.BrowserWindow.getAllWindows().length === 0) createWindow();

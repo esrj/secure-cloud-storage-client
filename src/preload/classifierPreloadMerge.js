@@ -22,6 +22,8 @@ export function mergeClassifierApisIntoElectronApi(electronApi) {
   electronApi.classifyDocuments = (input) => ipcRenderer.invoke('classify-documents', input)
   electronApi.preuploadClassifyGetSnapshot = (batchKey) =>
     ipcRenderer.invoke('preupload-classify-snapshot', batchKey)
+  electronApi.preuploadClassifyClear = (batchKey) =>
+    ipcRenderer.invoke('preupload-classify-clear', batchKey)
   electronApi.startUploadFromFileList = (folderId) =>
     ipcRenderer.invoke('file-manager:start-upload', folderId)
   electronApi.requestFileList = (folderId) =>

@@ -50,6 +50,11 @@ function FileResultCard({ file, currentUserId }) {
           <span className="rounded-full bg-blue-gray-50 px-2 py-0.5 text-xs text-blue-gray-600">
             {file.permLabel}
           </span>
+          {file.location && (
+            <span className="rounded-full bg-amber-50 px-2 py-0.5 text-xs text-amber-800">
+              {file.location}
+            </span>
+          )}
           {file.ext && (
             <span className="rounded-full bg-indigo-50 px-2 py-0.5 text-xs font-medium text-indigo-700 uppercase">
               {file.ext}
@@ -115,6 +120,8 @@ FileResultCard.propTypes = {
     permLabel: PropTypes.string,
     tags: PropTypes.arrayOf(PropTypes.string),
     desc: PropTypes.string,
+    location: PropTypes.string,
+    uploader_name: PropTypes.string,
     uploader_id: PropTypes.string
   }).isRequired,
   currentUserId: PropTypes.string

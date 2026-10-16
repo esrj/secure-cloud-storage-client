@@ -21,23 +21,16 @@
  *  - TXT   : Marker line appended at end: "# Watermark: <text>".
  *            Position, opacity, and fontSize settings are not applicable to plain text.
  */
+import { PDFDocument, rgb, degrees, StandardFonts } from 'pdf-lib'
 import {
-  PDFDocument,
-  rgb,
-  degrees,
-  StandardFonts,
-  TextRenderingMode,
-  pushGraphicsState,
-  popGraphicsState,
-  beginText,
-  endText,
-  setFillingColor,
-  setFontAndSize,
-  showText,
-  rotateAndSkewTextRadiansAndTranslate,
-  setTextRenderingMode
-} from 'pdf-lib'
-import Jimp from 'jimp'
+  Jimp,
+  JimpMime,
+  BlendMode,
+  loadFont,
+  measureText,
+  measureTextHeight
+} from 'jimp'
+import { SANS_8_WHITE, SANS_16_WHITE, SANS_32_WHITE } from 'jimp/fonts'
 import JSZip from 'jszip'
 import { logger } from './Logger'
 
@@ -84,6 +77,26 @@ export function isWatermarkSupported(filename) {
   return WATERMARK_SUPPORTED_MIMES.includes(getMimeFromFilename(filename))
 }
 
+/**
+ * Detect the actual content type from the file's leading "magic bytes".
+ * Used to override a misleading filename extension (e.g. a PDF stored with a
+ * `.png` name) so we watermark with the correct engine instead of feeding a
+ * PDF buffer to the image decoder (Jimp), which throws
+ * "Mime type application/pdf does not support decoding".
+ *
+ * @param {Buffer|Uint8Array} buf
+ * @returns {string|null} a sniffed mime ('application/pdf' | 'image/png' |
+ *   'image/jpeg'), or null when the bytes aren't one of those (caller then
+ *   falls back to the filename-based type, which is correct for DOCX/TXT).
+ */
+export function getMimeFromBuffer(buf) {
+  if (!buf || buf.length < 4) return null
+  if (buf[0] === 0x25 && buf[1] === 0x50 && buf[2] === 0x44 && buf[3] === 0x46) return 'application/pdf' // %PDF
+  if (buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47) return 'image/png' // \x89PNG
+  if (buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return 'image/jpeg' // JPEG SOI
+  return null
+}
+
 // ══════════════════════════════════════════════════════════════
 // VISIBLE WATERMARK
 // ══════════════════════════════════════════════════════════════
@@ -112,7 +125,12 @@ async function _watermarkPDF(inputBuffer, { text, position = 'bottomRight', opac
   // notes etc.) are replaced with '?' by _toAsciiSafe so the user can see
   // *something* changed. The base uid/fid/ts payload is always ASCII.
   const safeText = _toAsciiSafe(text)
-  const pdfDoc = await PDFDocument.load(inputBuffer)
+  // ignoreEncryption: some real-world PDFs carry an encryption dictionary
+  // (e.g. owner-password permission flags) even with no open password. Without
+  // this flag pdf-lib throws on load, which would abort the whole watermarked
+  // download and leave NO file at the destination. The bytes are already E2E
+  // -decrypted on the client, so reading them here is safe.
+  const pdfDoc = await PDFDocument.load(inputBuffer, { ignoreEncryption: true })
   const font = await pdfDoc.embedFont(StandardFonts.Helvetica)
   const color = rgb(0.4, 0.4, 0.4)
 
@@ -156,16 +174,16 @@ async function _watermarkImage(inputBuffer, mimeType, { text, position = 'bottom
   const w = image.bitmap.width
   const h = image.bitmap.height
 
-  let fontKey
-  if (fontSize >= 32) fontKey = Jimp.FONT_SANS_32_WHITE
-  else if (fontSize >= 16) fontKey = Jimp.FONT_SANS_16_WHITE
-  else fontKey = Jimp.FONT_SANS_8_WHITE
+  let fontDef
+  if (fontSize >= 32) fontDef = SANS_32_WHITE
+  else if (fontSize >= 16) fontDef = SANS_16_WHITE
+  else fontDef = SANS_8_WHITE
 
-  const font = await Jimp.loadFont(fontKey)
-  const textW = Jimp.measureText(font, safeText)
-  const textH = Jimp.measureTextHeight(font, safeText, w + 1)
+  const font = await loadFont(fontDef)
+  const textW = measureText(font, safeText)
+  const textH = measureTextHeight(font, safeText, w + 1)
 
-  const overlay = new Jimp(w, h, 0x00000000)
+  const overlay = new Jimp({ width: w, height: h, color: 0x00000000 })
 
   let x = 20
   let y = Math.max(0, h - textH - 20)
@@ -176,7 +194,7 @@ async function _watermarkImage(inputBuffer, mimeType, { text, position = 'bottom
     y = Math.max(0, (h - textH) / 2)
   }
 
-  overlay.print(font, x, y, safeText)
+  overlay.print({ font, x, y, text: safeText })
 
   const clampedOpacity = Math.min(1, Math.max(0, opacity))
   overlay.scan(0, 0, w, h, function (px, py, idx) {
@@ -187,13 +205,18 @@ async function _watermarkImage(inputBuffer, mimeType, { text, position = 'bottom
   })
 
   image.composite(overlay, 0, 0, {
-    mode: Jimp.BLEND_SOURCE_OVER,
+    mode: BlendMode.SRC_OVER,
     opacitySource: 1,
     opacityDest: 1
   })
 
-  const jimpMime = mimeType === 'image/png' ? Jimp.MIME_PNG : Jimp.MIME_JPEG
-  return image.getBufferAsync(jimpMime)
+  // Pixels only here. The machine-readable VISIBLE metadata marker is written
+  // centrally by applyImageWatermarkMarkers, so that markers reflect EXACTLY
+  // what this download applied (and never leak a stale marker from the source).
+  if (mimeType === 'image/png') {
+    return image.getBuffer(JimpMime.png)
+  }
+  return image.getBuffer(JimpMime.jpeg, { quality: 95 })
 }
 
 // ──────────────────────────────────────────────────────────────
@@ -276,43 +299,55 @@ export async function applyInvisibleWatermark(inputBuffer, mimeType, opts) {
 }
 
 // ──────────────────────────────────────────────────────────────
-// PDF invisible: TextRenderingMode.Invisible (PDF spec mode 3).
-// pdf-lib's drawText() ignores renderingMode, so we emit operators explicitly.
+// PDF invisible: document Keywords metadata + fully-transparent (opacity 0)
+// normal-mode text. (The older mode-3 "invisible" text rendering is NOT
+// extracted by browser pdfjs, so it was undetectable — see _invisiblePDF body.)
 //
 // Defence-in-depth: caller (`_buildInvisibleWmText`) already produces an
 // ASCII-only string, but we sanitize here too — the bundled Helvetica
 // (StandardFonts) can only encode WinAnsi, and one non-ASCII char anywhere
-// in `text` makes `font.encodeText(text)` throw. Replacing rather than
-// stripping preserves text length so the existing detector heuristics still
-// work and the failure mode is "garbled char" instead of "vanished".
+// in `text` makes drawText throw. Replacing rather than stripping preserves
+// text length so the detector heuristics still work.
 // ──────────────────────────────────────────────────────────────
 async function _invisiblePDF(inputBuffer, { text }) {
   const safeText = _winAnsiSafe(text)
-  const pdfDoc = await PDFDocument.load(inputBuffer)
+  // ignoreEncryption: some real-world PDFs carry an encryption dictionary
+  // (e.g. owner-password permission flags) even with no open password. Without
+  // this flag pdf-lib throws on load, which would abort the whole watermarked
+  // download and leave NO file at the destination. The bytes are already E2E
+  // -decrypted on the client, so reading them here is safe.
+  const pdfDoc = await PDFDocument.load(inputBuffer, { ignoreEncryption: true })
+  // Reliable carrier #1: document metadata (Keywords), read via pdfjs getMetadata().
+  try {
+    pdfDoc.setKeywords([text])
+  } catch (e) {
+    logger.warn(`[WatermarkProcessor] PDF setKeywords failed: ${e?.message || e}`)
+  }
+
+  // Reliable carrier #2: fully-transparent (opacity 0) NORMAL-mode text.
+  //
+  // The previous approach used PDF text-rendering-mode 3 ("invisible"), but
+  // browser pdfjs getTextContent() does NOT return mode-3 text, so the embedded
+  // watermark was undetectable in the app. opacity-0 text IS extracted by pdfjs
+  // (the very same path that already finds the visible watermark) yet is
+  // imperceptible to the eye. Drawn small (size 8) so the detector's height
+  // heuristic (<10 ⇒ invisible) classifies it correctly.
   const font = await pdfDoc.embedFont(StandardFonts.Helvetica)
   const fontSize = 8
-
   for (const page of pdfDoc.getPages()) {
     const { width, height } = page.getSize()
-    const encoded = font.encodeText(safeText)
     for (let y = 30; y < height; y += 120) {
       for (let x = 10; x < width - 10; x += 180) {
-        page.setFont(font)
-        page.pushOperators(
-          pushGraphicsState(),
-          beginText(),
-          setFillingColor(rgb(0, 0, 0)),
-          setFontAndSize(page.fontKey, fontSize),
-          setTextRenderingMode(TextRenderingMode.Invisible),
-          rotateAndSkewTextRadiansAndTranslate(0, 0, 0, x, y),
-          showText(encoded),
-          endText(),
-          popGraphicsState()
-        )
+        page.drawText(safeText, { x, y, size: fontSize, font, opacity: 0 })
       }
     }
   }
-  return Buffer.from(await pdfDoc.save())
+  // useObjectStreams:false keeps the Info dictionary (and thus /Keywords) as a
+  // plaintext object rather than packing it into a compressed object stream, so
+  // the detector can read the watermark straight from the PDF bytes WITHOUT
+  // relying on pdfjs (whose browser build surfaces neither getMetadata keywords
+  // nor opacity-0 text reliably).
+  return Buffer.from(await pdfDoc.save({ useObjectStreams: false }))
 }
 
 /**
@@ -321,6 +356,155 @@ async function _invisiblePDF(inputBuffer, { text }) {
  */
 function _winAnsiSafe(text) {
   return String(text ?? '').replace(/[^\x20-\x7E]/g, '?')
+}
+
+// ──────────────────────────────────────────────────────────────
+// Reliable invisible carrier: lossless metadata embedded in the file bytes.
+//
+// Pixel-stego (LSB) and PDF invisible-text are unreliable for DETECTION —
+// JPEG re-compression destroys LSB, a browser <canvas> premultiplies alpha and
+// corrupts the R-channel LSB, and pdfjs extraction of render-mode-3 text is
+// inconsistent. So the invisible payload is ALSO stored in a metadata carrier
+// that survives encoding and is read straight from the file bytes:
+//   • PNG  → tEXt chunk (keyword WM_KEY_INVISIBLE / WM_KEY_VISIBLE)
+//   • JPEG → COM (comment) marker, prefixed with the kind key
+//   • PDF  → Keywords entry + opacity-0 text (see _invisiblePDF)
+// Visible and invisible carry SEPARATE markers so the detector can report each
+// independently — including the visible watermark on images, which is only a
+// pixel overlay and otherwise has no machine-readable signal.
+// ──────────────────────────────────────────────────────────────
+export const WM_KEY_INVISIBLE = 'scs-wm-inv'
+export const WM_KEY_VISIBLE = 'scs-wm-vis'
+
+const _CRC_TABLE = (() => {
+  const t = new Int32Array(256)
+  for (let n = 0; n < 256; n++) {
+    let c = n
+    for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1
+    t[n] = c
+  }
+  return t
+})()
+
+function _crc32(buf) {
+  let c = -1
+  for (let i = 0; i < buf.length; i++) c = _CRC_TABLE[(c ^ buf[i]) & 0xff] ^ (c >>> 8)
+  return (c ^ -1) >>> 0
+}
+
+/** Insert a PNG tEXt chunk (keyword\0text) immediately before the IEND chunk. */
+function _pngWithText(pngBuf, keyword, text) {
+  const data = Buffer.concat([
+    Buffer.from(keyword, 'latin1'),
+    Buffer.from([0]),
+    Buffer.from(text, 'latin1')
+  ])
+  const type = Buffer.from('tEXt', 'latin1')
+  const len = Buffer.alloc(4)
+  len.writeUInt32BE(data.length, 0)
+  const crc = Buffer.alloc(4)
+  crc.writeUInt32BE(_crc32(Buffer.concat([type, data])), 0)
+  const chunk = Buffer.concat([len, type, data, crc])
+  const iendIdx = pngBuf.length - 12 // IEND is the final 12-byte chunk
+  return Buffer.concat([pngBuf.subarray(0, iendIdx), chunk, pngBuf.subarray(iendIdx)])
+}
+
+/** Insert a JPEG COM (comment) segment after SOI and any leading APPn markers. */
+function _jpegWithComment(jpgBuf, text) {
+  const payload = Buffer.from(text, 'utf8')
+  const segLen = payload.length + 2 // COM length field includes the 2 length bytes
+  const com = Buffer.concat([
+    Buffer.from([0xff, 0xfe, (segLen >> 8) & 0xff, segLen & 0xff]),
+    payload
+  ])
+  let off = 2
+  while (
+    off + 4 < jpgBuf.length &&
+    jpgBuf[off] === 0xff &&
+    jpgBuf[off + 1] >= 0xe0 &&
+    jpgBuf[off + 1] <= 0xef
+  ) {
+    off += 2 + jpgBuf.readUInt16BE(off + 2)
+  }
+  return Buffer.concat([jpgBuf.subarray(0, off), com, jpgBuf.subarray(off)])
+}
+
+/** Remove all of our watermark tEXt chunks (invisible/visible) from a PNG. */
+function _pngStripWmText(pngBuf) {
+  const parts = [pngBuf.subarray(0, 8)] // PNG signature
+  let off = 8
+  while (off + 8 <= pngBuf.length) {
+    const len = pngBuf.readUInt32BE(off)
+    const type = pngBuf.toString('latin1', off + 4, off + 8)
+    const end = off + 12 + len
+    let drop = false
+    if (type === 'tEXt') {
+      const seg = pngBuf.subarray(off + 8, off + 8 + len)
+      const z = seg.indexOf(0)
+      const kw = z >= 0 ? seg.toString('latin1', 0, z) : ''
+      drop = kw === WM_KEY_INVISIBLE || kw === WM_KEY_VISIBLE
+    }
+    if (!drop) parts.push(pngBuf.subarray(off, end))
+    off = end
+    if (type === 'IEND') break
+  }
+  return Buffer.concat(parts)
+}
+
+/** Remove all of our watermark COM markers (invisible/visible) from a JPEG. */
+function _jpegStripWmComments(jpgBuf) {
+  const parts = [jpgBuf.subarray(0, 2)] // SOI
+  let off = 2
+  while (off + 4 <= jpgBuf.length) {
+    if (jpgBuf[off] !== 0xff) break
+    const marker = jpgBuf[off + 1]
+    if (marker === 0xd9 || (marker >= 0xd0 && marker <= 0xd7) || marker === 0x01) {
+      parts.push(jpgBuf.subarray(off, off + 2)) // standalone marker, no length
+      off += 2
+      continue
+    }
+    if (marker === 0xda) {
+      parts.push(jpgBuf.subarray(off)) // SOS → entropy data + EOI: copy the rest
+      return Buffer.concat(parts)
+    }
+    const segLen = jpgBuf.readUInt16BE(off + 2)
+    const end = off + 2 + segLen
+    let drop = false
+    if (marker === 0xfe) {
+      const content = jpgBuf.toString('utf8', off + 4, end)
+      drop = content.startsWith(`${WM_KEY_INVISIBLE}:`) || content.startsWith(`${WM_KEY_VISIBLE}:`)
+    }
+    if (!drop) parts.push(jpgBuf.subarray(off, end))
+    off = end
+  }
+  if (off < jpgBuf.length) parts.push(jpgBuf.subarray(off))
+  return Buffer.concat(parts)
+}
+
+/**
+ * (Re)write the image watermark METADATA markers so they reflect EXACTLY this
+ * download's choices: any pre-existing scs-wm-* markers are stripped first, then
+ * a marker is written only for each kind of watermark actually applied. This is
+ * what keeps the visible marker out of an "original"-mode (invisible-only)
+ * download even when the SOURCE file already carried one.
+ *
+ * @param {Buffer} buffer image bytes after the pixel watermark passes
+ * @param {string} mimeType 'image/png' | 'image/jpeg'
+ * @param {{ invisibleText: string|null, visibleText: string|null }} marks
+ * @returns {Buffer}
+ */
+export function applyImageWatermarkMarkers(buffer, mimeType, { invisibleText, visibleText }) {
+  let buf = Buffer.from(buffer)
+  if (mimeType === 'image/png') {
+    buf = _pngStripWmText(buf)
+    if (invisibleText) buf = _pngWithText(buf, WM_KEY_INVISIBLE, invisibleText)
+    if (visibleText) buf = _pngWithText(buf, WM_KEY_VISIBLE, visibleText)
+  } else if (mimeType === 'image/jpeg') {
+    buf = _jpegStripWmComments(buf)
+    if (invisibleText) buf = _jpegWithComment(buf, `${WM_KEY_INVISIBLE}:${invisibleText}`)
+    if (visibleText) buf = _jpegWithComment(buf, `${WM_KEY_VISIBLE}:${visibleText}`)
+  }
+  return buf
 }
 
 // ──────────────────────────────────────────────────────────────
@@ -352,17 +536,25 @@ function _encodeLSB(bitmapData, width, height, text) {
 }
 
 async function _lsbPNG(inputBuffer, { text }) {
+  // Pixel-LSB pass only. The reliable tEXt metadata marker is written centrally
+  // by applyImageWatermarkMarkers (Jimp re-encode here drops any source tEXt).
   const image = await Jimp.read(inputBuffer)
-  _encodeLSB(image.bitmap.data, image.bitmap.width, image.bitmap.height, text)
-  return image.getBufferAsync(Jimp.MIME_PNG)
+  try {
+    _encodeLSB(image.bitmap.data, image.bitmap.width, image.bitmap.height, text)
+  } catch (e) {
+    // Image too small to hold the full payload in pixel-LSB. The tEXt metadata
+    // marker still gives reliable detection, so don't abort the download.
+    logger.warn(`[WatermarkProcessor] PNG LSB skipped (${e?.message || e}); using metadata marker only.`)
+  }
+  return image.getBuffer(JimpMime.png)
 }
 
-// ⚠ JPEG is lossy. Re-compression may degrade LSB watermark.
-async function _lsbJPEG(inputBuffer, { text }) {
-  const image = await Jimp.read(inputBuffer)
-  _encodeLSB(image.bitmap.data, image.bitmap.width, image.bitmap.height, text)
-  image.quality(95)
-  return image.getBufferAsync(Jimp.MIME_JPEG)
+// JPEG is lossy, so pixel-LSB cannot survive re-compression (the bits are
+// destroyed by the DCT quantizer). The JPEG invisible payload lives entirely in
+// the COM metadata marker, written centrally by applyImageWatermarkMarkers — so
+// there is no pixel pass to do here.
+async function _lsbJPEG(inputBuffer) {
+  return Buffer.from(inputBuffer)
 }
 
 // ──────────────────────────────────────────────────────────────

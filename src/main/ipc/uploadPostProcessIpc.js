@@ -1,6 +1,9 @@
 import { ipcMain } from 'electron'
 import { classifyDocuments } from '../services/ClassifyService.js'
-import { getPreUploadClassifyEntry } from '../services/preUploadClassifyCache.js'
+import {
+  getPreUploadClassifyEntry,
+  clearPreUploadClassifyEntry
+} from '../services/preUploadClassifyCache.js'
 import GlobalValueManager from '../GlobalValueManager.js'
 
 /** @type {null | { batchUpdateFileDescPermProcess: (p: object) => Promise<unknown> }} */
@@ -24,6 +27,15 @@ export function registerUploadPostIpcOnce() {
   ipcMain.handle('preupload-classify-snapshot', async (_, batchKey) => {
     if (typeof batchKey !== 'string' || !batchKey.trim()) return null
     return getPreUploadClassifyEntry(batchKey.trim()) ?? null
+  })
+
+  // V7: renderer calls this when the PostUploadDialog closes so the cached
+  // result (which can be large) is released promptly instead of lingering
+  // until TTL/LRU eviction.
+  ipcMain.handle('preupload-classify-clear', async (_, batchKey) => {
+    if (typeof batchKey !== 'string' || !batchKey.trim()) return false
+    clearPreUploadClassifyEntry(batchKey.trim())
+    return true
   })
 
   ipcMain.handle('file-manager:start-upload', async (_, folderId) => {

@@ -2,7 +2,7 @@ server:
   protocol: sftp
 
 blockchain:
-  jsonRpcUrl: 'http://211.73.81.141:8545'
+  jsonRpcUrl: 'http://203.145.217.198:8545'
   contractAddr: '0xDF44648458B12D0851eb0f53257a4eb8e4D0389f'
   walletKeyFilename: wallet.key
   blockRangeLimit: 5000

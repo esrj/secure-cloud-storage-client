@@ -589,6 +589,7 @@ function FindingBlock({ finding, index, onCopy, onTamperedChange }) {
                 <div key={u.id} className="text-xs flex flex-col py-0.5 border-t border-blue-gray-50 first:border-t-0">
                   <span className="font-mono text-blue-gray-800">{u.name || '(未知)'} &lt;{u.email || '—'}&gt;</span>
                   <span className="font-mono text-blue-gray-400 text-[10px]">id: {u.id}</span>
+                  <DownloadLogList userId={u.id} />
                 </div>
               ))}
             </div>
@@ -599,10 +600,88 @@ function FindingBlock({ finding, index, onCopy, onTamperedChange }) {
   )
 }
 
+/**
+ * Download audit trail of a traced user (admin only; the server enforces it).
+ * Turns "who" into "who downloaded what, and when" for the forensic chain.
+ */
+function DownloadLogList({ userId }) {
+  const [state, setState] = useState({ status: 'loading', logs: [] })
+
+  useEffect(() => {
+    let cancelled = false
+    void (async () => {
+      try {
+        const res = await window.electronAPI.adminUserDownloadLogs?.({ userId })
+        if (cancelled) return
+        if (!res?.ok) {
+          setState({ status: 'error', error: res?.error || '未知錯誤', logs: [] })
+          return
+        }
+        setState({ status: 'done', logs: res.logs })
+      } catch (e) {
+        if (!cancelled) setState({ status: 'error', error: e?.message || String(e), logs: [] })
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [userId])
+
+  if (state.status === 'loading') {
+    return (
+      <span className="mt-1 flex items-center gap-1 text-blue-gray-400">
+        <Spinner className="size-3" /> 載入下載紀錄…
+      </span>
+    )
+  }
+  if (state.status === 'error') {
+    return <span className="mt-1 text-red-600">下載紀錄查詢失敗：{state.error}</span>
+  }
+  if (state.logs.length === 0) {
+    return <span className="mt-1 text-blue-gray-400">此使用者沒有下載紀錄</span>
+  }
+  return (
+    <div className="mt-1 rounded border border-blue-gray-100 bg-blue-gray-50/60 p-2">
+      <span className="font-bold text-blue-gray-700">下載紀錄（最近 {state.logs.length} 筆）：</span>
+      <table className="mt-1 w-full text-left text-[11px]">
+        <thead>
+          <tr className="text-blue-gray-500">
+            <th className="pr-2 font-medium">時間</th>
+            <th className="pr-2 font-medium">檔案</th>
+            <th className="pr-2 font-medium">模式</th>
+            <th className="font-medium">浮水印</th>
+          </tr>
+        </thead>
+        <tbody>
+          {state.logs.map((l) => (
+            <tr key={l.id} className="border-t border-blue-gray-100">
+              <td className="pr-2 py-0.5 whitespace-nowrap">{formatLogTime(l.timestamp)}</td>
+              <td className="pr-2 py-0.5 break-all">{l.fileName || `(已刪除) ${l.fileId}`}</td>
+              <td className="pr-2 py-0.5">{l.mode}</td>
+              <td className="py-0.5">
+                {[l.watermarkVisible && '可視', l.watermarkInvisible && '不可視']
+                  .filter(Boolean)
+                  .join('＋') || '無'}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  )
+}
+
+function formatLogTime(value) {
+  const d = new Date(value)
+  return Number.isNaN(d.getTime()) ? String(value) : d.toLocaleString('zh-TW', { hour12: false })
+}
+
 function MethodBadge({ method }) {
   const config = {
     'pdf-invisible-text': { label: 'PDF 不可視文字', color: 'purple' },
     'pdf-visible-text': { label: 'PDF 可視文字', color: 'green' },
+    'pdf-metadata': { label: 'PDF 中繼資料', color: 'purple' },
+    'image-metadata': { label: '圖片中繼資料', color: 'purple' },
     'lsb-r-channel': { label: 'LSB R 通道隱寫', color: 'teal' },
     'docx-custom-property': { label: 'DOCX 自訂屬性', color: 'indigo' },
     'docx-body-text': { label: 'DOCX 文件文字', color: 'blue-gray' },

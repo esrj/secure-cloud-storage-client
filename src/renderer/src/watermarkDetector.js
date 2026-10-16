@@ -48,6 +48,90 @@ import pdfjsWorkerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url'
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfjsWorkerUrl
 
 // ──────────────────────────────────────────────────────────────
+// Reliable invisible carrier: metadata read straight from the file bytes.
+// Mirrors the embed side in main/WatermarkProcessor.js (WM_KEYWORD).
+// Pixel-LSB (JPEG re-compression / canvas alpha-premultiply) and PDF
+// render-mode-3 text are unreliable, so this metadata is the PRIMARY signal.
+// ──────────────────────────────────────────────────────────────
+const WM_KEY_INVISIBLE = 'scs-wm-inv'
+const WM_KEY_VISIBLE = 'scs-wm-vis'
+
+/** Read a PNG tEXt chunk value for the given keyword (or null). */
+function _pngReadText(bytes, keyword) {
+  const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
+  let off = 8 // skip the 8-byte PNG signature
+  while (off + 8 <= bytes.length) {
+    const len = dv.getUint32(off)
+    const type = String.fromCharCode(bytes[off + 4], bytes[off + 5], bytes[off + 6], bytes[off + 7])
+    if (type === 'tEXt') {
+      const seg = bytes.subarray(off + 8, off + 8 + len)
+      const z = seg.indexOf(0)
+      if (z >= 0) {
+        let kw = ''
+        for (let i = 0; i < z; i++) kw += String.fromCharCode(seg[i])
+        if (kw === keyword) return new TextDecoder('latin1').decode(seg.subarray(z + 1))
+      }
+    }
+    if (type === 'IEND') break
+    off += 12 + len
+  }
+  return null
+}
+
+/** Read ALL JPEG COM (comment) segments as UTF-8 (visible + invisible markers). */
+function _jpegReadComments(bytes) {
+  const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
+  const out = []
+  let off = 2 // skip SOI
+  while (off + 4 <= bytes.length) {
+    if (bytes[off] !== 0xff) {
+      off++
+      continue
+    }
+    const marker = bytes[off + 1]
+    if (marker === 0xd8 || marker === 0xd9 || (marker >= 0xd0 && marker <= 0xd7)) {
+      off += 2
+      continue
+    }
+    if (marker === 0xda) break // SOS — scan data starts, no more metadata markers
+    const segLen = dv.getUint16(off + 2)
+    if (marker === 0xfe) out.push(new TextDecoder('utf-8').decode(bytes.subarray(off + 4, off + 2 + segLen)))
+    off += 2 + segLen
+  }
+  return out
+}
+
+/** Whether a payload string looks like one of our watermark payloads. */
+function _looksLikeWatermark(s) {
+  return typeof s === 'string' && (s.includes('uid:') || s.includes('fid:') || s.includes('ts:'))
+}
+
+/**
+ * Read the PDF /Keywords value straight from the raw bytes. The embed side
+ * saves with useObjectStreams:false so the Info dictionary is plaintext, and
+ * pdf-lib stores the string as a UTF-16BE hex string `<FEFF…>` (it can also be
+ * a literal `(…)` string). This bypasses pdfjs entirely, whose browser build
+ * does not reliably surface getMetadata keywords nor extract opacity-0 text.
+ */
+function _pdfRawKeywords(bytes) {
+  const s = new TextDecoder('latin1').decode(bytes)
+  const m = s.match(/\/Keywords\s*(<([0-9A-Fa-f\s]*)>|\(((?:\\.|[^\\)])*)\))/)
+  if (!m) return null
+  if (m[2] != null) {
+    const hex = m[2].replace(/\s/g, '')
+    const arr = hex.match(/../g)?.map((h) => parseInt(h, 16)) || []
+    if (arr[0] === 0xfe && arr[1] === 0xff) {
+      // UTF-16BE (BOM-prefixed) — the pdf-lib default for string metadata.
+      let out = ''
+      for (let i = 2; i + 1 < arr.length; i += 2) out += String.fromCharCode((arr[i] << 8) | arr[i + 1])
+      return out
+    }
+    return String.fromCharCode(...arr) // bare latin1 hex
+  }
+  return m[3] // literal (…) string
+}
+
+// ──────────────────────────────────────────────────────────────
 // Public API
 // ──────────────────────────────────────────────────────────────
 
@@ -56,8 +140,28 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = pdfjsWorkerUrl
  * @param {File} file
  * @returns {Promise<WatermarkDetectResult>}
  */
+/** Sniff the real content type from the leading magic bytes (PDF/PNG/JPEG). */
+function _sniffMime(b) {
+  if (!b || b.length < 4) return null
+  if (b[0] === 0x25 && b[1] === 0x50 && b[2] === 0x44 && b[3] === 0x46) return 'application/pdf' // %PDF
+  if (b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4e && b[3] === 0x47) return 'image/png' // \x89PNG
+  if (b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff) return 'image/jpeg' // JPEG SOI
+  return null
+}
+
 export async function detectWatermark(file) {
-  const mime = file.type || _mimeFromName(file.name)
+  // Route by ACTUAL content, not the filename/extension. A file stored under a
+  // mismatched name (e.g. PDF content saved with a .png name) must still be
+  // detected by the right engine — otherwise a PDF-in-.png reads as an image
+  // and the PNG-chunk lookup finds nothing. Falls back to file.type / extension
+  // for DOCX & TXT (no simple magic-byte signature handled here).
+  let sniffed = null
+  try {
+    sniffed = _sniffMime(new Uint8Array(await file.slice(0, 8).arrayBuffer()))
+  } catch {
+    /* ignore — fall back to type/extension below */
+  }
+  const mime = sniffed || file.type || _mimeFromName(file.name)
   const base = { fileName: file.name, mimeType: mime }
 
   try {
@@ -169,8 +273,28 @@ export function extractTrackedUidFromPayload(payload) {
 const PDF_LINE_Y_TOLERANCE = 2
 
 export async function detectPdfWatermark(file) {
-  const arrayBuffer = await file.arrayBuffer()
-  const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise
+  // Read the bytes ONCE for the raw /Keywords scan (kept intact); pdfjs gets a
+  // separate copy because getDocument may detach the buffer it is handed.
+  const rawBytes = new Uint8Array(await file.arrayBuffer())
+
+  // PRIMARY, reliable invisible carrier: /Keywords read straight from the PDF
+  // bytes (the embed saves with useObjectStreams:false so it is plaintext).
+  // This bypasses pdfjs, whose browser build surfaces neither getMetadata
+  // keywords nor opacity-0 invisible text reliably.
+  let metaPayload = _pdfRawKeywords(rawBytes)
+  if (!_looksLikeWatermark(metaPayload)) metaPayload = null
+
+  const pdf = await pdfjsLib.getDocument({ data: new Uint8Array(await file.arrayBuffer()) }).promise
+
+  // Fallback for older files / other producers: pdfjs getMetadata (best-effort).
+  if (!metaPayload) {
+    try {
+      const md = await pdf.getMetadata()
+      if (_looksLikeWatermark(md?.info?.Keywords)) metaPayload = md.info.Keywords
+    } catch {
+      /* ignore */
+    }
+  }
 
   /** @type {Set<string>} */
   const visibleHits = new Set()
@@ -251,7 +375,16 @@ export async function detectPdfWatermark(file) {
       reason: `在 PDF 中偵測到可視文字浮水印（共 ${visibleHits.size} 個實例）`
     })
   }
-  if (invisibleHits.size > 0) {
+  // Invisible verdict: prefer the reliable metadata carrier; fall back to the
+  // best-effort invisible text layer only if metadata is absent (e.g. stripped).
+  if (metaPayload) {
+    findings.push({
+      kind: 'invisible',
+      method: 'pdf-metadata',
+      payload: metaPayload,
+      reason: '從 PDF 中繼資料 (Keywords) 解出浮水印'
+    })
+  } else if (invisibleHits.size > 0) {
     findings.push({
       kind: 'invisible',
       method: 'pdf-invisible-text',
@@ -263,8 +396,8 @@ export async function detectPdfWatermark(file) {
   if (findings.length === 0) {
     return {
       findings: [],
-      method: 'pdf-invisible-text',
-      reason: '未偵測到可視或不可視文字浮水印'
+      method: 'pdf-metadata',
+      reason: '未偵測到浮水印（中繼資料、可視與不可視文字層皆無）'
     }
   }
   return { findings }
@@ -275,78 +408,95 @@ export async function detectPdfWatermark(file) {
 // ──────────────────────────────────────────────────────────────
 
 export async function detectImageLsbWatermark(file) {
+  const bytes = new Uint8Array(await file.arrayBuffer())
+  const findings = []
+
+  // 1) PRIMARY, reliable carrier: lossless metadata (PNG tEXt / JPEG COM),
+  //    read straight from the file bytes — unaffected by alpha-premultiply or
+  //    JPEG re-compression. Visible and invisible carry SEPARATE markers.
+  let invMeta = null
+  let visMeta = null
+  if (bytes[0] === 0x89 && bytes[1] === 0x50) {
+    // PNG signature
+    invMeta = _pngReadText(bytes, WM_KEY_INVISIBLE)
+    visMeta = _pngReadText(bytes, WM_KEY_VISIBLE)
+  } else if (bytes[0] === 0xff && bytes[1] === 0xd8) {
+    // JPEG SOI
+    for (const com of _jpegReadComments(bytes)) {
+      if (com.startsWith(`${WM_KEY_INVISIBLE}:`)) invMeta = com.slice(WM_KEY_INVISIBLE.length + 1)
+      else if (com.startsWith(`${WM_KEY_VISIBLE}:`)) visMeta = com.slice(WM_KEY_VISIBLE.length + 1)
+    }
+  }
+  if (_looksLikeWatermark(invMeta)) {
+    findings.push({
+      kind: 'invisible',
+      method: 'image-metadata',
+      payload: invMeta,
+      reason: '從圖片中繼資料 (PNG tEXt / JPEG COM) 解出不可視浮水印'
+    })
+  }
+  if (_looksLikeWatermark(visMeta)) {
+    findings.push({
+      kind: 'visible',
+      method: 'image-metadata',
+      payload: visMeta,
+      reason: '圖片可視浮水印為像素疊圖，由中繼資料標記確認其存在'
+    })
+  }
+
+  // 2) SECONDARY, best-effort carrier: R-channel pixel LSB. Survives only for
+  //    opaque PNG; a <canvas> alpha-premultiply round-trip or JPEG compression
+  //    can corrupt it, which is why metadata above is the primary signal.
+  try {
+    const lsbText = await _readImageLsb(file)
+    if (_looksLikeWatermark(lsbText) && !findings.some((f) => f.payload === lsbText)) {
+      findings.push({
+        kind: 'invisible',
+        method: 'lsb-r-channel',
+        payload: lsbText,
+        reason: '成功從 R 通道 LSB 解碼出浮水印'
+      })
+    }
+  } catch {
+    /* canvas decode failed — the metadata carrier still covers detection */
+  }
+
+  if (findings.length > 0) return { findings }
+  return {
+    findings: [],
+    method: 'image-metadata',
+    reason: '未偵測到不可視浮水印（中繼資料與 R 通道 LSB 皆無）'
+  }
+}
+
+/** Best-effort R-channel LSB read via <canvas>. Returns the text or null. */
+async function _readImageLsb(file) {
   const bitmap = await createImageBitmap(file)
   const canvas = document.createElement('canvas')
   canvas.width = bitmap.width
   canvas.height = bitmap.height
-
   const ctx = canvas.getContext('2d')
   ctx.drawImage(bitmap, 0, 0)
   bitmap.close()
 
-  const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height)
-  const pixels = imageData.data
+  const pixels = ctx.getImageData(0, 0, canvas.width, canvas.height).data
   const totalPixels = canvas.width * canvas.height
 
   let payloadLength = 0
-  for (let i = 0; i < 32; i++) {
-    payloadLength = (payloadLength << 1) | (pixels[i * 4] & 1)
-  }
-
-  if (payloadLength <= 0 || payloadLength > 50_000) {
-    return {
-      findings: [],
-      method: 'lsb-r-channel',
-      reason: `LSB header 長度不合理 (${payloadLength})，無浮水印或已損壞`
-    }
-  }
-  const bitsNeeded = 32 + payloadLength * 8
-  if (bitsNeeded > totalPixels) {
-    return {
-      findings: [],
-      method: 'lsb-r-channel',
-      reason: `圖片像素不足以容納宣稱的 payload 長度 ${payloadLength} bytes`
-    }
-  }
+  for (let i = 0; i < 32; i++) payloadLength = (payloadLength << 1) | (pixels[i * 4] & 1)
+  if (payloadLength <= 0 || payloadLength > 50_000) return null
+  if (32 + payloadLength * 8 > totalPixels) return null
 
   const payloadBytes = new Uint8Array(payloadLength)
   for (let b = 0; b < payloadLength; b++) {
     let byte = 0
-    for (let bit = 0; bit < 8; bit++) {
-      const pixelIdx = 32 + b * 8 + bit
-      byte = (byte << 1) | (pixels[pixelIdx * 4] & 1)
-    }
+    for (let bit = 0; bit < 8; bit++) byte = (byte << 1) | (pixels[(32 + b * 8 + bit) * 4] & 1)
     payloadBytes[b] = byte
   }
-
-  let text
   try {
-    text = new TextDecoder('utf-8', { fatal: true }).decode(payloadBytes)
+    return new TextDecoder('utf-8', { fatal: true }).decode(payloadBytes)
   } catch {
-    return {
-      findings: [],
-      method: 'lsb-r-channel',
-      reason: 'LSB payload 無法以 UTF-8 解碼，無浮水印或已損壞'
-    }
-  }
-
-  const isWatermark = text.includes('uid:') || text.includes('fid:') || text.includes('ts:')
-  if (isWatermark) {
-    return {
-      findings: [
-        {
-          kind: 'invisible',
-          method: 'lsb-r-channel',
-          payload: text,
-          reason: '成功從 R 通道 LSB 解碼出浮水印'
-        }
-      ]
-    }
-  }
-  return {
-    findings: [],
-    method: 'lsb-r-channel',
-    reason: `LSB 解碼成功但內容不符合浮水印格式（前 20 字元：${text.slice(0, 20)}）`
+    return null
   }
 }
 

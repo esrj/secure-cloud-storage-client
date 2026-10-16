@@ -47,6 +47,14 @@ function PostUploadDialog({
 
   const pendingKey = classifyBatchKey || classificationPreview?.batchKey
 
+  // V7: release the (potentially large) cached classification result as soon as
+  // the dialog closes, instead of waiting for TTL/LRU eviction in main.
+  function handleClose() {
+    const key = classifyBatchKey || classificationPreview?.batchKey
+    if (key) void window.electronAPI?.preuploadClassifyClear?.(key)
+    onClose()
+  }
+
   useEffect(() => {
     setPreviewOverride(null)
     setLiveClassifyResult(null)
@@ -109,6 +117,32 @@ function PostUploadDialog({
     !lmWaiting &&
     !lmSucceeded &&
     effectivePreview?.reason !== 'CLASSIFIER_DISABLED'
+
+  // V6: the smart-classify result is computed pre-upload over the originally
+  // *selected* files, but tags are applied to the files that actually finished
+  // uploading. If some selected files failed to upload, the (batch-wide) labels
+  // were partly influenced by files that won't receive them — surface that so
+  // the user can sanity-check before applying.
+  const classifiedFiles = useMemo(
+    () => (Array.isArray(effectivePreview?.extraction?.files) ? effectivePreview.extraction.files : []),
+    [effectivePreview?.extraction]
+  )
+  const labelScopeMismatch = useMemo(() => {
+    if (!lmSucceeded || classifiedFiles.length === 0) return null
+    let notApplied
+    if (Array.isArray(sourcePaths) && sourcePaths.length > 0) {
+      const applied = new Set(sourcePaths)
+      notApplied = classifiedFiles.filter((f) => f && !applied.has(f.path)).length
+    } else {
+      notApplied = Math.max(0, classifiedFiles.length - fileIds.length)
+    }
+    if (notApplied <= 0 && classifiedFiles.length === fileIds.length) return null
+    return {
+      classifiedCount: classifiedFiles.length,
+      appliedCount: fileIds.length,
+      notApplied
+    }
+  }, [lmSucceeded, classifiedFiles, sourcePaths, fileIds])
 
   const finalLabelsKey = useMemo(() => {
     if (!effectivePreview?.supported || !Array.isArray(effectivePreview?.final_labels)) return ''
@@ -183,7 +217,7 @@ function PostUploadDialog({
       toast.error(`設定失敗：${error.message}`)
     } finally {
       setLoading(false)
-      onClose()
+      handleClose()
     }
   }
 
@@ -227,7 +261,7 @@ function PostUploadDialog({
     <Dialog
       open={true}
       handler={() => {
-        if (!loading) onClose()
+        if (!loading) handleClose()
       }}
       className="flex flex-col max-h-screen overflow-auto"
     >
@@ -301,6 +335,29 @@ function PostUploadDialog({
                   <Typography variant="small" className="text-xs text-blue-gray-600">
                     決策門檻 threshold = {effectivePreview.thresholdUsed}
                   </Typography>
+                )}
+                {isMultiple && (
+                  <div className="rounded-lg border border-blue-gray-100 bg-white px-3 py-2">
+                    <Typography variant="small" className="text-xs text-blue-gray-700">
+                      提醒：智慧分類對「整批」產生同一組標籤，並會套用到本批所有檔案。
+                      若本批檔案主題差異較大，建議改選「不套用」並逐一設定標籤，以免標籤交叉汙染。
+                    </Typography>
+                  </div>
+                )}
+                {labelScopeMismatch && (
+                  <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2">
+                    <Typography variant="small" className="font-semibold text-amber-900">
+                      標籤依據與套用範圍不一致
+                    </Typography>
+                    <Typography variant="small" className="text-xs text-amber-800">
+                      本組標籤是依「選取時的 {labelScopeMismatch.classifiedCount} 個檔案」推得，
+                      但本次實際成功上傳 {labelScopeMismatch.appliedCount} 個
+                      {labelScopeMismatch.notApplied > 0
+                        ? `（其中 ${labelScopeMismatch.notApplied} 個分類依據的檔案未成功上傳）`
+                        : ''}
+                      。標籤為整批共用，套用前請再確認是否符合這些檔案。
+                    </Typography>
+                  </div>
                 )}
                 <details className="rounded-lg border border-blue-gray-200 bg-white text-xs text-blue-gray-800">
                   <summary className="cursor-pointer select-none px-3 py-2 font-medium text-blue-gray-900">
@@ -492,7 +549,7 @@ function PostUploadDialog({
       </DialogBody>
 
       <DialogFooter>
-        <Button variant="text" color="red" onClick={onClose} disabled={loading} className="mr-2">
+        <Button variant="text" color="red" onClick={handleClose} disabled={loading} className="mr-2">
           略過
         </Button>
         <Button variant="gradient" color="black" onClick={handleConfirm} disabled={loading}>

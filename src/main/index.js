@@ -1,3 +1,5 @@
+// Must stay the first import: redirects userData when CLIENT_PROFILE is set.
+import './profile'
 import { app, shell, BrowserWindow, ipcMain, dialog } from 'electron'
 import { join } from 'node:path'
 import { existsSync, statSync } from 'node:fs'
@@ -21,8 +23,11 @@ import {
 } from './ipc/uploadPostProcessIpc.js'
 import {
   registerAgentIpcOnce,
-  setDatabaseManagerForAgentIpc
+  setDatabaseManagerForAgentIpc,
+  setFileManagerForAgentIpc
 } from './ipc/agentIpc.js'
+import { registerAdminIpcOnce } from './ipc/adminIpc.js'
+import { registerRecoveryIpcOnce } from './ipc/recoveryIpc.js'
 import BatchDownloadManager from './BatchDownloadManager'
 
 // Initilize class instances
@@ -130,11 +135,19 @@ app.whenReady().then(() => {
     fileManager.downloadFileWithOptionsProcess(opts)
   )
 
+  // Native dialogs MUST be parented to the main window: a parentless dialog on
+  // macOS can open behind the app window, leaving the awaiting IPC handler (and
+  // the renderer's busy spinner) stuck forever with no log trace.
+  const showOpenDialogModal = (opts) => {
+    const win = GlobalValueManager.mainWindow
+    return win ? dialog.showOpenDialog(win, opts) : dialog.showOpenDialog(opts)
+  }
+
   // Batch download — pick destination folder once, sequentially process all files.
   ipcMain.handle('pick-download-folder', async (_event, defaultPath) => {
     const useDefault =
       typeof defaultPath === 'string' && defaultPath.length > 0 && existsSync(defaultPath)
-    const result = await dialog.showOpenDialog({
+    const result = await showOpenDialogModal({
       title: '選擇批次下載儲存資料夾',
       properties: ['openDirectory', 'createDirectory'],
       defaultPath: useDefault ? defaultPath : app.getPath('downloads')
@@ -146,7 +159,7 @@ app.whenReady().then(() => {
     let destDir = opts?.destDir
     // If no directory chosen yet, prompt now (skip extra round-trip from renderer).
     if (!destDir || !existsSync(destDir) || !statSync(destDir).isDirectory()) {
-      const result = await dialog.showOpenDialog({
+      const result = await showOpenDialogModal({
         title: '選擇批次下載儲存資料夾',
         properties: ['openDirectory', 'createDirectory'],
         defaultPath: app.getPath('downloads')
@@ -245,6 +258,13 @@ app.whenReady().then(() => {
   // Agent search IPC: agent:query
   registerAgentIpcOnce()
   setDatabaseManagerForAgentIpc(databaseManager)
+  setFileManagerForAgentIpc(fileManager)
+
+  // Admin IPC: admin:list-users, admin:export-conversations, admin:user-download-logs
+  registerAdminIpcOnce()
+
+  // Security-key (fingerprint) recovery IPC: recovery:* (see ipc/recoveryIpc.js)
+  registerRecoveryIpcOnce(loginManager)
 
   createWindow()
 

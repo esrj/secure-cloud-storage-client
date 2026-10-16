@@ -1594,3 +1594,10 @@ blockchain:
 
 trustedAuthority:
   url: 'localhost:2999'
+
+agent:
+  provider: ollama 
+  ollama:
+    url: 'http://localhost:11434'
+    model: 'gemma4-31b-8k:latest'
+    numCtx: 8192

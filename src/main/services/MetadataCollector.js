@@ -25,6 +25,9 @@ import { extname } from 'node:path'
  * @property {string[]} tags             - Classification tags
  * @property {string}   uploader_name    - Display name of the file owner
  * @property {string}   uploader_id      - User ID of the file owner
+ * @property {boolean}  is_own           - Owned by the current user (false = someone else's public file)
+ * @property {string}   folder_path      - Folder path for own files ("/" = root), "" for others' files
+ * @property {string}   location         - Human label: "我的檔案/<path>" or "公開檔案（<owner>）"
  */
 
 const PERM_LABEL = { 0: '私人', 1: '公開', 2: '不公開' }
@@ -38,12 +41,35 @@ function bytesToSize(bytes) {
 }
 
 /**
+ * Map folder id → "A/B/C" from the caller's folder rows (id, name, parentFolderId).
+ */
+function buildFolderPathMap(folders) {
+  const byId = new Map()
+  for (const f of Array.isArray(folders) ? folders : []) {
+    const id = f.id ?? f.folderId
+    if (id) byId.set(id, f)
+  }
+  const cache = new Map()
+  const pathOf = (id, depth = 0) => {
+    if (!id || depth > 32) return ''
+    if (cache.has(id)) return cache.get(id)
+    const f = byId.get(id)
+    if (!f) return ''
+    const parent = pathOf(f.parentFolderId ?? f.parentfolderid ?? null, depth + 1)
+    const p = parent ? `${parent}/${f.name}` : String(f.name ?? '')
+    cache.set(id, p)
+    return p
+  }
+  return { pathOf }
+}
+
+/**
  * @param {object} rawFile
  * @param {import('../DatabaseManager').default|null} databaseManager
- * @param {string} uploaderName  - Current user's display name (passed from renderer)
+ * @param {{ uploaderName: string, currentUserId: string, folderPaths: { pathOf: (id: string) => string } }} ctx
  * @returns {SearchableFile}
  */
-function enrichFile(rawFile, databaseManager, uploaderName) {
+function enrichFile(rawFile, databaseManager, ctx) {
   const fileId = rawFile.fileId ?? rawFile.id ?? ''
   const name = rawFile.name ?? ''
   const ext = extname(name).replace('.', '').toLowerCase()
@@ -53,6 +79,13 @@ function enrichFile(rawFile, databaseManager, uploaderName) {
   const perm = rawFile.perm ?? rawFile.permissions ?? 0
   const desc = rawFile.desc ?? rawFile.description ?? ''
   const ownerId = rawFile.owner ?? rawFile.ownerId ?? ''
+  const isOwn = ctx.currentUserId ? ownerId === ctx.currentUserId : true
+  const uploaderName =
+    (typeof rawFile.ownerName === 'string' && rawFile.ownerName.trim()) ||
+    (isOwn ? ctx.uploaderName : '') ||
+    '未知'
+  const folderPath = isOwn ? ctx.folderPaths.pathOf(rawFile.parentFolderId ?? rawFile.parentfolderid) || '/' : ''
+  const location = isOwn ? `我的檔案/${folderPath === '/' ? '' : folderPath}` : `公開檔案（${uploaderName}）`
 
   // Tags: prefer server-provided tags; fall back to DatabaseManager (now a no-op)
   let tags = []
@@ -84,8 +117,11 @@ function enrichFile(rawFile, databaseManager, uploaderName) {
     security_level: permLabel,
     desc,
     tags,
-    uploader_name: uploaderName || '未知',
-    uploader_id: ownerId
+    uploader_name: uploaderName,
+    uploader_id: ownerId,
+    is_own: isOwn,
+    folder_path: folderPath,
+    location
   }
 }
 
@@ -94,10 +130,17 @@ function enrichFile(rawFile, databaseManager, uploaderName) {
  *
  * @param {object[]} rawFiles
  * @param {import('../DatabaseManager').default|null} databaseManager
- * @param {string} [uploaderName]
+ * @param {string|{ uploaderName?: string, folders?: object[], currentUserId?: string }} [options]
+ *   A plain string is treated as `uploaderName` (legacy call shape).
  * @returns {SearchableFile[]}
  */
-export function buildSearchableMetadata(rawFiles, databaseManager, uploaderName = '') {
+export function buildSearchableMetadata(rawFiles, databaseManager, options = '') {
   if (!Array.isArray(rawFiles)) return []
-  return rawFiles.map((f) => enrichFile(f, databaseManager, uploaderName))
+  const opts = typeof options === 'string' ? { uploaderName: options } : options || {}
+  const ctx = {
+    uploaderName: opts.uploaderName ?? '',
+    currentUserId: opts.currentUserId ?? '',
+    folderPaths: buildFolderPathMap(opts.folders)
+  }
+  return rawFiles.map((f) => enrichFile(f, databaseManager, ctx))
 }

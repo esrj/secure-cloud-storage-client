@@ -124,19 +124,78 @@ export function balanceZhLabelsFromRuns(okRuns) {
 }
 
 /**
+ * 多檔分組合併：跨組「取各標籤的最大分數」（而非平均）。
+ *
+ * 與 balanceZhLabelsFromRuns 的差異與時機：
+ *   - balanceZhLabelsFromRuns 取「平均」，適用於「同一份文件被切成多段」的情境
+ *     （每段都在描述同一份文件，平均才能反映整份文件的傾向）。
+ *   - mergeZhLabelRunsByMax 取「最大」，適用於「一個批次拆成多組檔案、各組各跑一次
+ *     推論」的情境。產品規則是「只要批次中有任一檔明顯屬於某類，整批該類分數就要高」，
+ *     若用平均，第 1 組全是海軍(0.9)、第 2 組全是空軍(0.0) 會把海軍稀釋成 0.45 而漏標。
+ *     取最大可保留「批次中最強證據」。
+ *
+ * evidence 採用「貢獻最大分數那一組」的 evidence；若該組無 evidence，則退而合併各組去重取前三。
+ *
+ * @param {Array<{ labels: ZhLabelEntry[] }>} okRuns
+ * @returns {ZhLabelEntry[]}
+ */
+export function mergeZhLabelRunsByMax(okRuns) {
+  const runs = okRuns.filter((r) => r && Array.isArray(r.labels) && r.labels.length > 0)
+  if (runs.length === 0) {
+    return ZH_LABEL_ORDER.map((name) => ({ name, score: 0, evidence: [] }))
+  }
+
+  return ZH_LABEL_ORDER.map((name) => {
+    let best = -1
+    /** @type {string[]} */
+    let bestEv = []
+    /** @type {string[]} */
+    const pool = []
+
+    for (const run of runs) {
+      const L = run.labels.find((l) => l.name === name)
+      if (!L) continue
+      const ev = Array.isArray(L.evidence) ? L.evidence : []
+      for (const x of ev) {
+        const s = typeof x === 'string' ? x.trim() : ''
+        if (s && !pool.includes(s)) pool.push(s)
+      }
+      if (L.score > best) {
+        best = L.score
+        bestEv = ev.length > 0 ? ev.filter((x) => typeof x === 'string' && x.trim()).slice(0, 3) : []
+      }
+    }
+
+    const score = roundScore2(best < 0 ? 0 : best)
+    const evidence = (bestEv.length > 0 ? bestEv : pool).slice(0, 3)
+    return { name, score, evidence }
+  })
+}
+
+/**
  * @param {ZhLabelEntry[]} labels
  * @param {number} threshold
  * @returns {string[]}
  */
 export function computeFinalLabelsFromBalanced(labels, threshold) {
   const th = clampThreshold(threshold)
-  /** @type {string[]} */
-  const finals = []
-  for (const l of labels) {
-    if (l.score >= th && l.evidence.length > 0) finals.push(l.name)
-  }
-  if (finals.length === 0) return ['其他']
-  return finals
+
+  // Primary: labels that clear the threshold AND have supporting evidence.
+  // Evidence is required here to filter out hallucinated labels in the normal
+  // case.
+  const withEvidence = labels.filter((l) => l.score >= th && l.evidence.length > 0).map((l) => l.name)
+  if (withEvidence.length > 0) return withEvidence
+
+  // V12 fallback: a label cleared the threshold but the model returned no
+  // evidence for it. Previously these were dropped and the whole batch fell
+  // back to ['其他'] — which, for a tagging-drives-access system, wrongly
+  // RELAXES the scope of a confidently-classified (possibly sensitive)
+  // document. A high score is the real signal, so keep those labels rather
+  // than silently downgrading to 其他.
+  const scoreOnly = labels.filter((l) => l.score >= th).map((l) => l.name)
+  if (scoreOnly.length > 0) return scoreOnly
+
+  return ['其他']
 }
 
 /**

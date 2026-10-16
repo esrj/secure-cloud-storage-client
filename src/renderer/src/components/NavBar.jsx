@@ -18,9 +18,9 @@ import {
   ClipboardDocumentListIcon,
   PaperAirplaneIcon,
   DocumentDuplicateIcon,
-  MagnifyingGlassIcon
-  // DEMO_HIDE_SMART_FEATURES: 智慧搜尋隱藏時 SparklesIcon 不再使用。要恢復時把下行的註解拿掉。
-  // , SparklesIcon
+  MagnifyingGlassIcon,
+  SparklesIcon,
+  UsersIcon
 } from '@heroicons/react/24/outline'
 import PropTypes from 'prop-types'
 import { useState, useContext } from 'react'
@@ -44,8 +44,10 @@ function NavBar({ pageType, setPageType, seenRequest, seenReply }) {
     requestedListC: [requestedList]
   } = useContext(RequestContext)
   const {
-    userIdC: [userId, setUserId]
+    userIdC: [userId],
+    roleC: [role]
   } = useContext(ProfileContext)
+  const isAdmin = role === 'admin'
 
   return (
     <>
@@ -56,13 +58,7 @@ function NavBar({ pageType, setPageType, seenRequest, seenReply }) {
           </Typography>
         </div>
         <List>
-          {/* ── DEMO_HIDE_SMART_FEATURES ──────────────────────────────
-              智慧搜尋入口暫時隱藏以準備 demo。要恢復時：
-              1) 把下面整塊 ListItem 的註解標記移除
-              2) grep "DEMO_HIDE_SMART_FEATURES" 找其他關聯位置（MainView.jsx、FileViewButtonGroup.jsx）
-              不要刪除這個註解標記，留著方便下次再隱藏。
-          ──────────────────────────────────────────────────────────── */}
-          {/* <ListItem
+          <ListItem
             selected={pageType === PageType.agentSearch}
             onClick={() => setPageType(PageType.agentSearch)}
             ripple={false}
@@ -72,7 +68,7 @@ function NavBar({ pageType, setPageType, seenRequest, seenReply }) {
               <SparklesIcon className="h-5 w-5" />
             </ListItemPrefix>
             智慧搜尋
-          </ListItem> */}
+          </ListItem>
           <ListItem
             selected={pageType === PageType.public}
             onClick={() => setPageType(PageType.public)}
@@ -148,17 +144,33 @@ function NavBar({ pageType, setPageType, seenRequest, seenReply }) {
             </ListItemPrefix>
             請求檔案
           </ListItem>
-          <ListItem
-            selected={pageType === PageType.watermarkDetect}
-            onClick={() => setPageType(PageType.watermarkDetect)}
-            ripple={false}
-            className="focus:bg-none"
-          >
-            <ListItemPrefix>
-              <MagnifyingGlassIcon className="h-5 w-5" />
-            </ListItemPrefix>
-            浮水印偵測
-          </ListItem>
+          {/* Admin-only pages. Hidden here for UX; the server enforces the role. */}
+          {isAdmin && (
+            <ListItem
+              selected={pageType === PageType.watermarkDetect}
+              onClick={() => setPageType(PageType.watermarkDetect)}
+              ripple={false}
+              className="focus:bg-none"
+            >
+              <ListItemPrefix>
+                <MagnifyingGlassIcon className="h-5 w-5" />
+              </ListItemPrefix>
+              浮水印追蹤
+            </ListItem>
+          )}
+          {isAdmin && (
+            <ListItem
+              selected={pageType === PageType.adminUsers}
+              onClick={() => setPageType(PageType.adminUsers)}
+              ripple={false}
+              className="focus:bg-none"
+            >
+              <ListItemPrefix>
+                <UsersIcon className="h-5 w-5" />
+              </ListItemPrefix>
+              使用者管理
+            </ListItem>
+          )}
           <ListItem
             onClick={() =>
               checkIsLoggedIn(userId)
@@ -197,7 +209,7 @@ function NavBar({ pageType, setPageType, seenRequest, seenReply }) {
 }
 
 NavBar.propTypes = {
-  pageType: PropTypes.oneOf([PageType.public, PageType.file, PageType.reply, PageType.request]).isRequired,
+  pageType: PropTypes.oneOf(Object.values(PageType)).isRequired,
   setPageType: PropTypes.func.isRequired,
   seenRequest: PropTypes.number.isRequired,
   seenReply: PropTypes.number.isRequired

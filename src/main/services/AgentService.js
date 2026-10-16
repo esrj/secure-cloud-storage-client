@@ -6,7 +6,7 @@
  * Phase 3 — Relevance scoring + sort
  * Phase 4 — LLM summary
  */
-import { geminiGenerateContent } from './GeminiClient.js'
+import { llmGenerateContent } from './LlmClient.js'
 import { logger } from '../Logger.js'
 
 // ─── Prompts ─────────────────────────────────────────────────────────────────
@@ -25,11 +25,14 @@ const PARSE_SYSTEM = `你是一個檔案搜尋助手。將使用者的自然語�
 - size.min / size.max (bytes): 檔案大小
 - desc.contains (string): 說明欄位關鍵字
 - uploader_name.contains (string): 上傳者名稱
-- any_text    (string): 跨欄位模糊搜尋（同時比對 name、desc、tags）
+- is_own      (true/false): true = 使用者自己的檔案；false = 別人分享的公開檔案
+- folder_path.contains (string): 自己檔案所在的資料夾路徑（別人的檔案沒有路徑）
+- any_text    (string): 跨欄位模糊搜尋（同時比對 name、desc、tags、folder_path）
 
 【重要規則】
 1. 分類標籤（海軍/陸軍/空軍等）一定要放在 tags.any，不要放在 name.contains
 2. 若使用者說「只找公開」→ is_public: true；說「私人/機密」→ is_public: false
+   說「我的/自己的檔案」→ is_own: true；說「別人的/其他人分享的」→ is_own: false
 3. 若使用者要求「不要某類型」，用 tags.none 排除
 4. 排序預設按相關度（不需指定），只有使用者明確說「按日期/大小」才用 sort
 
@@ -45,13 +48,15 @@ const PARSE_SYSTEM = `你是一個檔案搜尋助手。將使用者的自然語�
     "size":          { "min": 0, "max": 10485760 },
     "desc":          { "contains": "..." },
     "uploader_name": { "contains": "..." },
+    "is_own":        true,
+    "folder_path":   { "contains": "..." },
     "any_text":      "..."
   },
   "sort": { "field": "date", "order": "desc" }
 }
 只填有意義的欄位，其餘省略。無法判斷條件時回傳 { "intent": "...", "filters": {}, "sort": null }。`
 
-const SUMMARY_SYSTEM = `你是一個友善的檔案搜尋助手，只能分析 metadata（檔名、標籤、日期、大小、公開狀態、說明、上傳者），不能讀取文件內容。
+const SUMMARY_SYSTEM = `你是一個友善的檔案搜尋助手，只能分析 metadata（檔名、標籤、日期、大小、公開狀態、說明、上傳者、位置：自己的資料夾或別人的公開檔案），不能讀取文件內容。
 用繁體中文、對話語氣（3-5句）總結搜尋結果：說明找到幾份檔案、最相關的是哪些、符合的原因是什麼（依相關度評分排序）。
 若無結果，說明可能原因並給出修改建議。簡潔回答，不要用 markdown 清單格式。`
 
@@ -107,6 +112,15 @@ function applyFilters(files, filters) {
       if (!(f.desc ?? '').toLowerCase().includes(filters.desc.contains.toLowerCase())) return false
     }
 
+    // is_own / folder_path
+    if (typeof filters.is_own === 'boolean') {
+      if (f.is_own !== filters.is_own) return false
+    }
+    if (filters.folder_path?.contains) {
+      if (!(f.folder_path ?? '').toLowerCase().includes(filters.folder_path.contains.toLowerCase()))
+        return false
+    }
+
     // uploader_name
     if (filters.uploader_name?.contains) {
       if (!f.uploader_name.toLowerCase().includes(filters.uploader_name.contains.toLowerCase()))
@@ -119,7 +133,9 @@ function applyFilters(files, filters) {
       const inName = f.name.toLowerCase().includes(q)
       const inDesc = (f.desc ?? '').toLowerCase().includes(q)
       const inTags = f.tags.some((t) => t.toLowerCase().includes(q))
-      if (!inName && !inDesc && !inTags) return false
+      const inFolder = (f.folder_path ?? '').toLowerCase().includes(q)
+      const inOwner = (f.uploader_name ?? '').toLowerCase().includes(q)
+      if (!inName && !inDesc && !inTags && !inFolder && !inOwner) return false
     }
 
     // keywords — array of terms, ANY match passes (used by LLM-fallback path)
@@ -248,6 +264,29 @@ function parseJsonFromText(text) {
   return JSON.parse(cleaned)
 }
 
+/**
+ * Models (especially smaller local ones) sometimes emit dotted flat keys like
+ * "tags.none" or "date.after" at the top level of filters instead of nesting.
+ * Fold them back into the nested shape applyFilters expects.
+ */
+function normalizeFilters(filters) {
+  if (!filters || typeof filters !== 'object') return filters
+  for (const key of Object.keys(filters)) {
+    const dot = key.indexOf('.')
+    if (dot <= 0) continue
+    const parent = key.slice(0, dot)
+    const child = key.slice(dot + 1)
+    if (typeof filters[parent] !== 'object' || filters[parent] === null) {
+      filters[parent] = {}
+    }
+    if (filters[parent][child] === undefined) {
+      filters[parent][child] = filters[key]
+    }
+    delete filters[key]
+  }
+  return filters
+}
+
 // ─── Public API ───────────────────────────────────────────────────────────────
 
 /**
@@ -269,12 +308,13 @@ export async function runAgentTurn({ userMessage, history, files }) {
   let parsedQuery = { intent: userMessage, filters: {}, sort: null }
   let llmAvailable = true
   try {
-    const parseRaw = await geminiGenerateContent({
+    const parseRaw = await llmGenerateContent({
       messages: parseMessages,
       systemInstruction: PARSE_SYSTEM,
       temperature: 0
     })
     parsedQuery = parseJsonFromText(parseRaw)
+    parsedQuery.filters = normalizeFilters(parsedQuery.filters)
     logger.debug(`[AgentService] parsed query: ${JSON.stringify(parsedQuery)}`)
   } catch (e) {
     llmAvailable = false
@@ -313,6 +353,7 @@ export async function runAgentTurn({ userMessage, history, files }) {
               ` | 上傳:${f.upload_time}` +
               ` | 公開:${f.is_public ? '是' : '否'}` +
               ` | 上傳者:${f.uploader_name}` +
+              ` | 位置:${f.location ?? ''}` +
               (f.tags.length ? ` | 標籤:${f.tags.join(',')}` : '') +
               (f.desc ? ` | 說明:${f.desc.slice(0, 80)}` : '')
           )
@@ -337,7 +378,7 @@ export async function runAgentTurn({ userMessage, history, files }) {
     }
   } else {
     try {
-      summary = await geminiGenerateContent({
+      summary = await llmGenerateContent({
         messages: [{ role: 'user', content: summaryUserMsg }],
         systemInstruction: SUMMARY_SYSTEM,
         temperature: 0.3

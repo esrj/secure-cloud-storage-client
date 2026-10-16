@@ -17,7 +17,55 @@ import mammoth from 'mammoth'
 import { logger } from '../Logger.js'
 
 const REASON_UNSUPPORTED = 'FORMAT_NOT_SUPPORTED_OR_EMPTY'
-const MAX_EXTRACT_BYTES = 100 * 1024 * 1024
+
+// ── Resource guards (V9) ──────────────────────────────────────────────────
+// Extraction runs on the MAIN process. A huge file or a malformed PDF could
+// otherwise read 100MB+ into memory, run multi-MB regex passes, or hang
+// pdf-parse/pdfjs/mammoth indefinitely — freezing the UI and the IPC bridge.
+// These bounds keep extraction cheap and non-blocking; classification only
+// needs a head+tail snippet anyway, so we never need the whole file.
+
+/** Skip files larger than this (classification doesn't need giant files). */
+const MAX_EXTRACT_BYTES = 30 * 1024 * 1024
+
+/** Per-file extraction wall-clock timeout. On timeout we fall back to filename-only. */
+const EXTRACT_TIMEOUT_MS = 20_000
+
+/**
+ * Cap the raw extracted text BEFORE cleaning, taking head + tail. Downstream
+ * classification only condenses to ~1.8k chars head+tail, so 200k is plenty
+ * and keeps cleanExtractedText's regex/​split passes bounded regardless of the
+ * source file size.
+ */
+const MAX_RAW_TEXT_CHARS = 200_000
+
+/**
+ * Race a promise against a timeout. On timeout the underlying work is left to
+ * settle on its own (we can't cancel pdf-parse mid-flight), but we stop waiting.
+ * @template T
+ * @param {Promise<T>} promise
+ * @param {number} ms
+ * @param {string} label
+ * @returns {Promise<T>}
+ */
+function withTimeout(promise, ms, label) {
+  let timer
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${label}_TIMEOUT_${ms}ms`)), ms)
+  })
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer))
+}
+
+/**
+ * Head+tail clamp of raw text so cleaning stays cheap on very large inputs.
+ * @param {string} raw
+ * @returns {string}
+ */
+function clampRawHeadTail(raw) {
+  if (typeof raw !== 'string' || raw.length <= MAX_RAW_TEXT_CHARS) return raw
+  const half = Math.floor(MAX_RAW_TEXT_CHARS / 2)
+  return raw.slice(0, half) + '\n…\n' + raw.slice(-half)
+}
 
 // ── CJS require helper ────────────────────────────────────────────────────────
 // electron-vite compiles main process code to CJS, so __filename is available.
@@ -277,7 +325,7 @@ export async function extractTextFromFiles(paths) {
 
     let raw = null
     try {
-      raw = await extractOne(filePath, ext)
+      raw = await withTimeout(extractOne(filePath, ext), EXTRACT_TIMEOUT_MS, 'EXTRACT')
     } catch (e) {
       logger.warn(`[TextExtract] Failed to extract "${filePath}": ${e.message}`)
       raw = null
@@ -285,7 +333,7 @@ export async function extractTextFromFiles(paths) {
 
     if (raw === null) continue
 
-    const text = cleanExtractedText(raw)
+    const text = cleanExtractedText(clampRawHeadTail(raw))
     if (isEffectivelyEmpty(text)) {
       logger.warn(
         `[TextExtract] "${filePath}" extracted but text is empty` +

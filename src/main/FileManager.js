@@ -11,7 +11,9 @@ import { randomUUID } from 'node:crypto'
 import {
   applyVisibleWatermark,
   applyInvisibleWatermark,
+  applyImageWatermarkMarkers,
   getMimeFromFilename,
+  getMimeFromBuffer,
   isWatermarkSupported
 } from './WatermarkProcessor'
 import { logger } from './Logger'
@@ -41,7 +43,8 @@ import {
 } from './services/preUploadClassifyCache.js'
 import {
   getUploadBatchSmartClassifyWanted,
-  getAppClassifierEnabled
+  getAppClassifierEnabled,
+  getSmartClassifyMode
 } from './services/classifierRuntime.js'
 
 // ──────────────────────────────────────────────────────────────────────
@@ -440,6 +443,9 @@ class FileManager {
     if (filePaths.length > 0) {
       const classifierWanted = getUploadBatchSmartClassifyWanted()
       const classifierEnabled = getAppClassifierEnabled()
+      // V11: snapshot the mode NOW (at pick time) so a later dropdown change
+      // can't alter how this batch is classified.
+      const classifyMode = getSmartClassifyMode()
       const classifyBatchKey =
         classifierWanted && classifierEnabled ? makeUploadBatchClassifyKey(filePaths) : null
 
@@ -461,7 +467,8 @@ class FileManager {
           (payload) =>
             GlobalValueManager.mainWindow?.webContents.send('preupload-classify-status', payload),
           classifyBatchKey,
-          filePaths
+          filePaths,
+          classifyMode
         )
       }
 
@@ -507,6 +514,34 @@ class FileManager {
         GlobalValueManager.sendNotice('Failed to get file list', 'error')
       }
     })
+  }
+
+  /**
+   * Smart-search scope: all of the user's own files (every folder) plus all
+   * public files of other users, metadata only. Resolves with parsed arrays
+   * and deliberately does NOT broadcast `file-list-res`, so the file list
+   * page keeps showing the folder the user is browsing.
+   * @returns {Promise<{ files: object[], folders: object[] }>}
+   */
+  async getAgentFileScopeProcess() {
+    const response = await new Promise((resolve, reject) => {
+      socket.timeout(15000).emit('get-agent-file-scope', {}, (timeoutErr, res) => {
+        if (timeoutErr) return reject(new Error('Server did not respond.'))
+        if (res?.errorMsg) return reject(new Error(res.errorMsg))
+        resolve(res)
+      })
+    })
+    const globalAttrs = (await this.abseManager.getPP())?.U || []
+    const files = JSON.parse(response.files)
+    const folders = JSON.parse(response.folders)
+    files.forEach((file) => {
+      file.tags = Array.isArray(file.tags) ? file.tags : []
+      file.attrs = Array.isArray(file.attrIds)
+        ? file.attrIds.map((id) => globalAttrs.at(id)).filter(Boolean)
+        : []
+    })
+    logger.info(`[Agent] file scope: ${files.length} file(s), ${folders.length} folder(s)`)
+    return { files, folders }
   }
 
   /**
@@ -818,11 +853,15 @@ class FileManager {
       return
     }
 
-    // 2. Save dialog
-    const { filePath, canceled } = await dialog.showSaveDialog({
+    // 2. Save dialog (parented to the main window so it can never open hidden
+    //    behind the app and leave this await hanging)
+    const saveOpts = {
       defaultPath: meta.name,
       properties: ['showOverwriteConfirmation', 'createDirectory']
-    })
+    }
+    const { filePath, canceled } = GlobalValueManager.mainWindow
+      ? await dialog.showSaveDialog(GlobalValueManager.mainWindow, saveOpts)
+      : await dialog.showSaveDialog(saveOpts)
     if (canceled) {
       logger.info('Download canceled.')
       GlobalValueManager.sendNotice('Download canceled.', 'error')
@@ -830,9 +869,20 @@ class FileManager {
     }
 
     const supportsWatermark = isWatermarkSupported(meta.name)
+    // [diag] Surfaces exactly what the main process decided at download time.
+    // If a watermark-supported file ends up un-watermarked, this line tells us
+    // whether `meta.name` (the server-side filename) failed mime detection.
+    logger.info(
+      `[Download][diag] fileId=${fileId} serverName="${meta.name}" mode=${mode} ` +
+        `mime=${getMimeFromFilename(meta.name) || 'null'} supportsWatermark=${supportsWatermark}`
+    )
 
     // 3a. Format does not support any watermark → plain download.
     if (!supportsWatermark) {
+      logger.warn(
+        `[Download][diag] NO watermark embedded — server filename "${meta.name}" did not ` +
+          `resolve to a supported mime, so this download skips the (silent) invisible watermark.`
+      )
       try {
         await this.downloadOriginalToPath(meta, filePath)
         GlobalValueManager.sendNotice('Success to download file', 'success')
@@ -864,7 +914,19 @@ class FileManager {
         'success'
       )
     } catch (_e) {
-      // helper has already surfaced an error notice
+      // downloadWatermarkedToPath writes to a temp file and only copies it to
+      // the user's chosen path AFTER watermarking succeeds. If watermarking
+      // throws, NO file lands at the destination — so we must NOT fail silently
+      // here (the user would otherwise see neither success nor a saved file).
+      // Surface a clear error. (Batch downloads use BatchDownloadManager's own
+      // per-item error UI, so this caller-side notice won't spam in batch mode.)
+      logger.error(`[Download] watermarked download failed: ${_e?.message || _e}`)
+      this.#sendDownloadErrorNotice(
+        _e?.message === 'WATERMARK_UNSUPPORTED_FORMAT'
+          ? 'This file format does not support watermarking.'
+          : 'Failed to apply watermark; the file was not saved.',
+        ContactManagerOrTryAgainMsg
+      )
     }
   }
 
@@ -1138,7 +1200,10 @@ class FileManager {
    */
   async getDownloadMeta(fileId) {
     const fileInfo = await new Promise((resolve, reject) => {
-      socket.emit('download-file-pre', { fileId }, (response) => {
+      // 15s ack timeout: a dead/reconnecting socket would otherwise buffer the
+      // emit forever and hang the download (and any batch) with no error.
+      socket.timeout(15000).emit('download-file-pre', { fileId }, (timeoutErr, response) => {
+        if (timeoutErr) return reject(new Error('Server did not respond (connection lost?).'))
         if (response?.errorMsg) return reject(new Error(response.errorMsg))
         if (!response?.fileInfo) return reject(new Error('File not found'))
         resolve(response.fileInfo)
@@ -1260,9 +1325,27 @@ class FileManager {
         // Invisible payload intentionally omits the user note (see _buildInvisibleWmText).
         const invisibleText = _buildInvisibleWmText(watermarkMeta)
 
+        // Route by the ACTUAL content type, not the filename extension. A file
+        // stored under a mismatched name (e.g. PDF content with a .png name)
+        // would otherwise be fed to the wrong engine and crash — Jimp throws
+        // "Mime type application/pdf does not support decoding".
+        const sniffedMime = getMimeFromBuffer(decryptedBuffer)
+        const effectiveMime = sniffedMime || mimeType
+        if (sniffedMime && sniffedMime !== mimeType) {
+          logger.warn(
+            `[Download] content type ${sniffedMime} differs from filename type ${mimeType} for "${meta.name}" — watermarking as ${sniffedMime}.`
+          )
+        }
+
         let processedBuffer = decryptedBuffer
+        // [diag] Confirms whether each watermark layer actually ran at runtime.
+        logger.info(
+          `[Download][diag] watermarking fileId=${fileId} mime=${effectiveMime || 'null'} ` +
+            `visible=${watermarkOptions?.visible === true} invisible=${watermarkOptions?.invisible === true} ` +
+            `decryptedBytes=${decryptedBuffer.length}`
+        )
         if (watermarkOptions?.visible === true) {
-          processedBuffer = await applyVisibleWatermark(processedBuffer, mimeType, {
+          processedBuffer = await applyVisibleWatermark(processedBuffer, effectiveMime, {
             text: visibleText,
             position: watermarkOptions?.position ?? 'bottomRight',
             opacity: watermarkOptions?.opacity ?? 0.3,
@@ -1270,8 +1353,20 @@ class FileManager {
           })
         }
         if (watermarkOptions?.invisible === true) {
-          processedBuffer = await applyInvisibleWatermark(processedBuffer, mimeType, {
+          processedBuffer = await applyInvisibleWatermark(processedBuffer, effectiveMime, {
             text: invisibleText
+          })
+          logger.info(
+            `[Download][diag] invisible watermark applied — bytes ${decryptedBuffer.length} → ${processedBuffer.length}`
+          )
+        }
+        // For images, (re)write the watermark metadata markers so they reflect
+        // EXACTLY what this download applied — invisible always, visible only
+        // when chosen — stripping any marker inherited from the source file.
+        if (effectiveMime === 'image/png' || effectiveMime === 'image/jpeg') {
+          processedBuffer = applyImageWatermarkMarkers(processedBuffer, effectiveMime, {
+            invisibleText: watermarkOptions?.invisible === true ? invisibleText : null,
+            visibleText: watermarkOptions?.visible === true ? visibleText : null
           })
         }
         // 4. Final writeFile — this is the moment the user actually has the

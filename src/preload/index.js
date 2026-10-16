@@ -80,11 +80,40 @@ if (process.contextIsolated) {
       askRequestedList: () => ipcRenderer.send('get-requested-list'),
       askDeleteRequest: (requestId) => ipcRenderer.send('delete-request', requestId),
       askRespondRequest: (responseInfo) => ipcRenderer.send('respond-request', responseInfo),
+      // Admin pages (the server enforces the admin role on every event)
+      adminListUsers: () => ipcRenderer.invoke('admin:list-users'),
+      adminExportConversations: (values) => ipcRenderer.invoke('admin:export-conversations', values),
+      adminUserDownloadLogs: (values) => ipcRenderer.invoke('admin:user-download-logs', values),
+      // Smart-search conversation log (server-side history)
+      agentLog: (values) => ipcRenderer.invoke('agent:log', values),
+      agentFileScope: () => ipcRenderer.invoke('agent:file-scope'),
+      agentMyHistory: (values) => ipcRenderer.invoke('agent:my-history', values),
       // Secret Sharing
       askShareSecret: (values) => ipcRenderer.invoke('share-secret', values),
       askRecoverSecret: (values) => ipcRenderer.invoke('recover-secret', values),
       sendEmailAuth: (values) => ipcRenderer.invoke('email-auth', values),
-      sendRecoverExtraKey: (values) => ipcRenderer.invoke('recover-extra-key', values)
+      sendRecoverExtraKey: (values) => ipcRenderer.invoke('recover-extra-key', values),
+      // Security-key (fingerprint) recovery. Invokes resolve to { ok, ... } or { ok: false, error, code }.
+      recoveryListMethods: () => ipcRenderer.invoke('recovery:list-methods'),
+      recoveryBindKey: (values) => ipcRenderer.invoke('recovery:bind-key', values),
+      recoveryDeleteMethod: (values) => ipcRenderer.invoke('recovery:delete-method', values),
+      recoveryRecoverWithKey: (values) => ipcRenderer.invoke('recovery:recover-with-key', values),
+      recoveryKeyInfo: () => ipcRenderer.invoke('recovery:key-info'),
+      recoverySetPin: (values) => ipcRenderer.invoke('recovery:set-pin', values),
+      recoveryEnrollFingerprint: (values) => ipcRenderer.invoke('recovery:enroll-fingerprint', values),
+      recoveryCancel: () => ipcRenderer.send('recovery:cancel'),
+      recoverySendPin: (requestId, pin) =>
+        ipcRenderer.send('recovery:pin-response', { requestId, pin }),
+      onRecoveryFidoEvent: (callback) => {
+        const handler = (_event, evt) => callback(evt)
+        ipcRenderer.on('recovery:fido-event', handler)
+        return () => ipcRenderer.removeListener('recovery:fido-event', handler)
+      },
+      onRecoveryPinRequest: (callback) => {
+        const handler = (_event, request) => callback(request)
+        ipcRenderer.on('recovery:pin-request', handler)
+        return () => ipcRenderer.removeListener('recovery:pin-request', handler)
+      }
     }
 
     // Merge smart-classify APIs:

@@ -1,7 +1,7 @@
 /**
  * This file is the parent of all other components
  */
-import { useState, useEffect, useMemo, useCallback } from 'react'
+import { useState, useEffect, useMemo, useCallback, useRef } from 'react'
 import NavBar, { PageType } from './components/NavBar.jsx'
 import MainView from './components/MainView.jsx'
 import Console from './components/Console.jsx'
@@ -10,8 +10,10 @@ import {
   PageContext,
   SearchContext,
   RequestContext,
-  GlobalAttrsContext
+  GlobalAttrsContext,
+  AgentChatContext
 } from './components/Contexts.jsx'
+import { WELCOME } from './components/AgentPage.jsx'
 import toast, { Toaster } from 'react-hot-toast'
 import { ResponseType, SearchType } from './components/Types.jsx'
 
@@ -21,6 +23,7 @@ function App() {
   const [storedEmail, setStoredEmail] = useState('')
   const [loggedIn, setLoggedIn] = useState(false)
   const [userId, setUserId] = useState('')
+  const [role, setRole] = useState('user')
   const [searchType, setSearchType] = useState(SearchType.name)
   const [searchTerm, setSearchTerm] = useState('')
   const [publicSearchTerm, setPublicSearchTerm] = useState('')
@@ -30,6 +33,11 @@ function App() {
   const [seenRequests, setSeenRequests] = useState(0)
   const [seenReplies, setSeenReplies] = useState(0)
   const [globalAttrs, setGlobalAttrs] = useState([])
+  // Agent chat: lifted here so the conversation survives page switches
+  const [agentMessages, setAgentMessages] = useState([WELCOME])
+  const agentHistoryRef = useRef([])
+  const agentConversationIdRef = useRef(crypto.randomUUID())
+  const agentHistoryLoadedForRef = useRef('')
 
   const login = useCallback(() => {
     window.electronAPI
@@ -39,6 +47,7 @@ function App() {
           setStoredName(userInfo.name)
           setStoredEmail(userInfo.email)
           setUserId(userInfo.userId)
+          setRole(userInfo.role === 'admin' ? 'admin' : 'user')
           toast.success('Login success')
         }
       })
@@ -52,10 +61,11 @@ function App() {
       storedNameC: [storedName, setStoredName],
       storedEmailC: [storedEmail, setStoredEmail],
       userIdC: [userId, setUserId],
+      roleC: [role, setRole],
       login: login,
       loggedIn
     }),
-    [storedName, storedEmail, userId]
+    [storedName, storedEmail, userId, role]
   )
   const requestContextValue = useMemo(
     () => ({
@@ -80,6 +90,14 @@ function App() {
     [globalAttrs]
   )
   const pageContextValue = useMemo(() => [pageType, swapPageHandler], [pageType])
+  const agentChatContextValue = useMemo(
+    () => ({
+      messagesC: [agentMessages, setAgentMessages],
+      historyC: agentHistoryRef,
+      conversationIdC: agentConversationIdRef
+    }),
+    [agentMessages]
+  )
 
   useEffect(() => {
     window.electronAPI.onNotice((result, level) => {
@@ -91,10 +109,11 @@ function App() {
         toast(result)
       }
     })
-    window.electronAPI.onUserConfig(({ name, email, userId }) => {
+    window.electronAPI.onUserConfig(({ name, email, userId, role }) => {
       setStoredName(name)
       setStoredEmail(email)
       setUserId(userId)
+      setRole(role === 'admin' ? 'admin' : 'user')
     })
     window.electronAPI.onLoginStatus(({ loggedIn }) => {
       setLoggedIn(loggedIn)
@@ -107,6 +126,43 @@ function App() {
       setGlobalAttrs(globalAttrs)
     })
   }, [])
+
+  // Restore the most recent smart-search conversation from the server once per
+  // login so the chat survives restarts. Never clobbers an active chat.
+  // The restored turns are shown and fed back to the model as context, but the
+  // conversation id is NOT adopted: every login opens a new server-side
+  // conversation, so the audit log stays segmented per session instead of
+  // growing into one record that spans days.
+  useEffect(() => {
+    if (!userId || agentHistoryLoadedForRef.current === userId) return
+    agentHistoryLoadedForRef.current = userId
+    let cancelled = false
+    void (async () => {
+      try {
+        const res = await window.electronAPI.agentMyHistory?.({ limit: 1 })
+        const conv = res?.ok ? res.conversations?.[0] : null
+        if (cancelled || !conv || !Array.isArray(conv.messages) || conv.messages.length === 0) return
+        if (agentHistoryRef.current.length > 0) return
+        const restored = conv.messages.map((m) => ({
+          id: m.id,
+          role: m.role === 'user' ? 'user' : 'assistant',
+          content: m.content,
+          files: [],
+          matchCount: 0,
+          totalCount: 0
+        }))
+        agentHistoryRef.current = conv.messages
+          .map((m) => ({ role: m.role, content: m.content }))
+          .slice(-12)
+        setAgentMessages([WELCOME, ...restored])
+      } catch (e) {
+        console.warn('[App] agent history restore failed:', e)
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [userId])
 
   function swapPageHandler(newPageType) {
     if (newPageType === PageType.reply) {
@@ -158,6 +214,7 @@ function App() {
           <RequestContext.Provider value={requestContextValue}>
             <SearchContext.Provider value={searchContextValue}>
               <GlobalAttrsContext.Provider value={globalAttrsContextValue}>
+                <AgentChatContext.Provider value={agentChatContextValue}>
                 <div className="flex flex-row h-screen w-screen justify-center">
                   <NavBar
                     pageType={pageType}
@@ -165,11 +222,12 @@ function App() {
                     seenRequest={seenRequests}
                     seenReply={seenReplies}
                   />
-                  <div className="flex flex-col grow">
+                  <div className="flex min-w-0 flex-col grow">
                     <MainView />
                     <Console />
                   </div>
                 </div>
+                </AgentChatContext.Provider>
               </GlobalAttrsContext.Provider>
             </SearchContext.Provider>
           </RequestContext.Provider>

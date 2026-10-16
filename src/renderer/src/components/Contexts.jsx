@@ -7,6 +7,7 @@ export const ProfileContext = createContext({
   storedNameC: ['', null],
   storedEmailC: ['', null],
   userIdC: ['', null],
+  roleC: ['user', null],
   login: null,
   loggedIn: false
 })
@@ -28,4 +29,10 @@ export const UserListContext = createContext({
 })
 export const GlobalAttrsContext = createContext({
   globalAttrs: []
+})
+// Agent chat state lives at App level so the conversation survives page switches.
+export const AgentChatContext = createContext({
+  messagesC: [[], null],
+  historyC: { current: [] },
+  conversationIdC: { current: '' }
 })

@@ -12,6 +12,7 @@ function mergeClassifierApisIntoElectronApi(electronApi) {
   };
   electronApi.classifyDocuments = (input) => electron.ipcRenderer.invoke("classify-documents", input);
   electronApi.preuploadClassifyGetSnapshot = (batchKey) => electron.ipcRenderer.invoke("preupload-classify-snapshot", batchKey);
+  electronApi.preuploadClassifyClear = (batchKey) => electron.ipcRenderer.invoke("preupload-classify-clear", batchKey);
   electronApi.startUploadFromFileList = (folderId) => electron.ipcRenderer.invoke("file-manager:start-upload", folderId);
   electronApi.requestFileList = (folderId) => electron.ipcRenderer.invoke("file-manager:refresh-list", folderId);
   electronApi.onFileListRes = (cb) => {
@@ -107,11 +108,39 @@ if (process.contextIsolated) {
       askRequestedList: () => electron.ipcRenderer.send("get-requested-list"),
       askDeleteRequest: (requestId) => electron.ipcRenderer.send("delete-request", requestId),
       askRespondRequest: (responseInfo) => electron.ipcRenderer.send("respond-request", responseInfo),
+      // Admin pages (the server enforces the admin role on every event)
+      adminListUsers: () => electron.ipcRenderer.invoke("admin:list-users"),
+      adminExportConversations: (values) => electron.ipcRenderer.invoke("admin:export-conversations", values),
+      adminUserDownloadLogs: (values) => electron.ipcRenderer.invoke("admin:user-download-logs", values),
+      // Smart-search conversation log (server-side history)
+      agentLog: (values) => electron.ipcRenderer.invoke("agent:log", values),
+      agentFileScope: () => electron.ipcRenderer.invoke("agent:file-scope"),
+      agentMyHistory: (values) => electron.ipcRenderer.invoke("agent:my-history", values),
       // Secret Sharing
       askShareSecret: (values) => electron.ipcRenderer.invoke("share-secret", values),
       askRecoverSecret: (values) => electron.ipcRenderer.invoke("recover-secret", values),
       sendEmailAuth: (values) => electron.ipcRenderer.invoke("email-auth", values),
-      sendRecoverExtraKey: (values) => electron.ipcRenderer.invoke("recover-extra-key", values)
+      sendRecoverExtraKey: (values) => electron.ipcRenderer.invoke("recover-extra-key", values),
+      // Security-key (fingerprint) recovery. Invokes resolve to { ok, ... } or { ok: false, error, code }.
+      recoveryListMethods: () => electron.ipcRenderer.invoke("recovery:list-methods"),
+      recoveryBindKey: (values) => electron.ipcRenderer.invoke("recovery:bind-key", values),
+      recoveryDeleteMethod: (values) => electron.ipcRenderer.invoke("recovery:delete-method", values),
+      recoveryRecoverWithKey: (values) => electron.ipcRenderer.invoke("recovery:recover-with-key", values),
+      recoveryKeyInfo: () => electron.ipcRenderer.invoke("recovery:key-info"),
+      recoverySetPin: (values) => electron.ipcRenderer.invoke("recovery:set-pin", values),
+      recoveryEnrollFingerprint: (values) => electron.ipcRenderer.invoke("recovery:enroll-fingerprint", values),
+      recoveryCancel: () => electron.ipcRenderer.send("recovery:cancel"),
+      recoverySendPin: (requestId, pin) => electron.ipcRenderer.send("recovery:pin-response", { requestId, pin }),
+      onRecoveryFidoEvent: (callback) => {
+        const handler = (_event, evt) => callback(evt);
+        electron.ipcRenderer.on("recovery:fido-event", handler);
+        return () => electron.ipcRenderer.removeListener("recovery:fido-event", handler);
+      },
+      onRecoveryPinRequest: (callback) => {
+        const handler = (_event, request) => callback(request);
+        electron.ipcRenderer.on("recovery:pin-request", handler);
+        return () => electron.ipcRenderer.removeListener("recovery:pin-request", handler);
+      }
     };
     mergeClassifierApisIntoElectronApi(electronAPIObj);
     mergeAgentApisIntoElectronApi(electronAPIObj);

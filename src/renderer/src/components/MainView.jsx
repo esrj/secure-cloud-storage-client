@@ -8,8 +8,8 @@ import PublicTable from './PublicTable'
 import FileTable from './FileTable'
 import ReplyTable from './ReplyTable'
 import WatermarkDetectPage from './WatermarkDetectPage'
-// DEMO_HIDE_SMART_FEATURES: AgentPage（智慧搜尋）暫時隱藏。要恢復時把下行的註解拿掉。
-// import AgentPage from './AgentPage'
+import AgentPage from './AgentPage'
+import AdminUsersPage from './AdminUsersPage'
 import { Card } from '@material-tailwind/react'
 import SearchBar from './SearchBar'
 import FileViewButtonGroup from './FileViewButtonGroup'
@@ -150,10 +150,10 @@ function MainView() {
         return <RequestTable requestedList={requestedList} />
       case PageType.watermarkDetect:
         return <WatermarkDetectPage />
-      // DEMO_HIDE_SMART_FEATURES: 智慧搜尋路由隱藏。NavBar 已拿掉入口；
-      // 這個 case 也一併註解，以免有 stale state 把使用者卡在空白頁。
-      // case PageType.agentSearch:
-      //   return <AgentPage />
+      case PageType.agentSearch:
+        return <AgentPage />
+      case PageType.adminUsers:
+        return <AdminUsersPage />
       default:
         return null
     }
@@ -164,10 +164,9 @@ function MainView() {
       <UserListContext.Provider value={userListContextValue}>
         <SelectionProvider>
           <Card className="flex grow gap-2 pt-2 items-start overflow-auto">
-            {/* DEMO_HIDE_SMART_FEATURES: 原本還有 `&& pageType !== PageType.agentSearch`
-                來隱藏 SearchBar，因為 AgentPage 已隱藏路由，不再需要這個條件。
-                要恢復時把條件加回去。 */}
-            {pageType !== PageType.watermarkDetect && (
+            {pageType !== PageType.watermarkDetect &&
+              pageType !== PageType.agentSearch &&
+              pageType !== PageType.adminUsers && (
               <div className="flex flex-row w-full gap-4 px-2 items-center">
                 <SearchBar />
                 {pageType === PageType.file && <FileViewButtonGroup curPath={curPath} />}

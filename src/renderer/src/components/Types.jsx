@@ -7,7 +7,8 @@ export const PageType = Object.freeze({
   reply: 'reply',
   request: 'request',
   watermarkDetect: 'watermarkDetect',
-  agentSearch: 'agentSearch'
+  agentSearch: 'agentSearch',
+  adminUsers: 'adminUsers'
 })
 
 export const ResponseType = Object.freeze({

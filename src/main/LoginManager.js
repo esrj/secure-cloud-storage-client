@@ -158,12 +158,20 @@ class LoginManager {
    * @param {*} param0
    * @returns
    */
+  /**
+   * The secrets a backup protects: wallet private key and PRE keys.
+   * Used by the password backup and by security-key binding (RecoveryManager).
+   */
+  getSecretKeys() {
+    return {
+      walletKey: this.blockchainManager.wallet.privateKey,
+      preKeys: this.keyManager.getKeyStrings()
+    }
+  }
+
   async shareSecret({ extraKey }) {
     try {
-      const secretKeys = {
-        walletKey: this.blockchainManager.wallet.privateKey,
-        preKeys: this.keyManager.getKeyStrings()
-      }
+      const secretKeys = this.getSecretKeys()
       logger.info('Generating secret shares...')
       const shares = await encryptDataShareKey(extraKey, JSON.stringify(secretKeys))
       const sharesStr = []
@@ -244,9 +252,14 @@ class LoginManager {
               deserializedShares.push(Buffer.from(share, 'base64'))
             }
             this.shares = deserializedShares
-            // Ask user to input extra key
+            // Recovery options: 'password' (extra key) and bound security keys ('fido').
+            // Older servers do not send methods; the password method is then the only option.
+            this.recoveryMethods = Array.isArray(response.methods)
+              ? response.methods
+              : [{ id: 'password', type: 'password' }]
+            // Ask user to input extra key or to use a security key
             // GlobalValueManager.mainWindow?.send('ask-extra-key')
-            resolve({ purpose: 'recover' })
+            resolve({ purpose: 'recover', methods: this.recoveryMethods })
           } else if (response.userId) {
             // Previous asked to register.
             await this.login()
@@ -269,8 +282,18 @@ class LoginManager {
    * @returns
    */
   async onRecoverExtraKey({ extraKey }) {
+    return this.restoreFromShares(extraKey, this.shares)
+  }
+
+  /**
+   * Decrypt secret shares with an extra key, restore the secret keys and log in.
+   * Shared by the password method and security-key recovery (RecoveryManager).
+   * @param {string} extraKey
+   * @param {Array<Buffer>} shares
+   */
+  async restoreFromShares(extraKey, shares) {
     try {
-      const decryptedStr = await recoverDataShareKey(extraKey, this.shares)
+      const decryptedStr = await recoverDataShareKey(extraKey, shares)
       if (!decryptedStr) {
         logger.info('Secret key recover failed.')
         // GlobalValueManager.sendNotice(

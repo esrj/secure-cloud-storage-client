@@ -3,10 +3,37 @@ import { logger } from '../Logger.js'
 import { classifyDocuments } from './ClassifyService.js'
 import { getClassifierSettings } from './classifierSettings.js'
 
-/** @typedef {{ state: 'running'|'done', result?: object, error?: string }} ClassifyEntry */
+/** @typedef {{ state: 'running'|'done', result?: object, error?: string, ts?: number }} ClassifyEntry */
+
+// ── Bounded cache (V7) ──────────────────────────────────────────────────────
+// Previously this Map grew forever: clearPreUploadClassifyEntry existed but was
+// never called, and every upload batch left a full LLM result behind. Over a
+// long session that is an unbounded memory leak. We now cap the number of
+// entries (LRU-ish: Map preserves insertion order, so we evict the oldest) and
+// expire stale entries by age. The renderer also explicitly clears an entry
+// when the PostUploadDialog closes (see preupload-classify-clear IPC).
+
+/** Maximum number of cached batch results kept in memory at once. */
+const MAX_CACHE_ENTRIES = 50
+
+/** Entries older than this are considered stale and may be dropped. */
+const CACHE_TTL_MS = 30 * 60 * 1000
 
 /** @type {Map<string, ClassifyEntry>} */
 const cache = new Map()
+
+/** Drop expired entries and enforce the max-entry cap (oldest-first). */
+function evictIfNeeded() {
+  const now = Date.now()
+  for (const [key, entry] of cache) {
+    if (entry?.ts && now - entry.ts > CACHE_TTL_MS) cache.delete(key)
+  }
+  while (cache.size > MAX_CACHE_ENTRIES) {
+    const oldest = cache.keys().next().value
+    if (oldest === undefined) break
+    cache.delete(oldest)
+  }
+}
 
 /**
  * Stable id for this picker session (same paths set → same key for upload batch + LM cache).
@@ -36,19 +63,23 @@ export function clearPreUploadClassifyEntry(batchKey) {
  * @param {(payload: object) => void} notify
  * @param {string} batchKey
  * @param {string[]} paths
+ * @param {'off'|'fast'|'medium'} [mode] mode snapshotted at file-pick time (V11)
  */
-export async function runPreUploadClassification(notify, batchKey, paths) {
-  cache.set(batchKey, { state: 'running' })
+export async function runPreUploadClassification(notify, batchKey, paths, mode) {
+  cache.set(batchKey, { state: 'running', ts: Date.now() })
+  evictIfNeeded()
   notify({ batchKey, phase: 'running' })
   try {
     const { classifierThreshold } = getClassifierSettings()
     const result = await classifyDocuments({
       enable: true,
       paths,
+      mode,
       threshold: classifierThreshold,
       onProgress: (p) => notify({ batchKey, phase: 'running', progress: p })
     })
-    cache.set(batchKey, { state: 'done', result })
+    cache.set(batchKey, { state: 'done', result, ts: Date.now() })
+    evictIfNeeded()
     notify({ batchKey, phase: 'finished', result })
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e)
@@ -62,7 +93,8 @@ export async function runPreUploadClassification(notify, batchKey, paths) {
       labels: [],
       final_labels: []
     }
-    cache.set(batchKey, { state: 'done', result: errResult })
+    cache.set(batchKey, { state: 'done', result: errResult, ts: Date.now() })
+    evictIfNeeded()
     notify({ batchKey, phase: 'finished', result: errResult })
   }
 }

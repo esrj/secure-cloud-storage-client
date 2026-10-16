@@ -11,13 +11,13 @@ import { PaperAirplaneIcon, TrashIcon } from '@heroicons/react/24/outline'
 import AgentMessageBubble from './AgentMessageBubble'
 import toast from 'react-hot-toast'
 import { parseFileList } from './Types'
-import { ProfileContext } from './Contexts'
+import { ProfileContext, AgentChatContext } from './Contexts'
 
-const WELCOME = {
+export const WELCOME = {
   id: 'welcome',
   role: 'assistant',
   content:
-    '你好！我是智慧搜尋助手。\n\n我可以依據檔名、標籤、分類、日期、大小等 metadata 幫你找到需要的文件。\n\n注意：基於安全設計，只有權限設為「公開」的檔案才可被搜尋。\n\n請問有什麼需要搜尋的嗎？',
+    '你好！我是智慧搜尋助手。\n\n我可以依據檔名、標籤、分類、日期、大小等 metadata 幫你找到需要的文件。\n\n注意：使用雲端 Gemini 模式時，僅權限設為「公開」的檔案可被搜尋；本機模型模式可搜尋目前清單內全部檔案。\n\n請問有什麼需要搜尋的嗎？',
   files: [],
   matchCount: 0,
   totalCount: 0
@@ -29,31 +29,45 @@ export default function AgentPage() {
     userIdC: [userId]
   } = useContext(ProfileContext)
 
-  const [messages, setMessages] = useState([WELCOME])
+  // Conversation state is lifted to App via AgentChatContext so it
+  // survives switching to other pages (AgentPage unmounts on switch).
+  const {
+    messagesC: [messages, setMessages],
+    historyC: historyRef,
+    conversationIdC: conversationIdRef
+  } = useContext(AgentChatContext)
+
   const [input, setInput] = useState('')
   const [loading, setLoading] = useState(false)
   const [fileList, setFileList] = useState([])
   const scrollRef = useRef(null)
   const isComposingRef = useRef(false)
 
-  // Keep a mutable ref of the latest history for the IPC call
-  const historyRef = useRef([])
+  const [folders, setFolders] = useState([])
+  const [scopeError, setScopeError] = useState('')
 
-  // Receive file list updates from the main process (same channel as FileTable)
-  useEffect(() => {
-    const unsub = window.electronAPI?.onFileListRes?.((result) => {
-      try {
-        // result.files is already a parsed array (FileManager enriches with tags before sending)
-        const parsed = parseFileList(result.files, false)
-        setFileList(parsed)
-      } catch (e) {
-        console.error('[AgentPage] parseFileList error:', e)
-      }
-    })
-    // Request a fresh file list on mount
-    void window.electronAPI?.requestFileList?.()
-    return () => unsub?.()
+  // Search scope = all of my files (every folder) + every public file of other
+  // users, metadata only. It has its own IPC so the file list page is never
+  // affected by what the agent loads.
+  const loadScope = useCallback(async () => {
+    try {
+      const res = await window.electronAPI.agentFileScope()
+      if (!res?.ok) throw new Error(res?.error || '未知錯誤')
+      const parsed = parseFileList(res.files, false)
+      setFileList(parsed)
+      setFolders(res.folders ?? [])
+      setScopeError('')
+      return parsed
+    } catch (e) {
+      console.error('[AgentPage] load scope error:', e)
+      setScopeError(e.message)
+      return null
+    }
   }, [])
+
+  useEffect(() => {
+    void loadScope()
+  }, [loadScope])
 
   // Auto-scroll to bottom whenever messages change
   useEffect(() => {
@@ -73,11 +87,15 @@ export default function AgentPage() {
     setMessages((prev) => [...prev, userMsg, thinkingMsg])
 
     try {
+      // Refresh the scope right before searching; fall back to the last list.
+      const scope = (await loadScope()) ?? fileList
       const result = await window.electronAPI.agentQuery({
         userMessage: text,
         history: historyRef.current,
-        rawFiles: fileList,
-        uploaderName: uploaderName ?? ''
+        rawFiles: scope,
+        folders,
+        uploaderName: uploaderName ?? '',
+        currentUserId: userId ?? ''
       })
 
       const assistantContent = result.ok
@@ -101,13 +119,26 @@ export default function AgentPage() {
       ].slice(-12) // keep last 6 exchanges
 
       setMessages((prev) => [...prev.filter((m) => m.id !== 'thinking'), assistantMsg])
+
+      // Persist the turn on the server (admin audit + cross-restart history).
+      // Fire-and-forget: a logging failure must never block the chat.
+      void window.electronAPI.agentLog?.({
+        conversationId: conversationIdRef.current,
+        provider: result.provider,
+        userMessage: text,
+        assistantMessage: assistantContent,
+        matchedFileIds: (result.ok ? (result.files ?? []) : [])
+          .map((f) => f.fileId ?? f.id ?? f.uuid)
+          .filter((id) => typeof id === 'string')
+          .slice(0, 100)
+      })
     } catch (e) {
       toast.error(`智慧搜尋失敗：${e.message}`)
       setMessages((prev) => prev.filter((m) => m.id !== 'thinking'))
     } finally {
       setLoading(false)
     }
-  }, [input, loading, fileList])
+  }, [input, loading, fileList, folders, userId, uploaderName, loadScope])
 
   function handleKeyDown(e) {
     if (e.key === 'Enter' && !e.shiftKey && !isComposingRef.current) {
@@ -119,7 +150,9 @@ export default function AgentPage() {
   function clearChat() {
     setMessages([WELCOME])
     historyRef.current = []
-    void window.electronAPI?.requestFileList?.()
+    // A cleared chat starts a new server-side conversation.
+    conversationIdRef.current = crypto.randomUUID()
+    void loadScope()
   }
 
   return (
@@ -130,9 +163,11 @@ export default function AgentPage() {
           <Typography variant="h6" className="text-blue-gray-900">
             智慧搜尋助手
           </Typography>
-          <Typography variant="small" color="gray" className="text-xs">
-            僅搜尋公開（perm=公開）檔案，不讀取內容・可搜尋 {fileList.filter(f => f.perm === 1).length} / {fileList.length} 份
-          </Typography>
+          {scopeError && (
+            <Typography variant="small" className="text-xs text-red-500">
+              清單載入失敗：{scopeError}
+            </Typography>
+          )}
         </div>
         <button
           onClick={clearChat}
@@ -186,7 +221,7 @@ export default function AgentPage() {
           </Button>
         </div>
         <Typography variant="small" className="mt-1.5 text-center text-xs text-blue-gray-400">
-          Enter 送出・Shift+Enter 換行・僅搜尋已載入的當前資料夾
+          Enter 送出・Shift+Enter 換行・搜尋我的全部檔案與所有公開檔案的 metadata
         </Typography>
       </div>
     </div>
